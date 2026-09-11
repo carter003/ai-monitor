@@ -5,7 +5,7 @@ use std::{
 };
 /// 配置文件里出现的键。声明为常量而不是结构体字段：解析器是手写的平面
 /// reader（见 `parse_config`），这个表既驱动解析也充当未知键守卫。
-const KEYS: [&str; 8] = [
+const KEYS: [&str; 9] = [
     "refresh_seconds",
     "codex_home",
     "agy_home",
@@ -13,6 +13,7 @@ const KEYS: [&str; 8] = [
     "opencode_home",
     "grok_home",
     "openrouter_key_file",
+    "go2_key_file",
     "usage_db",
 ];
 
@@ -25,6 +26,7 @@ struct FileConfig {
     opencode_home: Option<String>,
     grok_home: Option<String>,
     openrouter_key_file: Option<String>,
+    go2_key_file: Option<String>,
     usage_db: Option<String>,
 }
 
@@ -58,12 +60,13 @@ fn parse_config(text: &str) -> Result<FileConfig, String> {
                     })?);
             }
             _ if is_quoted => match key {
+                "openrouter_key_file" => config.openrouter_key_file = Some(unquoted.to_owned()),
+                "go2_key_file" => config.go2_key_file = Some(unquoted.to_owned()),
                 "codex_home" => config.codex_home = Some(unquoted.to_owned()),
                 "agy_home" => config.agy_home = Some(unquoted.to_owned()),
                 "agy2_home" => config.agy2_home = Some(unquoted.to_owned()),
                 "opencode_home" => config.opencode_home = Some(unquoted.to_owned()),
                 "grok_home" => config.grok_home = Some(unquoted.to_owned()),
-                "openrouter_key_file" => config.openrouter_key_file = Some(unquoted.to_owned()),
                 "usage_db" => config.usage_db = Some(unquoted.to_owned()),
                 _ => unreachable!("KEYS 与 match 分支一一对应"),
             },
@@ -83,6 +86,8 @@ pub struct Config {
     pub opencode: PathBuf,
     pub grok: PathBuf,
     pub openrouter_key: PathBuf,
+    /// 第二把 OpenCode Go 订阅 Key 的文件，一行纯文本。
+    pub go2_key: PathBuf,
     /// sqlite database written by the herdr-usage collector. Read-only here.
     pub usage_db: PathBuf,
 }
@@ -138,6 +143,7 @@ impl Config {
                 file.openrouter_key_file,
                 config_root.join("ai-monitor/openrouter.key"),
             ),
+            go2_key: expand(file.go2_key_file, config_root.join("ai-monitor/go2.key")),
             usage_db: expand(file.usage_db, home.join(".local/share/herdr/usage.db")),
             home,
         })
@@ -178,6 +184,7 @@ agy2_home = "/tmp/agy2"
 opencode_home = "/tmp/opencode"
 grok_home = "/tmp/grok"
 openrouter_key_file = "/tmp/key"
+go2_key_file = "/tmp/go2.key"
 usage_db = "/tmp/usage.db"
 "#;
         let parsed = parse_config(text).expect("all keys declared");

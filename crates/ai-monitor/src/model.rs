@@ -6,16 +6,18 @@ pub enum Source {
     Agy,
     Agy2,
     Go,
+    Go2,
     Grok,
     OpenRouter,
 }
 
 impl Source {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Codex,
         Self::Agy,
         Self::Agy2,
         Self::Go,
+        Self::Go2,
         Self::Grok,
         Self::OpenRouter,
     ];
@@ -26,6 +28,7 @@ impl Source {
             Self::Agy => "AGY",
             Self::Agy2 => "AGY2",
             Self::Go => "OpenCode Go",
+            Self::Go2 => "OpenCode GO-2",
             Self::Grok => "SuperGrok",
             Self::OpenRouter => "OpenRouter",
         }
@@ -144,16 +147,13 @@ impl ModelUsage {
     }
 }
 
-/// Token totals for one interval, with the share of events that could be priced.
+/// Token totals for one interval.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct UsageTotal {
     /// Gross input plus gross output.
     pub tokens: u64,
     /// Sum of priceable events only; unpriced events contribute nothing.
     pub cost: f64,
-    /// `priced / (all - ignored)`. `None` when the denominator is zero, which
-    /// happens on an empty database and must not read as "0% priced".
-    pub coverage: Option<f64>,
 }
 
 /// A histogram whose buckets come from calendar fields, so the caller supplies
@@ -163,14 +163,9 @@ pub struct Bucketed {
     /// One entry per bucket; empty buckets are present as zeros so the bars line
     /// up with their labels.
     pub buckets: Vec<u64>,
-    /// Leftmost bucket's index (hour 0-23, day 1-31 or month 1-12).
-    pub first_bucket: u32,
-}
-
-impl Bucketed {
-    pub fn is_empty(&self) -> bool {
-        self.buckets.iter().all(|value| *value == 0)
-    }
+    /// Money spent in each bucket, index-aligned with `buckets`. Carried beside
+    /// the tokens so the money chart reuses the same query and buckets.
+    pub costs: Vec<f64>,
 }
 
 /// Everything the token page needs, refreshed on its own slow cadence.
@@ -178,10 +173,11 @@ impl Bucketed {
 pub struct UsageStats {
     /// At most six models, already ordered by total tokens descending.
     pub models: Vec<ModelUsage>,
-    pub day: Bucketed,
-    pub week: Bucketed,
+    /// Today, cut into quarter hours: 96 buckets, index 0 is 00:00 local.
+    pub hours: Bucketed,
+    /// This month, cut into six-hour blocks: four buckets per day, index 0 is
+    /// the first day at 00:00 local.
     pub month: Bucketed,
-    pub year: Bucketed,
     pub day_total: UsageTotal,
     pub week_total: UsageTotal,
     pub month_total: UsageTotal,

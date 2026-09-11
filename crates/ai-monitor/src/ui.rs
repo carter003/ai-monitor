@@ -1,15 +1,15 @@
 use crate::{
-    model::{Bucketed, ModelUsage, SourceState, UsageStats, UsageTotal, countdown},
+    model::{ModelUsage, SourceState, UsageStats, UsageTotal, countdown},
     system::{SystemStats, gib},
 };
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, Borders, Gauge, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-        Sparkline,
+        Block, BorderType, Borders, Gauge, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Sparkline,
     },
 };
 
@@ -24,9 +24,34 @@ const LIGHT_INK: Color = Color::Rgb(245, 248, 250);
 /// Columns reserved for the histogram Y-axis labels, including the leading
 /// space. Sized for the widest label `axis_label` can produce (`999M`).
 const AXIS_WIDTH: usize = 6;
-const DAILY_QUOTA: u64 = 300_000_000;
-const WEEKLY_QUOTA: u64 = 2_000_000_000;
-const MONTHLY_QUOTA: u64 = 8_000_000_000;
+/// Model-name columns the ranking keeps before it starts sacrificing value
+/// columns; below this a name is unreadable and the columns are worth less.
+const NAME_MIN: usize = 10;
+/// Terminal columns between the model name and its first value.
+const NAME_GAP: usize = 1;
+/// Terminal columns between two right-aligned value columns, so `OUT` and
+/// `THINK` never read as one word.
+const VALUE_GAP: usize = 1;
+/// Terminal columns between the model ranking and the summary column, so the
+/// last value on the left never runs into the first label on the right.
+const BLOCK_GAP: usize = 2;
+/// Narrowest token pane that still fits the ranking and the summary side by
+/// side. Below it the two stack, each using the full pane.
+const SPLIT_MIN_WIDTH: u16 = 64;
+/// Widest frame drawn around the historical total: on a very wide summary
+/// column an unbounded frame would leave the numbers floating in it.
+const TOTAL_BOX_MAX: usize = 34;
+/// Fixed Y-axis ceilings for the local-burn charts: the hourly chart against
+/// 200M tokens, the daily chart against 2B, and the money chart against $400.
+/// Bars are drawn as a share of these, which is also what picks their colour.
+const HOURLY_CEILING: f64 = 200_000_000.;
+const DAILY_CEILING: f64 = 2_000_000_000.;
+const COST_CEILING: f64 = 400.;
+/// Bar colours by share of the ceiling: light green with headroom, blue in the
+/// middle, dark blue near the top, red at the ceiling.
+const BAR_LOW: Color = Color::Rgb(76, 175, 80);
+const BAR_MID: Color = Color::Rgb(33, 150, 243);
+const BAR_HIGH: Color = Color::Rgb(13, 71, 161);
 
 #[derive(Default)]
 pub struct View {
@@ -55,18 +80,22 @@ impl FooterAction {
     /// The hints for a footer with `room` usable columns, left to right. Narrow
     /// panes drop the scroll reminder, which only appears when there is
     /// something to scroll.
-    fn row(room: usize, scrollable: bool) -> Vec<(&'static str, FooterAction)> {
+    /// Each hint is `(label, key start, key length, action)`: `key start` and
+    /// `key length` slice the label's chars into the key itself (`r`, `↑↓`),
+    /// which `draw` renders in the accent ink so the keyboard part of a hint
+    /// stands out from its description.
+    fn row(room: usize, scrollable: bool) -> Vec<(&'static str, usize, usize, FooterAction)> {
         let mut hints = if room >= 30 {
-            vec![(" r 刷新   ", FooterAction::Refresh)]
+            vec![(" r 刷新   ", 1, 1, FooterAction::Refresh)]
         } else if room >= 20 {
-            vec![(" r 刷新  ", FooterAction::Refresh)]
+            vec![(" r 刷新  ", 1, 1, FooterAction::Refresh)]
         } else if room >= 10 {
-            vec![(" r  ", FooterAction::Refresh)]
+            vec![(" r  ", 1, 1, FooterAction::Refresh)]
         } else {
             vec![]
         };
         if room >= 30 && scrollable {
-            hints.push(("↑↓ 滚动   ", FooterAction::ScrollUp));
+            hints.push(("↑↓ 滚动   ", 0, 2, FooterAction::ScrollUp));
         }
         hints
     }
@@ -88,7 +117,9 @@ pub fn draw(
         view.footer_row = None;
         view.body = None;
         frame.render_widget(
-            Paragraph::new("ai-monitor\n请拉宽或拉高窗格\nq 退出").style(Style::default().fg(CYAN)),
+            Paragraph::new("ai-monitor\n请拉宽或拉高窗格\nq 退出")
+                .style(Style::default().fg(CYAN))
+                .alignment(Alignment::Center),
             area,
         );
         return;
@@ -119,20 +150,49 @@ pub fn draw(
     let quota_inner = panel(frame, quota_area, " AI 额度 · 剩余 ");
     let token_inner = panel(frame, token_area, " 本地消耗 · Token (24H) ");
 
+    // The three local-burn charts own the bottom 60% of the token panel, an
+    // equal fifth each, and are drawn straight into their rects so they never
+    // scroll; the ranking and the summary keep the top 40% and scroll within
+    // it. The split is computed in whole rows — four tenths for the list, the
+    // rest cut into three exactly equal charts, any leftover row going back
+    // to the list — because percentage constraints round each chunk on its
+    // own and would hand the three charts unequal heights. A chart needs a
+    // title, one bar row, the baseline and its tick row; a pane too short for
+    // that hands the whole panel back to the list.
+    let inner_h = token_inner.height as usize;
+    let chart_h = ((inner_h - inner_h * 4 / 10) / 3) as u16;
+    let token_parts = Layout::vertical([
+        Constraint::Length(token_inner.height.saturating_sub(3 * chart_h)),
+        Constraint::Length(chart_h),
+        Constraint::Length(chart_h),
+        Constraint::Length(chart_h),
+    ])
+    .split(token_inner);
+    let charts_drawn = chart_h >= 4 && token_parts[1].width >= (AXIS_WIDTH + 3) as u16;
+    let token_top = if charts_drawn {
+        token_parts[0]
+    } else {
+        token_inner
+    };
+
     let quota = quota_panel_lines(states, quota_inner, now);
-    let token = token_panel_lines(usage, token_inner);
+    let token = token_panel_lines(usage, token_top);
 
     // Both lists share one offset: a wheel or an arrow key moves the page, and
     // neither column needs its own focus. Each clamps to its own end, so the
-    // shorter list simply stops while the longer one keeps going.
+    // shorter list simply stops while the longer one keeps going. The charts
+    // sit outside that bargain: they never scroll, whatever the lists do.
     let quota_max = quota.len().saturating_sub(quota_inner.height as usize);
-    let token_max = token.len().saturating_sub(token_inner.height as usize);
-    view.page_size = (quota_inner.height as usize).max(token_inner.height as usize);
+    let token_max = token.len().saturating_sub(token_top.height as usize);
+    view.page_size = (quota_inner.height as usize).max(token_top.height as usize);
     view.max_scroll = quota_max.max(token_max);
     view.scroll = view.scroll.min(view.max_scroll);
     let scroll = view.scroll;
     render_panel_lines(frame, quota_area, quota_inner, quota, scroll.min(quota_max));
-    render_panel_lines(frame, token_area, token_inner, token, scroll.min(token_max));
+    render_panel_lines(frame, token_top, token_top, token, scroll.min(token_max));
+    if charts_drawn {
+        draw_charts(frame, &token_parts[1..], usage);
+    }
 
     // The footer shares its row with the version stamp, so hints are dropped as
     // the pane narrows. The same table drives both the rendered text and the
@@ -140,8 +200,11 @@ pub fn draw(
     let room = (area.width as usize).saturating_sub(version.len() + 1);
     let hints = FooterAction::row(room, view.max_scroll > 0);
     let mut footer = String::from(" ");
+    let mut hint_spans: Vec<Span<'static>> = vec![Span::raw(" ")];
+    let muted = Style::default().fg(MUTED);
+    let key = Style::default().fg(CYAN).add_modifier(Modifier::BOLD);
     view.footer_hits.clear();
-    for (label, action) in hints {
+    for (label, key_start, key_len, action) in hints {
         // Hit columns are absolute in the footer row, so account for the lead.
         let start = footer.chars().count();
         // A multi-character glyph is one terminal column here: the labels are
@@ -153,10 +216,23 @@ pub fn draw(
             (start + width).saturating_sub(1) as u16,
             action,
         ));
+        // The label is re-cut around the key so the key itself reads in the
+        // accent ink while the description stays muted.
+        let chars: Vec<char> = label.chars().collect();
+        let (head, key_part, tail) = (
+            &chars[..key_start],
+            &chars[key_start..key_start + key_len],
+            &chars[key_start + key_len..],
+        );
+        hint_spans.push(Span::styled(head.iter().collect::<String>(), muted));
+        hint_spans.push(Span::styled(key_part.iter().collect::<String>(), key));
+        hint_spans.push(Span::styled(tail.iter().collect::<String>(), muted));
     }
     // The exit hint stays keyboard-only: it is always last, so clicking it would
     // be an accidental quit, which is the one action a stray click must not fire.
     footer.push_str("q 退出");
+    hint_spans.push(Span::styled("q", key));
+    hint_spans.push(Span::styled(" 退出", muted));
     let bar = Layout::horizontal([Constraint::Min(0), Constraint::Length(version.len() as u16)])
         .split(parts[1]);
     // Everything above the footer is the page body, so a click or wheel inside
@@ -168,10 +244,7 @@ pub fn draw(
         width: area.width,
         height: parts[1].y.saturating_sub(area.y),
     });
-    frame.render_widget(
-        Paragraph::new(footer).style(Style::default().fg(MUTED)),
-        bar[0],
-    );
+    frame.render_widget(Paragraph::new(Line::from(hint_spans)), bar[0]);
     frame.render_widget(
         Paragraph::new(version)
             .style(Style::default().fg(MUTED))
@@ -192,7 +265,9 @@ fn sidebar_width(width: u16) -> u16 {
 fn panel(frame: &mut Frame, area: Rect, title: &str) -> Rect {
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .title(title)
+        .title_style(Style::default().fg(CYAN).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(CYAN));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -260,7 +335,9 @@ fn render_panel_lines(
 fn draw_system(frame: &mut Frame, area: Rect, stats: &SystemStats) {
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .title(" 系统资源 · 已用 ")
+        .title_style(Style::default().fg(CYAN).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(MUTED));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -639,80 +716,104 @@ fn age(seconds: i64) -> String {
 // Token panel
 // ---------------------------------------------------------------------------
 
-/// Assemble the token panel body. `caveat` is listed first so that, when the pane
-/// is short, the disappearing rows are the least load-bearing ones — the totals
-/// line is what the page exists for.
+/// The model ranking and the summary column, side by side.
+///
+/// The top block pairs the ranking (left) with the interval summary and the
+/// historical total (right), so the numbers a reader compares sit next to each
+/// other. The three histograms are drawn straight into the panel's bottom 60%
+/// (see `draw_charts`) and never scroll, so this block owns the top 40% alone.
+/// When that share cannot hold the block the model count gives way first —
+/// the total is the anchor and is the last thing to give way.
 fn token_lines(usage: &UsageStats, width: u16, height: usize) -> Vec<Line<'static>> {
-    // The total is the anchor of this page, so the sections are assembled
-    // largest-first and the ones that do not fit are left out; the pane is only
-    // allowed to scroll when even the minimum set overflows.
-    let caveat = (width as usize >= 46).then(|| {
-        Line::styled(
-            " 模型表为近24小时；总计为历史全量；日/周/月为各自区间",
-            Style::default().fg(MUTED),
-        )
-    });
-    let total = total_line(&usage.all_total, width);
-    let summary = interval_summary(usage, width);
-
-    // Ordered by what to give up first: the caveat and the year histogram matter
-    // least, the summary rows and the total matter most. `bars` is the histogram
-    // height in character rows: taller charts are tried first and only shrink
-    // when the pane cannot hold them alongside the rest.
-    for (models, histograms, bars, summary_rows, caveat_shown) in [
-        (6usize, 3usize, 4usize, true, true),
-        (6, 3, 4, true, false),
-        (6, 3, 3, true, false),
-        (6, 2, 3, true, false),
-        (6, 2, 2, true, false),
-        (6, 1, 2, true, false),
-        (6, 1, 1, true, false),
-        (6, 0, 0, true, false),
-        (4, 0, 0, true, false),
-        (3, 0, 0, false, false),
-        (2, 0, 0, false, false),
-        (1, 0, 0, false, false),
-    ] {
-        let mut lines: Vec<Line<'static>> = vec![];
-        if models > 0 {
-            lines.extend(model_table(&usage.models, width, models));
-            lines.push(Line::raw(""));
+    let top = |models: usize| -> Vec<Line<'static>> {
+        match top_block_widths(width) {
+            Some((left, right)) => {
+                let table = (models > 0).then(|| {
+                    model_table(&usage.models, left.saturating_sub(BLOCK_GAP as u16), models)
+                });
+                join_columns(
+                    table.unwrap_or_default(),
+                    stats_column(usage, right),
+                    left as usize,
+                )
+            }
+            // Too narrow for two columns: the ranking spans the pane and the
+            // summary follows it, each keeping its full width.
+            None => {
+                let mut lines = vec![];
+                if models > 0 {
+                    lines.extend(model_table(&usage.models, width, models));
+                    lines.push(Line::raw(""));
+                }
+                lines.extend(stats_column(usage, width));
+                lines
+            }
         }
-        if histograms > 0 {
-            lines.extend(histograms_section(usage, width, histograms, bars));
-            lines.push(Line::raw(""));
-        }
-        if summary_rows {
-            lines.extend(summary.iter().cloned());
-            lines.push(Line::raw(""));
-        }
-        if let (true, Some(caveat)) = (caveat_shown, &caveat) {
-            lines.push(caveat.clone());
-        }
-        lines.push(total.clone());
+    };
+    for models in [6usize, 4, 3, 2, 1, 0] {
+        let lines = top(models);
         if lines.len() <= height.max(1) {
             return lines;
         }
     }
-    // Even the minimum set overflows: keep the total and let the pane scroll.
-    let mut lines = vec![];
-    if let Some(caveat) = &caveat {
-        lines.push(caveat.clone());
-    }
-    lines.push(total);
-    lines
+    // Even the summary column overflows: keep the total, the one figure the pane
+    // exists for, and let the pane scroll.
+    total_card(&usage.all_total, width as usize)
+}
+
+/// Widths of the top block's two columns: the model ranking takes 70% of the
+/// pane and the summary column the remaining 30%. `None` below
+/// `SPLIT_MIN_WIDTH`, where both would be too cramped to read and the two
+/// stack instead.
+fn top_block_widths(width: u16) -> Option<(u16, u16)> {
+    (width >= SPLIT_MIN_WIDTH).then(|| {
+        let left = width * 7 / 10;
+        (left, width - left)
+    })
+}
+
+/// Paste two line blocks side by side. The left block is padded to exactly
+/// `left_width` terminal columns, so every right-hand line starts in the same
+/// column; a block that runs out of rows simply leaves blanks.
+fn join_columns(
+    left: Vec<Line<'static>>,
+    right: Vec<Line<'static>>,
+    left_width: usize,
+) -> Vec<Line<'static>> {
+    let rows = left.len().max(right.len());
+    (0..rows)
+        .map(|row| {
+            let mut spans: Vec<Span<'static>> = left
+                .get(row)
+                .map(|line| line.spans.clone())
+                .unwrap_or_default();
+            let used: usize = spans.iter().map(|span| columns(&span.content)).sum();
+            if used < left_width {
+                spans.push(Span::raw(" ".repeat(left_width - used)));
+            }
+            if let Some(line) = right.get(row) {
+                spans.extend(line.spans.iter().cloned());
+            }
+            Line::from(spans)
+        })
+        .collect()
 }
 
 fn model_table(models: &[ModelUsage], width: u16, limit: usize) -> Vec<Line<'static>> {
     if models.is_empty() {
-        return vec![Line::styled(" 暂无用量记录", Style::default().fg(MUTED))];
+        return vec![Line::from(Span::styled(
+            " 暂无用量记录",
+            Style::default().fg(MUTED),
+        ))];
     }
     let taken: Vec<&ModelUsage> = models.iter().take(limit).collect();
-    // One header band names the columns; each model then takes two rows, a
-    // centred name and its values in the header's slots. The IN slot must hold
-    // the widest cell shown (the hit ratio rides inside it), the rest are
+    // One row per model: the name opens the row and the values follow in fixed
+    // slots, so a reader reads across instead of pairing two rows. The name
+    // column takes whatever the value columns leave; the IN slot must hold the
+    // widest cell shown (the hit ratio rides inside it), the rest are
     // fixed-width numbers. Narrow panes drop columns from the right (`COST`,
-    // then `合计`, then `THINK`); `IN` and `OUT` always survive.
+    // then `合计`, then `THINK`) rather than shrinking the name past
+    // `NAME_MIN`; `IN` and `OUT` always survive.
     let available = width as usize;
     let mut cols: Vec<(&str, usize)> = vec![
         (
@@ -729,101 +830,211 @@ fn model_table(models: &[ModelUsage], width: u16, limit: usize) -> Vec<Line<'sta
         ("合计", 6),
         ("COST", 7),
     ];
-    while cols.len() > 2 && (1 + cols.iter().map(|c| c.1).sum::<usize>()) > available {
+    // A value column's width is the width of its widest cell; `VALUE_GAP`
+    // separates the right-aligned columns so two numbers never run together
+    // (`OUTTHINK`), and the name keeps `NAME_GAP` before the first value.
+    let numeric_width = |cols: &[(&str, usize)]| {
+        cols.iter().map(|c| c.1).sum::<usize>() + cols.len().saturating_sub(1) * VALUE_GAP
+    };
+    while cols.len() > 2 && (NAME_MIN + NAME_GAP + numeric_width(&cols)) > available {
         cols.pop();
     }
-    let mins: usize = cols.iter().map(|c| c.1).sum();
-    let leftover = available.saturating_sub(mins);
-    let k = cols.len();
-    let base = leftover / k;
-    let extra = leftover % k;
-    let widths: Vec<usize> = cols
-        .iter()
-        .enumerate()
-        .map(|(i, c)| c.1 + base + (i < extra) as usize)
-        .collect();
-    // Right-align each cell in its slot and tile the whole pane, so the band
-    // is flush to both edges and every label sits above its value.
-    let band = |cells: Vec<(String, Color)>| -> Line<'static> {
-        let mut spans = vec![];
+    // The single gutter between the name and the first value column: every
+    // value column is right-aligned in its slot, so the name never touches a
+    // number.
+    let name_width = available.saturating_sub(numeric_width(&cols) + NAME_GAP);
+    // A row is the name, padded to the name column plus its gutter, then each
+    // value right-aligned in its own slot and separated by a gap. `slack` is
+    // measured in terminal columns, so the wide `合计` label lines up with its
+    // value.
+    let row = |name: (&str, Color), cells: Vec<(String, Color)>| -> Line<'static> {
+        let count = cells.len();
+        let mut spans = vec![Span::styled(
+            format!(
+                "{}{}",
+                name.0,
+                " ".repeat((name_width + NAME_GAP).saturating_sub(columns(name.0)))
+            ),
+            Style::default().fg(name.1),
+        )];
         for (index, (text, color)) in cells.into_iter().enumerate() {
-            let slack = widths[index].saturating_sub(columns(&text));
+            let slack = cols[index].1.saturating_sub(columns(&text));
             spans.push(Span::styled(
                 format!("{}{}", " ".repeat(slack), text),
                 Style::default().fg(color),
             ));
+            if index + 1 < count {
+                spans.push(Span::raw(" ".repeat(VALUE_GAP)));
+            }
         }
         Line::from(spans)
     };
-    let mut lines = vec![band(
+    let mut lines = vec![row(
+        ("模型", MUTED),
         cols.iter()
             .map(|(label, _)| (label.to_string(), MUTED))
             .collect(),
     )];
     for model in &taken {
-        // The name is centred across the pane, reading as a caption for the
-        // value row beneath it.
-        let name = truncate(&model.model, available.saturating_sub(2).max(1));
-        let pad = available.saturating_sub(columns(&name)) / 2;
-        lines.push(Line::from(vec![
-            Span::raw(" ".repeat(pad)),
-            Span::styled(name, Style::default().fg(CYAN)),
-        ]));
         let cost = match model.cost {
             Some(c) => (money(c), GREEN),
             None => ("—".into(), MUTED),
         };
-        let mut cells: Vec<(String, Color)> = vec![
-            (model.input_display(), INK),
-            (compact(model.output), INK),
-            (compact(model.reasoning), MUTED),
-            (compact(model.total_tokens()), INK),
-            (cost.0, cost.1),
-        ];
-        cells.truncate(cols.len());
-        lines.push(band(cells));
+        lines.push(row(
+            (&truncate(&model.model, name_width), CYAN),
+            vec![
+                (model.input_display(), INK),
+                (compact(model.output), INK),
+                (compact(model.reasoning), MUTED),
+                (compact(model.total_tokens()), INK),
+                (cost.0, cost.1),
+            ]
+            .into_iter()
+            .take(cols.len())
+            .collect(),
+        ));
     }
     lines
 }
 
-/// One block per group: the plot, the axis, the tick line, then the period name.
-///
-/// The chart runs left to right across the pane against a labelled Y axis, and
-/// the period it covers (`本年` / `当月` / `当日`) sits *below* it, where the eye
-/// lands after reading the shape. `rows` is the bar height in character rows.
-fn histograms_section(
-    usage: &UsageStats,
-    width: u16,
-    groups: usize,
-    rows: usize,
-) -> Vec<Line<'static>> {
-    let mut lines = vec![];
-    let available = [
-        ("当日", &usage.day, DAILY_QUOTA),
-        ("本周", &usage.week, WEEKLY_QUOTA),
-        ("当月", &usage.month, MONTHLY_QUOTA),
-    ];
-    let keep = groups.min(available.len());
-    for (label, data, quota) in &available[..keep] {
-        if !lines.is_empty() {
-            lines.push(Line::raw(""));
+/// What a chart plots: the token series, or the money series over the same
+/// buckets. Both are held by reference so a frame never copies them.
+enum Series<'a> {
+    Tokens(&'a [u64]),
+    Money(&'a [f64]),
+}
+
+impl Series<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Tokens(values) => values.len(),
+            Self::Money(values) => values.len(),
         }
-        lines.extend(histogram(label, data, *quota, width, rows));
     }
-    if lines.is_empty() {
-        lines.push(Line::styled(" 暂无用量记录", Style::default().fg(MUTED)));
+
+    /// One bucket's value in the chart's own unit (tokens or dollars).
+    fn value(&self, index: usize) -> f64 {
+        match self {
+            Self::Tokens(values) => values.get(index).copied().unwrap_or(0) as f64,
+            Self::Money(values) => values.get(index).copied().unwrap_or(0.0),
+        }
     }
-    lines
+
+    fn money(&self) -> bool {
+        matches!(self, Self::Money(_))
+    }
+}
+
+/// One local-burn chart: what it plots, the fixed ceiling it is drawn against,
+/// and the X-axis scale beneath it.
+struct Chart<'a> {
+    /// Panel label, e.g. `每小时`.
+    label: &'static str,
+    series: Series<'a>,
+    /// Bars are drawn as a share of this, and coloured by the same share, so
+    /// height and colour always agree on how full a bucket is.
+    ceiling: f64,
+    /// One bar's span in seconds before any merging.
+    span_seconds: u64,
+    /// Base buckets per X-axis tick: four quarter hours make an hour, four six-
+    /// hour blocks make a day.
+    tick_buckets: usize,
+    /// Value the leftmost tick names — hour 0, or day 1.
+    first_tick: u32,
+}
+
+/// A bar's colour by its share of the chart ceiling: light green with headroom,
+/// blue in the middle, dark blue near the top and red at the ceiling.
+fn bar_color(share: f64) -> Color {
+    if share >= 0.95 {
+        RED
+    } else if share >= 0.80 {
+        BAR_HIGH
+    } else if share >= 0.30 {
+        BAR_MID
+    } else {
+        BAR_LOW
+    }
+}
+
+/// `15分钟`, `6小时`, `1天`: what one drawn bar covers once buckets merge.
+fn span_label(seconds: u64) -> String {
+    match seconds {
+        s if s % 86_400 == 0 => format!("{}天", s / 86_400),
+        s if s % 3_600 == 0 => format!("{}小时", s / 3_600),
+        s if s % 60 == 0 => format!("{}分钟", s / 60),
+        s => format!("{s}秒"),
+    }
+}
+
+/// The three local-burn charts, largest interval first: the hourly chart, the
+/// daily chart and the money chart over the same six-hour buckets as the
+/// daily one. Each is drawn straight into its own rect, so the charts never
+/// scroll and always keep the equal shares the layout gave them.
+fn local_charts(usage: &UsageStats) -> [Chart<'_>; 3] {
+    [
+        Chart {
+            label: "每小时",
+            series: Series::Tokens(&usage.hours.buckets),
+            ceiling: HOURLY_CEILING,
+            span_seconds: 15 * 60,
+            tick_buckets: 4,
+            first_tick: 0,
+        },
+        Chart {
+            label: "每天",
+            series: Series::Tokens(&usage.month.buckets),
+            ceiling: DAILY_CEILING,
+            span_seconds: 6 * 3_600,
+            tick_buckets: 4,
+            first_tick: 1,
+        },
+        Chart {
+            label: "金额",
+            series: Series::Money(&usage.month.costs),
+            ceiling: COST_CEILING,
+            span_seconds: 6 * 3_600,
+            tick_buckets: 4,
+            first_tick: 1,
+        },
+    ]
+}
+
+/// Render the three local-burn charts into the panel's bottom three rects.
+/// A chart whose series is missing draws nothing; the layout's equal shares
+/// and the blank tail row of each block keep the three apart.
+fn draw_charts(frame: &mut Frame, areas: &[Rect], usage: &UsageStats) {
+    for (chart, area) in local_charts(usage).into_iter().zip(areas.iter()) {
+        let lines = histogram(&chart, area.width, chart_rows(area.height));
+        if !lines.is_empty() {
+            frame.render_widget(Paragraph::new(lines), *area);
+        }
+    }
+}
+
+/// Bar rows a chart gets in a rect `room` rows tall: the title, the baseline
+/// and the tick row take three, and the rect's last row stays blank as the
+/// gap to the next chart. The count snaps to 8, 5, 4 or 2 so the row
+/// boundaries land on round shares of the fixed ceiling — quarters, fifths,
+/// halves — and every Y-axis label reads as a round number, never `188M`.
+fn chart_rows(room: u16) -> usize {
+    let available = room.saturating_sub(4) as usize;
+    for nice in [8usize, 5, 4, 2] {
+        if available >= nice {
+            return nice;
+        }
+    }
+    available.min(1)
 }
 
 /// Suffix and divisor for the axis scale that keeps the labels shortest:
 /// `1.2B` reads better than `1234M`, but `900M` reads better than `0.9B`.
-fn axis_scale(max: u64) -> (f64, &'static str) {
-    if max >= 1_000_000_000 {
+fn axis_scale(max: f64) -> (f64, &'static str) {
+    if max >= 1_000_000_000. {
         (1e9, "B")
-    } else if max >= 1_000_000 {
+    } else if max >= 1_000_000. {
         (1e6, "M")
-    } else if max >= 1_000 {
+    } else if max >= 1_000. {
         (1e3, "K")
     } else {
         (1., "")
@@ -846,115 +1057,139 @@ fn axis_label(value: f64, divisor: f64, suffix: &str) -> String {
     }
 }
 
-/// Draw one histogram: bar rows against a labelled Y axis, then a zero
-/// baseline, centred bucket ticks and the period name.
+/// Draw one chart: bar rows against a labelled Y axis, then a baseline carrying
+/// the X-axis ticks and the numbered scale beneath it.
 ///
-/// Buckets are one column wide, so a 24-hour day needs 24 columns. Rather than
-/// dropping bars, adjacent buckets are summed: the shape stays honest and the
-/// plot always reaches the pane edge.
+/// Buckets are one column wide, so a chart with more buckets than columns — 96
+/// quarter hours on a narrow pane — sums adjacent buckets until they fit: the
+/// shape stays honest and the plot always reaches the pane edge.
 ///
 /// The Y axis ticks at row boundaries, so every graded label names the value a
 /// bar holds when it fills its row and everything below it: the top label is
-/// the maximum, the baseline is zero, and a tick with no number leaves nothing
+/// the ceiling, the baseline is zero, and a tick with no number leaves nothing
 /// to judge by.
-fn histogram(
-    label: &str,
-    data: &Bucketed,
-    fixed_quota: u64,
-    width: u16,
-    rows: usize,
-) -> Vec<Line<'static>> {
-    let raw = &data.buckets;
-    // The plot is what is left of the pane after the axis and its gutter.
-    let plot = (width as usize).saturating_sub(AXIS_WIDTH + 1);
-    if raw.is_empty() || plot == 0 {
+fn histogram(chart: &Chart, width: u16, rows: usize) -> Vec<Line<'static>> {
+    let base_len = chart.series.len();
+    // The plot is what is left of the pane after the axis gutter (`AXIS_WIDTH`
+    // columns), its trailing space and the `┤` the bars stand against: the last
+    // bar column must land on the pane's edge instead of being clipped by it.
+    let plot = (width as usize).saturating_sub(AXIS_WIDTH + 2);
+    if base_len == 0 || plot == 0 {
         return vec![];
     }
     // Merge until the bucket count fits the plot.
     let mut factor = 1usize;
-    while raw.len().div_ceil(factor) > plot {
+    while base_len.div_ceil(factor) > plot {
         factor += 1;
     }
-    let merged: Vec<u64> = raw
-        .chunks(factor)
-        .map(|chunk| chunk.iter().copied().sum())
+    let merged: Vec<f64> = (0..base_len.div_ceil(factor))
+        .map(|index| {
+            let start = index * factor;
+            let end = (start + factor).min(base_len);
+            (start..end).map(|bucket| chart.series.value(bucket)).sum()
+        })
         .collect();
-    let max = fixed_quota;
+    let max = chart.ceiling;
     let (divisor, suffix) = axis_scale(max);
-    let current = current_bucket(data, factor);
+    let label_of = |value: f64| {
+        if chart.series.money() {
+            format!("${}", value.round() as i64)
+        } else {
+            axis_label(value, divisor, suffix)
+        }
+    };
     let height = rows.max(1);
     // The glyph grid: `height` rows of eight sub-rows each.
     let total_subrows = height * 8;
     let eighths: Vec<usize> = merged
         .iter()
         .map(|value| {
-            if max == 0 || *value == 0 {
+            if max <= 0.0 || *value <= 0.0 {
                 0
             } else {
-                (((*value as f64 / max as f64) * total_subrows as f64).round() as usize)
-                    .min(total_subrows)
+                (((*value / max) * total_subrows as f64).round() as usize).min(total_subrows)
             }
         })
         .collect();
-    // Stretch the buckets across the whole plot so the chart is edge to edge no
-    // matter how many buckets the period has: a 12-month year on a wide pane
-    // must not huddle in the left corner. Columns are shared out evenly, with
-    // the remainder spread over the leading buckets so the right edge still
-    // lands on the pane edge.
+    let colours: Vec<Color> = merged
+        .iter()
+        .map(|value| bar_color(if max > 0.0 { value / max } else { 0.0 }))
+        .collect();
+    // One rhythm across the row: every bar gets the same width and the leftover
+    // columns are shared out as gaps. Letting bars absorb the remainder (some
+    // one cell wide, the next two) made the spacing — and with it every hourly
+    // tick — drift in and out, which is what read as uneven.
+    //
+    // A whole-cell gap needs two cells per bar. When the plot is too narrow for
+    // that the bars stay one cell wide and the three-quarter block leaves the
+    // gap inside the cell instead.
     let columns = merged.len().max(1);
-    let widths: Vec<usize> = if columns >= plot {
-        vec![1; columns]
+    let pitch = plot / columns;
+    let (bar_width, body) = if pitch >= 2 {
+        (pitch - 1, '█')
     } else {
-        let base = plot / columns;
-        let extra = plot % columns;
-        (0..columns)
-            .map(|index| base + usize::from(index < extra))
-            .collect()
+        (1, '▊')
     };
+    let gaps = columns.saturating_sub(1);
+    let gap_cells = plot.saturating_sub(columns * bar_width);
+    let gap_after = |index: usize| {
+        if gaps == 0 {
+            return 0;
+        }
+        (index + 1) * gap_cells / gaps - index * gap_cells / gaps
+    };
+    // Where each bar starts, and the centre a tick names it by.
+    let mut starts = Vec::with_capacity(columns);
+    let mut cursor = 0usize;
+    for index in 0..columns {
+        starts.push(cursor);
+        cursor += bar_width;
+        if index < gaps {
+            cursor += gap_after(index);
+        }
+    }
+    let trailing = plot.saturating_sub(cursor);
+    let mut ticks: Vec<(usize, String)> = vec![];
+    for unit in 0..base_len / chart.tick_buckets {
+        let merged_index = unit * chart.tick_buckets / factor;
+        let start = starts.get(merged_index).copied().unwrap_or(0);
+        ticks.push((
+            start + bar_width / 2,
+            format!("{}", chart.first_tick as usize + unit),
+        ));
+    }
 
     // The value a bar holds when its top reaches a sub-row, so a tick can name
     // the height it marks instead of standing there unlabelled.
-    let value_at = |subrows: usize| max as f64 * subrows as f64 / total_subrows as f64;
+    let value_at = |subrows: usize| max * subrows as f64 / total_subrows as f64;
     let mut out: Vec<Line<'static>> = Vec::with_capacity(height + 3);
 
-    let month_days = format!("{}天", data.buckets.len());
-    let fallback_items = format!("{}项", data.buckets.len());
-    let (duration_str, unit_str) = match label {
-        "当日" => ("24小时", "小时"),
-        "本周" => ("7天", "天"),
-        "当月" => (month_days.as_str(), "天"),
-        _ => (fallback_items.as_str(), "项"),
-    };
-    let quota_str = if fixed_quota.is_multiple_of(100_000_000) {
-        format!(" (配额 {}亿)", fixed_quota / 100_000_000)
-    } else {
-        format!(" (配额 {})", compact(fixed_quota))
-    };
-    let merge_str = if factor > 1 {
-        format!(" · 每柱 {factor}{unit_str}")
-    } else {
-        String::new()
-    };
-    let title = format!(" {label} · {duration_str}{quota_str}{merge_str}");
+    let title = format!(
+        " {} · 每柱 {}",
+        chart.label,
+        span_label(chart.span_seconds * factor as u64)
+    );
+    // A title longer than the pane would be clipped mid-glyph at the border;
+    // cutting it here keeps the clip deliberate and marked.
     out.push(Line::styled(
-        title,
+        truncate(&title, width as usize),
         Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
     ));
 
     for row in 0..height {
         // Sub-rows still available to this row, counted from the baseline up.
         let base = (height - 1 - row) * 8;
-        // Every row boundary a bar top can land on gets a label, up to three
-        // besides the baseline: reading mid-height bars off a single top label
-        // is guesswork.
-        let ticks = height.min(3);
-        let step = (height - 1) / ticks.max(1).min(height - 1).max(1);
-        let graded = ticks > 1 && step > 0 && row % step == 0 && row / step < ticks;
-        let head = if max > 0 && (row == 0 || graded) {
+        // `chart_rows` snaps the row count to 8, 5, 4 or 2, so every boundary
+        // lands on a round share of the ceiling and labelling each of them
+        // keeps every number worth reading — quarters, fifths, halves, never
+        // `188M`. Tall charts grade to every other boundary so the labels
+        // never crowd.
+        let step = if height <= 5 { 1 } else { 2 };
+        let graded = row % step == 0;
+        let head = if max > 0.0 && (row == 0 || graded) {
             // The value at this row's *top* boundary, so the topmost label is
-            // the maximum and no graded row repeats the baseline's zero —
-            // naming the bottom boundary would print `0` again on short panes.
-            axis_label(value_at((height - row) * 8), divisor, suffix)
+            // the ceiling and no graded row repeats the baseline's zero.
+            label_of(value_at((height - row) * 8))
         } else {
             String::new()
         };
@@ -968,136 +1203,89 @@ fn histogram(
         for (index, filled) in eighths.iter().enumerate() {
             let remaining = filled.saturating_sub(base);
             let used = remaining.min(8);
-            // Full rows are solid; the topmost partial row uses the eighth block
-            // matching its height, so a bar's top edge moves smoothly.
+            // Full cells are solid; the topmost partial cell keeps the
+            // eighth-block glyph, which is the only way to show a bar whose top
+            // does not land on a cell boundary.
             let glyph = match used {
                 0 => ' ',
-                8 => '█',
+                8 => body,
                 n => ['▁', '▂', '▃', '▄', '▅', '▆', '▇'][n - 1],
             };
-            let colour = if glyph == ' ' {
-                TRACK
-            } else if merged[index] > max {
-                RED
-            } else if Some(index) == current {
-                GREEN
-            } else {
-                CYAN
-            };
-            // Every bucket owns `widths[index]` columns; the glyph is repeated
-            // across them so a stretched bar stays a solid block.
+            let colour = if glyph == ' ' { TRACK } else { colours[index] };
+            // The bar repeats the glyph across its cells; the gap columns that
+            // follow belong to the next bar's spacing, not to this bar.
             spans.push(Span::styled(
-                glyph.to_string().repeat(widths[index]),
+                glyph.to_string().repeat(bar_width),
                 Style::default().fg(colour),
+            ));
+            let gap = if index < gaps { gap_after(index) } else { 0 };
+            if gap > 0 {
+                spans.push(Span::styled(" ".repeat(gap), Style::default().fg(TRACK)));
+            }
+        }
+        if trailing > 0 {
+            spans.push(Span::styled(
+                " ".repeat(trailing),
+                Style::default().fg(TRACK),
             ));
         }
         out.push(Line::from(spans));
     }
     // Baseline: a zero label, the corner under the axis, then the rule the bars
-    // stand on.
-    let mut baseline = vec![
+    // stand on, with a tick under every hour (or day) boundary.
+    let mut rule = vec!['─'; plot];
+    for (column, _) in &ticks {
+        if let Some(cell) = rule.get_mut(*column) {
+            *cell = '┴';
+        }
+    }
+    out.push(Line::from(vec![
         Span::styled(
-            format!(
-                " {:>pad$} ",
-                axis_label(0., divisor, suffix),
-                pad = AXIS_WIDTH - 1
-            ),
+            format!(" {:>pad$} ", label_of(0.0), pad = AXIS_WIDTH - 1),
             Style::default().fg(MUTED),
         ),
         Span::styled("└", Style::default().fg(TRACK)),
-    ];
-    baseline.push(Span::styled("─".repeat(plot), Style::default().fg(TRACK)));
-    out.push(Line::from(baseline));
-    // Bucket numbers are indented to the plot and centred under their own bar,
-    // through the same column widths the bars were drawn with.
-    out.push(bucket_labels(data, factor, plot, &widths));
+        Span::styled(
+            rule.into_iter().collect::<String>(),
+            Style::default().fg(TRACK),
+        ),
+    ]));
+    out.push(tick_labels(&ticks, plot));
     out
 }
-/// Which merged bucket contains "now", so it can be highlighted.
-fn current_bucket(data: &Bucketed, factor: usize) -> Option<usize> {
-    current_bucket_at(data, factor, chrono::Local::now())
-}
 
-fn current_bucket_at(
-    data: &Bucketed,
-    factor: usize,
-    now: chrono::DateTime<chrono::Local>,
-) -> Option<usize> {
-    use chrono::{Datelike, Timelike};
-    let index = match data.buckets.len() {
-        24 => now.hour() as usize,
-        7 => now.weekday().num_days_from_monday() as usize,
-        12 => now.month0() as usize,
-        length => {
-            let day = now.day().saturating_sub(1) as usize;
-            if length >= 28 {
-                day
-            } else {
-                return None;
-            }
-        }
-    };
-    (index < data.buckets.len()).then(|| index / factor.max(1))
-}
-
-/// The row of bucket numbers under a chart.
+/// The numbered X-axis scale under a chart's baseline.
 ///
-/// A tick names a bar and is centred over it: a number printed at the bar's left
-/// edge reads as the boundary between two bars, so a reader counting along the
-/// axis lands on the wrong one. The last tick is pinned to the plot edge when
-/// centring would run it past — a clipped number is worse than one that sits a
-/// column off centre.
-fn bucket_labels(
-    data: &Bucketed,
-    factor: usize,
-    available: usize,
-    widths: &[usize],
-) -> Line<'static> {
-    let count = data.buckets.len().div_ceil(factor).min(available);
-    let first = data.first_bucket as usize;
-    // Tick at the first bucket, the middle and the last, plus one more when the
-    // row is wide, so a 31-day row keeps an intermediate reference point.
-    let ticks = if available >= 26 { 4 } else { 3 };
-    // Where a bucket's columns start inside the stretched plot, and how many it
-    // owns: centring needs both.
-    let offset = |index: usize| widths.iter().take(index).sum::<usize>();
-    let mut positions: Vec<(usize, String)> = vec![];
-    for tick in 0..ticks {
-        let position = if ticks == 1 {
-            0
-        } else {
-            tick * (count.saturating_sub(1)) / (ticks - 1)
-        };
-        if position >= count {
-            continue;
-        }
-        let text = format!("{}", first + position * factor);
-        let start = if tick == 0 {
-            0
-        } else if tick == ticks - 1 {
-            available.saturating_sub(text.len())
-        } else {
-            let span = widths.get(position).copied().unwrap_or(1);
-            let centre = offset(position) + span / 2;
-            centre
-                .saturating_sub(text.len() / 2)
-                .min(available.saturating_sub(text.len()))
-        };
-        positions.push((start, text));
-    }
-    // Emit left to right, skipping any label that would collide with the previous
-    // one; a half-overwritten number is worse than a missing tick.
+/// Each number is centred under the mark it names. A number that would collide
+/// with the one before it is dropped — a half-overwritten tick is worse than a
+/// missing one — and the last number is pinned to the plot edge when centring
+/// it would run it past, so the axis still reads to its end.
+fn tick_labels(ticks: &[(usize, String)], plot: usize) -> Line<'static> {
     let mut row = String::new();
     let mut cursor = 0usize;
-    for (position, text) in positions {
-        if position < cursor {
+    let mut placed_last = false;
+    for (index, (centre, text)) in ticks.iter().enumerate() {
+        let start = centre
+            .saturating_sub(text.len() / 2)
+            .min(plot.saturating_sub(text.len()));
+        if start < cursor {
             continue;
         }
-        if row.len() < position {
-            row.push_str(&" ".repeat(position - row.len()));
+        if row.len() < start {
+            row.push_str(&" ".repeat(start - row.len()));
         }
-        row.push_str(&text);
-        cursor = position + text.len() + 1;
+        row.push_str(text);
+        cursor = start + text.len() + 1;
+        placed_last = index + 1 == ticks.len();
+    }
+    if !placed_last && let Some((_, text)) = ticks.last() {
+        let start = plot.saturating_sub(text.len());
+        if start >= cursor {
+            if row.len() < start {
+                row.push_str(&" ".repeat(start - row.len()));
+            }
+            row.push_str(text);
+        }
     }
     Line::styled(
         format!("{:width$}{row}", "", width = AXIS_WIDTH + 1),
@@ -1105,59 +1293,190 @@ fn bucket_labels(
     )
 }
 
-fn interval_summary(usage: &UsageStats, width: u16) -> Vec<Line<'static>> {
+/// The summary column: the three calendar intervals, then the historical total
+/// as a framed headline.
+///
+/// Every row here is built to fit the column width the top block hands it, so
+/// the numbers never spill into the model ranking on their left.
+fn stats_column(usage: &UsageStats, width: u16) -> Vec<Line<'static>> {
+    let room = width as usize;
     let rows = [
         ("当日", &usage.day_total),
         ("本周", &usage.week_total),
         ("当月", &usage.month_total),
     ];
-    rows.iter()
-        .map(|(label, total)| interval_line(label, total, width))
-        .collect::<Vec<_>>()
+    let label_width = rows
+        .iter()
+        .map(|(label, _)| columns(&format!(" {label}")))
+        .max()
+        .unwrap_or(0);
+    // One unit word is shared by all three rows so their columns line up: the
+    // full word when the pane allows it, `tok` when it is tight, nothing when
+    // the numbers must stand alone.
+    let (unit, amount_width, cost_width) = ["tokens", "tok", ""]
+        .into_iter()
+        .map(|unit| {
+            let amount = rows
+                .iter()
+                .map(|(_, total)| columns(&amount_text(total.tokens, unit)))
+                .max()
+                .unwrap_or(0);
+            let cost = rows
+                .iter()
+                .map(|(_, total)| money(total.cost).len())
+                .max()
+                .unwrap_or(0);
+            (unit, amount, cost)
+        })
+        .find(|(_, amount, cost)| label_width + 1 + amount + 2 + cost <= room)
+        .unwrap_or(("", 0, 0));
+    // The interval rows and the frame share one block: the rows stretch to the
+    // frame's width so their right edge and the frame's right rule line up.
+    let frame_width = room.min(TOTAL_BOX_MAX);
+    let natural = label_width + 1 + amount_width + 2 + cost_width;
+    let amount_width = amount_width + frame_width.saturating_sub(natural);
+    let mut lines = vec![];
+    for (label, total) in rows {
+        lines.extend(interval_card(
+            label,
+            total,
+            label_width,
+            amount_width,
+            cost_width,
+            unit,
+            room,
+        ));
+    }
+    lines.push(Line::raw(""));
+    lines.extend(total_card(&usage.all_total, room));
+    lines
 }
 
-fn interval_line(label: &str, total: &UsageTotal, width: u16) -> Line<'static> {
-    let mut spans = vec![
-        Span::styled(format!(" {label}  "), Style::default().fg(MUTED)),
-        Span::styled(
-            format!("{} tokens  ", compact(total.tokens)),
-            Style::default().fg(INK),
-        ),
-        Span::styled(money(total.cost), Style::default().fg(INK)),
-    ];
-    // Below 100% the money is a lower bound, so say so rather than letting it
-    // read as the full bill.
-    if let Some(coverage) = total.coverage.filter(|coverage| *coverage < 1.0) {
-        let text = format!("  计价 {:.0}%", coverage * 100.);
-        if width as usize >= 44 {
-            spans.push(Span::styled(text, Style::default().fg(AMBER)));
+/// One interval: the label, its token count and its money, right-aligned in the
+/// column's slots. The money drops to its own row when the pane is too narrow
+/// for it to share.
+fn interval_card(
+    label: &str,
+    total: &UsageTotal,
+    label_width: usize,
+    amount_width: usize,
+    cost_width: usize,
+    unit: &str,
+    room: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![];
+    let amount = amount_text(total.tokens, unit);
+    let cost = money(total.cost);
+    // The label is padded rather than right-aligned, so `当日` and `当月` share
+    // a left edge and their numbers share a right edge.
+    let label = format!(" {label}");
+    let head = format!(
+        "{label}{}",
+        " ".repeat(label_width.saturating_sub(columns(&label)))
+    );
+    let row = format!("{head} {amount:>amount_width$}  {cost:>cost_width$}");
+    if columns(&row) <= room {
+        lines.push(Line::from(vec![
+            Span::styled(head, Style::default().fg(MUTED)),
+            Span::raw(" "),
+            Span::styled(format!("{amount:>amount_width$}"), Style::default().fg(INK)),
+            Span::raw("  "),
+            Span::styled(format!("{cost:>cost_width$}"), Style::default().fg(INK)),
+        ]));
+    } else {
+        // Too narrow for the money to share the row: give it its own row under
+        // the count instead of clipping it away.
+        lines.push(Line::from(vec![
+            Span::styled(head.clone(), Style::default().fg(MUTED)),
+            Span::raw(" "),
+            Span::styled(
+                truncate(&amount, room.saturating_sub(columns(&head) + 1)),
+                Style::default().fg(INK),
+            ),
+        ]));
+        if columns(&cost) <= room {
+            lines.push(Line::from(Span::styled(
+                format!(" {cost}"),
+                Style::default().fg(INK),
+            )));
         }
     }
-    Line::from(spans)
+    lines
 }
 
-fn total_line(total: &UsageTotal, width: u16) -> Line<'static> {
-    let mut spans = vec![
-        Span::styled(" 总计  ", Style::default().fg(MUTED)),
+/// The historical total, framed and centred so it reads as the headline of the
+/// summary column rather than one more interval. The frame shrinks with the
+/// column and is dropped entirely when the pane cannot hold it.
+fn total_card(total: &UsageTotal, room: usize) -> Vec<Line<'static>> {
+    let cost = money(total.cost);
+    // The frame is capped so a very wide column does not leave the numbers
+    // floating inside it; it never exceeds the column it sits in. A column
+    // narrower than the smallest frame falls through to the unframed total.
+    let box_width = room.min(TOTAL_BOX_MAX);
+    // The widest frame buildable: the full unit word first, then the short one,
+    // then none.
+    let framed = ["tokens", "tok", ""]
+        .into_iter()
+        .map(|unit| amount_text(total.tokens, unit))
+        .find(|amount| {
+            box_width
+                >= 2 + [columns("总计"), columns(amount), columns(&cost)]
+                    .into_iter()
+                    .max()
+                    .unwrap_or(0)
+        });
+    let Some(amount) = framed else {
+        // Narrower than a frame: keep the label and numbers, unframed.
+        let headline = Style::default().fg(CYAN).add_modifier(Modifier::BOLD);
+        let mut lines = vec![Line::from(Span::styled(" 总计", headline))];
+        lines.push(Line::from(Span::styled(
+            format!(" {}", amount_text(total.tokens, "")),
+            headline,
+        )));
+        lines.push(Line::from(Span::styled(format!(" {cost}"), headline)));
+        return lines;
+    };
+    let inner = box_width - 2;
+    let border = Style::default().fg(CYAN).add_modifier(Modifier::BOLD);
+    let headline = Style::default().fg(CYAN).add_modifier(Modifier::BOLD);
+    let value = Style::default().fg(INK).add_modifier(Modifier::BOLD);
+    let mut lines = vec![Line::from(Span::styled(
+        format!("╔{}╗", "═".repeat(inner)),
+        border,
+    ))];
+    lines.push(framed_row("总计", inner, headline));
+    lines.push(framed_row(&amount, inner, value));
+    lines.push(framed_row(&cost, inner, headline));
+    lines.push(Line::from(Span::styled(
+        format!("╚{}╝", "═".repeat(inner)),
+        border,
+    )));
+    lines
+}
+
+/// A framed row: the rule on both sides with `text` centred between them.
+fn framed_row(text: &str, inner: usize, style: Style) -> Line<'static> {
+    let used = columns(text);
+    let left = inner.saturating_sub(used) / 2;
+    let right = inner.saturating_sub(used + left);
+    let border = Style::default().fg(CYAN).add_modifier(Modifier::BOLD);
+    Line::from(vec![
+        Span::styled("║", border),
         Span::styled(
-            format!("{} tokens  ", compact(total.tokens)),
-            Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+            format!("{}{}{}", " ".repeat(left), text, " ".repeat(right)),
+            style,
         ),
-        Span::styled(
-            money(total.cost),
-            Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-        ),
-    ];
-    // CJK glyphs take two terminal columns, so the fit must be measured in
-    // columns rather than in characters.
-    let used: usize = spans.iter().map(|span| columns(&span.content)).sum();
-    let qualifier = format!("  计价 {:.0}%", total.coverage.unwrap_or(1.0) * 100.);
-    if total.coverage.is_some_and(|coverage| coverage < 1.0)
-        && used + columns(&qualifier) <= width as usize
-    {
-        spans.push(Span::styled(qualifier, Style::default().fg(AMBER)));
+        Span::styled("║", border),
+    ])
+}
+
+/// A token count with its unit word, e.g. `126.3B tokens`.
+fn amount_text(tokens: u64, unit: &str) -> String {
+    if unit.is_empty() {
+        compact(tokens)
+    } else {
+        format!("{} {unit}", compact(tokens))
     }
-    Line::from(spans)
 }
 
 pub use crate::model::compact;
@@ -1707,6 +2026,32 @@ mod regression_tests {
             .collect::<Vec<_>>()
             .join("\n")
     }
+    /// The foreground colours of every bar glyph on the rendered dashboard,
+    /// scanned off the test backend's buffer.
+    fn rendered_bar_colours(usage: &UsageStats, width: u16, height: u16) -> Vec<Color> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("backend");
+        let mut view = View::default();
+        terminal
+            .draw(|f| {
+                draw(
+                    f,
+                    &SystemStats::default(),
+                    &[],
+                    usage,
+                    &mut view,
+                    chrono::Utc::now().timestamp(),
+                )
+            })
+            .expect("draw");
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .filter(|cell| cell.symbol().chars().any(|c| "▊█▁▂▃▄▅▆▇".contains(c)))
+            .map(|cell| cell.fg)
+            .collect()
+    }
 
     fn sample_usage() -> UsageStats {
         UsageStats {
@@ -1718,65 +2063,54 @@ mod regression_tests {
                 reasoning: 120_000,
                 cost: Some(3.5),
             }],
-            day: Bucketed {
+            hours: Bucketed {
                 buckets: {
-                    let mut buckets = vec![0u64; 24];
-                    buckets[10] = 150_000_000;
-                    buckets[11] = 300_000_000;
+                    let mut buckets = vec![0u64; 96];
+                    // Six full hours at the ceiling: a wide pane visibly
+                    // stretches these same bars, and they exercise the red band.
+                    for bucket in &mut buckets[..24] {
+                        *bucket = HOURLY_CEILING as u64;
+                    }
+                    buckets[40] = 90_000_000; // 45% of the ceiling: blue
+                    buckets[44] = 150_000_000; // 75%: blue too, taller
                     buckets
                 },
-                first_bucket: 0,
-            },
-            week: Bucketed {
-                buckets: {
-                    let mut buckets = vec![0u64; 7];
-                    buckets[2] = 1_000_000_000;
-                    buckets[4] = 2_000_000_000;
-                    buckets
-                },
-                first_bucket: 1,
+                costs: vec![0.0; 96],
             },
             month: Bucketed {
+                // 30 days, four six-hour buckets each.
                 buckets: {
-                    let mut buckets = vec![0u64; 30];
-                    buckets[4] = 4_000_000_000;
-                    buckets[15] = 8_000_000_000;
+                    let mut buckets = vec![0u64; 120];
+                    buckets[4] = 1_500_000_000;
+                    buckets[60] = DAILY_CEILING as u64;
                     buckets
                 },
-                first_bucket: 1,
-            },
-            year: Bucketed {
-                buckets: {
-                    let mut buckets = vec![0u64; 12];
-                    buckets[8] = 7_000;
-                    buckets
+                costs: {
+                    let mut costs = vec![0f64; 120];
+                    costs[4] = COST_CEILING;
+                    costs[60] = 60.0;
+                    costs
                 },
-                first_bucket: 1,
             },
             day_total: UsageTotal {
                 tokens: 1_400_000,
                 cost: 1.25,
-                coverage: Some(1.0),
             },
             week_total: UsageTotal {
                 tokens: 4_200_000,
                 cost: 6.80,
-                coverage: Some(0.98),
             },
             month_total: UsageTotal {
                 tokens: 18_700_000_000,
                 cost: 31.05,
-                coverage: Some(0.92),
             },
             year_total: UsageTotal {
                 tokens: 112_400_000_000,
                 cost: 286.44,
-                coverage: Some(1.0),
             },
             all_total: UsageTotal {
                 tokens: 126_300_000_000,
                 cost: 318.62,
-                coverage: Some(0.97),
             },
             error: None,
         }
@@ -1834,20 +2168,22 @@ mod regression_tests {
     }
 
     #[test]
-    fn the_interval_rows_mark_partial_coverage() {
+    fn no_row_carries_a_priced_share_badge() {
         let usage = sample_usage();
+        // The coverage qualifier is gone from every card, framed or not.
+        for height in [13usize, 24, 38] {
+            let text = token_text(&usage, 100, height);
+            assert!(
+                !text.contains("计价"),
+                "the priced-share badge must be gone ({height} rows): {text}"
+            );
+        }
         let text = token_text(&usage, 100, 38);
-        // month_total is 92% priced, so its money is a lower bound.
-        assert!(
-            text.contains("计价 92%"),
-            "the 92%-priced interval must say so: {text}"
-        );
-        // The fully-priced rows must not carry a misleading qualifier.
         let day_row = text
             .lines()
             .find(|line| line.contains("当日") && line.contains("$1.25"))
-            .unwrap_or_default();
-        assert!(!day_row.contains("计价"), "{day_row}");
+            .expect("the interval row must still show its money");
+        assert!(day_row.contains("tokens"), "{day_row}");
     }
 
     #[test]
@@ -1864,41 +2200,95 @@ mod regression_tests {
     #[test]
     fn a_narrow_pane_drops_columns_rather_than_wrapping() {
         let usage = sample_usage();
-        // One layout at every width: the stacked three-row block. There is no
-        // `IN(HIT)` label — the hit ratio rides inside the IN cell. The tool's
-        // minimum pane is 26 columns; below that it shows a prompt to widen the
-        // window, so degradation is only observable at 26-34 columns.
+        // One row per model: the name opens the row and the value columns follow
+        // it, the hit ratio riding inside the IN cell (there is no `IN(HIT)`
+        // label). Wide panes show all five columns; a pane that cannot hold them
+        // drops them from the right (`COST`, then `合计`, then `THINK`), and `IN`
+        // and `OUT` always survive. The tool's minimum pane is 26 columns; below
+        // that it shows a prompt to widen the window, so degradation is only
+        // observable at 26 columns and above.
         let wide = token_text(&usage, 100, 30);
         assert!(!wide.contains("CACHE"), "{wide}");
-        assert!(wide.contains("IN"), "{wide}");
-        assert!(wide.contains("OUT"), "{wide}");
-        assert!(wide.contains("THINK"), "{wide}");
-        assert!(wide.contains("合计"), "{wide}");
-        assert!(wide.contains("COST"), "{wide}");
-        // 40 columns hold all five columns (each at its minimum width, the
-        // spare shared out evenly) — the block, not the old inline row.
-        let mid = token_text(&usage, 40, 30);
-        assert!(mid.contains("IN"), "{mid}");
-        assert!(mid.contains("OUT"), "{mid}");
-        assert!(mid.contains("THINK"), "{mid}");
-        assert!(mid.contains("合计"), "{mid}");
-        assert!(mid.contains("COST"), "{mid}");
+        for label in ["IN", "OUT", "THINK", "合计", "COST"] {
+            assert!(wide.contains(label), "{label} missing from: {wide}");
+        }
+        // 50 columns are the least that hold all five value columns beside a
+        // `NAME_MIN`-wide name plus the gaps between them.
+        let tight = token_text(&usage, 50, 30);
+        assert!(tight.contains("COST"), "{tight}");
+        assert!(tight.contains("deepseek/"), "{tight}");
+        // 42 columns hold IN / OUT / THINK / 合计; COST is the first to go.
+        let mid = token_text(&usage, 42, 30);
+        for label in ["IN", "OUT", "THINK", "合计"] {
+            assert!(mid.contains(label), "{label} missing from: {mid}");
+        }
+        assert!(!mid.contains("COST"), "{mid}");
         assert!(!mid.contains("IN(HIT)"), "{mid}");
-        // 34 columns cannot hold COST; it drops from the right, leaving
-        // IN / OUT / THINK / 合计. IN and OUT always survive.
-        let narrow = token_text(&usage, 34, 30);
+        // 35 columns cannot hold 合计 either, leaving IN / OUT / THINK.
+        let narrow = token_text(&usage, 35, 30);
         assert!(narrow.contains("IN"), "{narrow}");
         assert!(narrow.contains("OUT"), "{narrow}");
         assert!(narrow.contains("THINK"), "{narrow}");
-        assert!(narrow.contains("合计"), "{narrow}");
+        assert!(!narrow.contains("合计"), "{narrow}");
         assert!(!narrow.contains("COST"), "{narrow}");
-        // 26 columns (the tool minimum) drop COST and 合计, keeping IN / OUT / THINK.
+        // 29 columns are the least that keep IN and OUT beside a readable name;
+        // 26 (the tool minimum) still holds both values, with a shorter name.
         let tiny = token_text(&usage, 26, 30);
         assert!(tiny.contains("IN"), "{tiny}");
         assert!(tiny.contains("OUT"), "{tiny}");
-        assert!(tiny.contains("THINK"), "{tiny}");
+        assert!(!tiny.contains("THINK"), "{tiny}");
         assert!(!tiny.contains("合计"), "{tiny}");
         assert!(!tiny.contains("COST"), "{tiny}");
+    }
+
+    #[test]
+    fn no_token_row_is_wider_than_its_pane() {
+        // A row wider than the pane is clipped at the panel's right border, and
+        // the clipped cell is the last one — the money, or the closing rule of
+        // the total's frame. `format!` pads by character count, so a CJK glyph
+        // counts as one where the terminal gives it two: building every row at
+        // every width is the only way to catch that class of bug.
+        let usage = sample_usage();
+        let empty = UsageStats::default();
+        for usage in [&usage, &empty] {
+            for width in 26..=160u16 {
+                for line in token_lines(usage, width, 40) {
+                    let text: String = line
+                        .spans
+                        .iter()
+                        .map(|span| span.content.to_string())
+                        .collect();
+                    let used = columns(&text);
+                    assert!(
+                        used <= width as usize,
+                        "a {used}-column row overflowed a {width}-column pane: {text:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_summary_column_sits_to_the_right_of_the_ranking() {
+        let usage = sample_usage();
+        // The top block is one row per model on the left and the interval
+        // summary on the right: both appear on the same row, the model first.
+        let text = token_text(&usage, 100, 30);
+        let row = text
+            .lines()
+            .find(|line| line.contains("deepseek/deepseek-v4"))
+            .unwrap_or_default();
+        let name = row.find("deepseek/deepseek-v4").unwrap_or(usize::MAX);
+        let interval = row.find("本周").unwrap_or(usize::MAX);
+        assert!(name < interval, "the ranking must open the row: {row}");
+        // The total stays with the summary, framed, and is never repeated below
+        // the summary rows.
+        assert!(text.contains("总计"), "{text}");
+        assert!(text.contains("╔"), "the total is framed: {text}");
+        assert!(
+            !text.contains("模型表为近24小时"),
+            "the explanatory caveat is gone: {text}"
+        );
     }
 
     #[test]
@@ -1934,41 +2324,12 @@ mod regression_tests {
     }
 
     #[test]
-    fn current_bucket_covers_24_hours_and_23_is_last_bucket() {
-        use chrono::TimeZone;
-        let data = crate::model::Bucketed {
-            buckets: vec![0; 24],
-            first_bucket: 0,
-        };
-        for hour in 0..24 {
-            let now = chrono::Local
-                .with_ymd_and_hms(2026, 6, 1, hour, 30, 0)
-                .single()
-                .expect("valid local time");
-            assert_eq!(
-                current_bucket_at(&data, 1, now),
-                Some(hour as usize),
-                "hour {hour} should map directly to bucket index {hour}"
-            );
-        }
-        // At hour 23, it must be Some(23), not None
-        let now_23 = chrono::Local
-            .with_ymd_and_hms(2026, 6, 1, 23, 59, 59)
-            .single()
-            .expect("valid local time");
-        assert_eq!(current_bucket_at(&data, 1, now_23), Some(23));
-
-        // When merged with factor = 2 (12 bars total):
-        assert_eq!(current_bucket_at(&data, 2, now_23), Some(11));
-    }
-
-    #[test]
     fn the_last_column_survives_a_pane_that_barely_fits_it() {
-        // A 40-wide token panel uses the same stacked block as wide panes; at
-        // this width all five columns still fit at their minima, so COST must
-        // neither be dropped nor clipped to "COS".
+        // 52 columns are the least that hold all five value columns beside the
+        // narrowest name column; at that width COST must neither be dropped nor
+        // clipped to "COS".
         let usage = sample_usage();
-        let text = token_text(&usage, 40, 30);
+        let text = token_text(&usage, 52, 30);
         let header = text
             .lines()
             .find(|line| line.contains("COST"))
@@ -2107,79 +2468,191 @@ mod regression_tests {
     }
 
     #[test]
-    fn current_bucket_matches_weekday_for_7_buckets() {
-        use chrono::{Datelike, TimeZone};
-        let data = Bucketed {
-            buckets: vec![0; 7],
-            first_bucket: 1,
+    fn axis_origin_is_zero_and_the_ceiling_labels_stay_short() {
+        assert_eq!(axis_label(0., 1e6, "M"), "0");
+        assert_eq!(axis_label(0., 1e9, "B"), "0");
+        assert_eq!(axis_label(0., 1e3, "K"), "0");
+        assert_eq!(axis_label(0., 1., ""), "0");
+        assert_eq!(axis_label(HOURLY_CEILING, 1e6, "M"), "200M");
+        assert_eq!(axis_label(DAILY_CEILING, 1e9, "B"), "2B");
+        // The money chart names its ceiling in whole dollars.
+        assert_eq!(format!("${}", COST_CEILING.round() as i64), "$400");
+    }
+
+    #[test]
+    fn bar_colours_follow_the_fixed_bands() {
+        // Below 30% light green, 30-80% blue, 80-95% dark blue, 95% up red.
+        assert_eq!(bar_color(0.0), BAR_LOW);
+        assert_eq!(bar_color(0.29), BAR_LOW);
+        assert_eq!(bar_color(0.30), BAR_MID);
+        assert_eq!(bar_color(0.79), BAR_MID);
+        assert_eq!(bar_color(0.80), BAR_HIGH);
+        assert_eq!(bar_color(0.94), BAR_HIGH);
+        assert_eq!(bar_color(0.95), RED);
+        assert_eq!(bar_color(1.0), RED);
+    }
+    #[test]
+    fn chart_bars_carry_the_band_colour_of_their_share() {
+        let mut buckets = vec![0u64; 96];
+        buckets[4] = HOURLY_CEILING as u64 / 5; // 20%: light green
+        buckets[8] = HOURLY_CEILING as u64 / 2; // 50%: blue
+        buckets[12] = HOURLY_CEILING as u64 * 9 / 10; // 90%: dark blue
+        buckets[16] = HOURLY_CEILING as u64; // 100%: red
+        let usage = UsageStats {
+            hours: Bucketed {
+                buckets,
+                costs: vec![0.0; 96],
+            },
+            ..UsageStats::default()
         };
-        // 2026-03-30 (Monday, 0) through 2026-04-05 (Sunday, 6)
-        let dates = [
-            (2026, 3, 30),
-            (2026, 3, 31),
-            (2026, 4, 1),
-            (2026, 4, 2),
-            (2026, 4, 3),
-            (2026, 4, 4),
-            (2026, 4, 5),
-        ];
-        for (year, month, day) in dates {
-            let dt = chrono::Local
-                .with_ymd_and_hms(year, month, day, 12, 0, 0)
-                .single()
-                .expect("valid");
-            let expected = dt.weekday().num_days_from_monday() as usize;
-            assert_eq!(
-                current_bucket_at(&data, 1, dt),
-                Some(expected),
-                "mismatch for weekday {:?}",
-                dt.weekday()
+        // The drawn bar glyphs must carry the band colour their bucket falls
+        // in, read off the rendered dashboard itself.
+        let drawn = rendered_bar_colours(&usage, 160, 40);
+        for (name, colour) in [
+            ("light green", BAR_LOW),
+            ("blue", BAR_MID),
+            ("dark blue", BAR_HIGH),
+            ("red", RED),
+        ] {
+            assert!(drawn.contains(&colour), "{name} bar missing: {drawn:?}");
+        }
+    }
+
+    #[test]
+    fn bar_layout_is_uniform() {
+        let data = vec![HOURLY_CEILING as u64; 96];
+        let chart = Chart {
+            label: "每小时",
+            series: Series::Tokens(&data),
+            ceiling: HOURLY_CEILING,
+            span_seconds: 15 * 60,
+            tick_buckets: 4,
+            first_tick: 0,
+        };
+        // Strip the Y-axis gutter: what is left is the plot itself.
+        let plot_of = |line: &str| {
+            line.split_once('┤')
+                .map(|(_, plot)| plot.to_string())
+                .unwrap_or_default()
+        };
+        // Dense: one cell per bar, no spare columns to spend on gaps, so the
+        // three-quarter block alone separates them. Every bar covers the plot.
+        let dense = plot_of(&histogram(&chart, 104, 4)[1].to_string());
+        assert_eq!(dense.matches('▊').count(), 96, "{dense}");
+        assert!(!dense.contains(' '), "{dense}");
+        // Roomy: bars stay one cell, the cells that are left over become gaps,
+        // and every bar is the same width — no bar is twice its neighbour.
+        let roomy = plot_of(&histogram(&chart, 200, 4)[1].to_string());
+        assert_eq!(roomy.matches('█').count(), 96, "{roomy}");
+        assert_eq!(roomy.matches(' ').count(), 96, "{roomy}");
+        let gaps: Vec<usize> = roomy
+            .split('█')
+            .filter(|run| !run.is_empty())
+            .map(|run| run.len())
+            .collect();
+        assert_eq!(gaps.len(), 95, "one gap between each pair of bars");
+        assert!(
+            gaps.iter().all(|gap| (1..=2).contains(gap)),
+            "each gap is a cell or two, never a run: {gaps:?}"
+        );
+    }
+
+    #[test]
+    fn histogram_draws_its_ceiling_and_hourly_ticks() {
+        let data = vec![100u64; 96];
+        let chart = Chart {
+            label: "每小时",
+            series: Series::Tokens(&data),
+            ceiling: HOURLY_CEILING,
+            span_seconds: 15 * 60,
+            tick_buckets: 4,
+            first_tick: 0,
+        };
+        let lines = histogram(&chart, 140, 4);
+        // 1 title + 4 bars + 1 baseline + 1 tick row.
+        assert_eq!(lines.len(), 7);
+        let title_line = lines[0].to_string();
+        assert!(
+            title_line.contains("每小时 · 每柱 15分钟"),
+            "title line mismatch: {title_line}"
+        );
+        let baseline = lines[5].to_string();
+        assert!(baseline.contains('└') && baseline.contains('0'));
+        // A tick mark under every hour boundary: 24 quarter-hour groups a day.
+        assert_eq!(
+            baseline.matches('┴').count(),
+            24,
+            "one mark per hour: {baseline}"
+        );
+        let tick_line = lines[6].to_string();
+        assert!(
+            tick_line.trim_start().starts_with("0 "),
+            "the first tick names hour 0: {tick_line:?}"
+        );
+        for hour in ["0", "6", "12", "18", "23"] {
+            assert!(
+                tick_line.split_whitespace().any(|tick| tick == hour),
+                "missing hour {hour}: {tick_line:?}"
             );
         }
     }
 
     #[test]
-    fn axis_origin_is_pure_zero_and_fixed_quota_ticks_are_integers() {
-        assert_eq!(axis_label(0., 1e6, "M"), "0");
-        assert_eq!(axis_label(0., 1e9, "B"), "0");
-        assert_eq!(axis_label(0., 1e3, "K"), "0");
-        assert_eq!(axis_label(0., 1., ""), "0");
-        assert_eq!(axis_label(DAILY_QUOTA as f64, 1e6, "M"), "300M");
-        assert_eq!(axis_label(WEEKLY_QUOTA as f64, 1e9, "B"), "2B");
-        assert_eq!(axis_label(MONTHLY_QUOTA as f64, 1e9, "B"), "8B");
-    }
-
-    #[test]
-    fn histogram_renders_top_title_and_flush_first_tick() {
-        let data = Bucketed {
-            buckets: vec![100; 24],
-            first_bucket: 0,
+    fn the_daily_and_money_charts_tick_days_and_label_dollars() {
+        let tokens = vec![0u64; 120];
+        let costs = vec![0f64; 120];
+        let daily = Chart {
+            label: "每天",
+            series: Series::Tokens(&tokens),
+            ceiling: DAILY_CEILING,
+            span_seconds: 6 * 3_600,
+            tick_buckets: 4,
+            first_tick: 1,
         };
-        let lines = histogram("当日", &data, DAILY_QUOTA, 80, 4);
-        // 1 title + 4 bars + 1 baseline + 1 ticks = 7
-        assert_eq!(lines.len(), 7);
-        let title_line = lines[0].to_string();
-        assert!(
-            title_line.contains("当日 · 24小时 (配额 3亿)"),
-            "title line mismatch: {title_line}"
+        let money = Chart {
+            label: "金额",
+            series: Series::Money(&costs),
+            ceiling: COST_CEILING,
+            span_seconds: 6 * 3_600,
+            tick_buckets: 4,
+            first_tick: 1,
+        };
+        let lines = histogram(&daily, 140, 3);
+        assert!(lines[0].to_string().contains("每天 · 每柱 6小时"));
+        assert_eq!(
+            lines[4].to_string().matches('┴').count(),
+            30,
+            "one mark per day of the 30-day month"
         );
-        let baseline = lines[5].to_string();
-        assert!(baseline.contains('└') && baseline.contains('0'));
-        let tick_line = lines[6].to_string();
-        let gutter = " ".repeat(AXIS_WIDTH + 1);
         assert!(
-            tick_line.starts_with(&format!("{gutter}0")),
-            "tick line should have first tick flush without extra indentation: {tick_line:?}"
+            lines[5]
+                .to_string()
+                .split_whitespace()
+                .any(|tick| tick == "30"),
+            "the day scale must reach the last day: {:?}",
+            lines[5].to_string()
+        );
+        let money_lines = histogram(&money, 140, 3);
+        assert!(money_lines[0].to_string().contains("金额 · 每柱 6小时"));
+        assert!(
+            money_lines[1].to_string().contains("$400 ┤"),
+            "the money ceiling is $400: {:?}",
+            money_lines[1].to_string()
+        );
+        assert!(
+            money_lines[4].to_string().contains("$0 └"),
+            "the money baseline is $0: {:?}",
+            money_lines[4].to_string()
         );
     }
 
     #[test]
     fn the_axis_scale_follows_the_magnitude() {
         // The suffix is chosen so the label stays short at every magnitude.
-        assert_eq!(axis_scale(900), (1., ""));
-        assert_eq!(axis_scale(7_000), (1e3, "K"));
-        assert_eq!(axis_scale(320_000_000), (1e6, "M"));
-        assert_eq!(axis_scale(126_300_000_000), (1e9, "B"));
+        assert_eq!(axis_scale(900.), (1., ""));
+        assert_eq!(axis_scale(7_000.), (1e3, "K"));
+        assert_eq!(axis_scale(320_000_000.), (1e6, "M"));
+        assert_eq!(axis_scale(126_300_000_000.), (1e9, "B"));
         // One decimal below ten, integers above; the `0` label has no decimals.
         assert_eq!(axis_label(1_200_000_000., 1e9, "B"), "1.2B");
         assert_eq!(axis_label(126_300_000_000., 1e9, "B"), "126B");
@@ -2190,13 +2663,13 @@ mod regression_tests {
     #[test]
     fn a_period_chart_is_stretched_across_the_pane() {
         let usage = sample_usage();
-        let narrow = token_text(&usage, 60, 44);
-        let wide = token_text(&usage, 140, 44);
-        // The year histogram owns 12 buckets; on a wider pane they must claim
-        // more columns instead of hugging the left edge.
+        let narrow = render(&usage, 60, 44).0;
+        let wide = render(&usage, 140, 44).0;
+        // The hourly chart owns 96 quarter-hour buckets; on a wider pane each bar
+        // claims more columns instead of the chart hugging the left edge.
         let bar_run = |text: &str| {
             text.lines()
-                .map(|line| line.chars().filter(|c| *c == '█').count())
+                .map(|line| line.chars().filter(|c| *c == '▊' || *c == '█').count())
                 .max()
                 .unwrap_or(0)
         };
@@ -2209,32 +2682,101 @@ mod regression_tests {
     }
 
     #[test]
+    fn the_three_charts_share_the_bottom_sixty_percent_equally() {
+        let usage = sample_usage();
+        let (text, _) = render(&usage, 140, 46);
+        let title_row = |label: &str| {
+            text.lines()
+                .enumerate()
+                .find(|(_, line)| line.contains(label))
+                .map(|(row, _)| row)
+                .unwrap_or_else(|| panic!("{label} chart missing"))
+        };
+        let hourly = title_row("每小时 · ");
+        let daily = title_row("每天 · ");
+        let money = title_row("金额 · ");
+        // The three charts split the bottom 60% of the token panel equally:
+        // one pitch between neighbours, and the band starts on the 40% line.
+        let step = daily - hourly;
+        assert_eq!(money - daily, step, "all three charts share one pitch");
+        // 46 rows: one footer, two panel borders → 43 inner rows.
+        let inner = 43usize;
+        assert!(
+            (step as i64 - (inner * 2 / 10) as i64).abs() <= 1,
+            "chart pitch {step} must be a fifth of the inner height"
+        );
+        assert!(
+            ((hourly - 1) as i64 - (inner * 4 / 10) as i64).abs() <= 2,
+            "the charts must start on the 40% line, hourly title at {hourly}"
+        );
+    }
+
+    #[test]
+    fn the_y_axis_labels_are_round_shares_of_their_ceilings() {
+        let usage = sample_usage();
+        let (text, _) = render(&usage, 140, 46);
+        for label in [
+            "200M ┤", "150M ┤", "100M ┤", "50M ┤", "2B ┤", "1.5B ┤", "1B ┤", "0.5B ┤", "$400 ┤",
+            "$300 ┤", "$200 ┤", "$100 ┤",
+        ] {
+            assert!(text.contains(label), "{label} missing:\n{text}");
+        }
+        // The eighth-derived labels of the old grading are gone, and so is the
+        // old 250M / 3B ceiling.
+        assert!(!text.contains("188M"), "{text}");
+        assert!(!text.contains("250M"), "{text}");
+        assert!(!text.contains("3B ┤"), "{text}");
+    }
+
+    #[test]
+    fn chart_rows_snap_to_round_divisions_of_the_ceiling() {
+        assert_eq!(chart_rows(12), 8);
+        assert_eq!(chart_rows(9), 5);
+        assert_eq!(chart_rows(8), 4);
+        assert_eq!(chart_rows(6), 2);
+        assert_eq!(chart_rows(5), 1);
+        assert_eq!(chart_rows(4), 0, "a rect that short cannot hold a chart");
+    }
+
+    #[test]
+    fn a_pane_too_short_for_the_charts_hands_the_panel_back_to_the_list() {
+        let usage = sample_usage();
+        let (text, _) = render(&usage, 80, 16);
+        assert!(!text.contains("每小时 · "), "{text}");
+        assert!(text.contains("deepseek"), "{text}");
+    }
+
+    #[test]
     fn visual_render_check_token_panel() {
         let usage = sample_usage();
         let (text, _) = render(&usage, 140, 46);
-        println!("\n=== Rendered Dashboard ===\n{text}\n===========================\n");
-        assert!(text.contains("当日 · 24小时 (配额 3亿)"));
-        assert!(text.contains("本周 · 7天 (配额 20亿)"));
-        assert!(text.contains("当月 · 30天 (配额 80亿)"));
-        assert!(text.contains("300M ┤"));
-        assert!(text.contains("2B ┤"));
-        assert!(text.contains("8B ┤"));
-        assert!(text.contains("0 └"));
+        // The three local-burn charts, each against its fixed ceiling.
+        assert!(text.contains("每小时 · "), "{text}");
+        assert!(text.contains("每天 · "), "{text}");
+        assert!(text.contains("金额 · "), "{text}");
+        assert!(text.contains("200M ┤"), "{text}");
+        assert!(text.contains("2B ┤"), "{text}");
+        assert!(text.contains("0 └"), "{text}");
+        assert!(!text.contains("配额"), "no quota wording is left: {text}");
+        assert!(
+            !text.contains("计价"),
+            "no priced-share badge is left: {text}"
+        );
     }
 
     #[test]
     fn an_empty_bucket_is_drawn_as_empty_track() {
         let usage = UsageStats {
-            day: Bucketed {
-                buckets: vec![0; 24],
-                first_bucket: 0,
+            hours: Bucketed {
+                buckets: vec![0; 96],
+                costs: vec![0.0; 96],
             },
             ..UsageStats::default()
         };
         let (text, _) = render(&usage, 80, 24);
         assert!(
-            !text.contains('█'),
-            "no bucket has data, so no full bars: {text}"
+            !text.contains('█') && !text.contains('▊'),
+            "no bucket has data, so no bars: {text}"
         );
     }
     #[test]

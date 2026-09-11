@@ -81,6 +81,15 @@ pub fn prepare(source: Source, config: &Config) -> Result<Prepared, FetchError> 
                 return Err(FetchError::auth("请先连接 OpenCode Go"));
             }
         }
+        Source::Go2 => {
+            if !config.go2_key.exists() {
+                return Err(FetchError::auth("请先写入 OpenCode GO-2 Key 文件"));
+            }
+            input.token = read_text(&config.go2_key)?.trim().into();
+            if input.token.is_empty() {
+                return Err(FetchError::auth("OpenCode GO-2 Key 文件为空"));
+            }
+        }
         Source::Grok => {
             let auth = read_json(&config.grok.join("auth.json"))?;
             let auth = auth
@@ -154,9 +163,10 @@ pub fn fetch(
             &input.token,
             input.account.as_deref(),
         )?),
-        Source::Go => {
-            parse::go(&http.get("https://opencode.ai/zen/go/v1/usage", &input.token, None)?)
-        }
+        Source::Go | Source::Go2 => parse::go(
+            &http.get("https://opencode.ai/zen/go/v1/usage", &input.token, None)?,
+            source.title(),
+        ),
         Source::OpenRouter => parse::openrouter(&http.get(
             "https://openrouter.ai/api/v1/credits",
             &input.token,

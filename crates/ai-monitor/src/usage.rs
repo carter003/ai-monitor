@@ -40,10 +40,8 @@ impl Reader {
         let rolling_24h = now.timestamp_millis() - 24 * 3600 * 1000;
         Ok(UsageStats {
             models: self.models(rolling_24h)?,
-            day: self.buckets(Bucket::Hour, day_start)?,
-            week: self.buckets(Bucket::DayOfWeek, week_start)?,
-            month: self.buckets(Bucket::DayOfMonth, month_start)?,
-            year: self.buckets(Bucket::Month, year_start)?,
+            hours: self.buckets(Bucket::QuarterHour, day_start)?,
+            month: self.buckets(Bucket::SixHour, month_start)?,
             day_total: self.total(Some(day_start))?,
             week_total: self.total(Some(week_start))?,
             month_total: self.total(Some(month_start))?,
@@ -53,52 +51,36 @@ impl Reader {
         })
     }
 
-    /// Interval totals plus the coverage ratio.
+    /// Interval totals: tokens and money since `since_ms`, or over the whole
+    /// table when it is `None`.
     ///
-    /// `ignored ⊆ unpriced`, because an ignored model stores `cost_usd = NULL`
-    /// too. Subtracting `ignored` from the numerator as well would double-count
-    /// the exclusion and is the bug this query used to carry.
+    /// No join to `model_alias`: the totals count every event, including models
+    /// the ranking filters out, and aliasing is the ranking's business.
     fn total(&self, since_ms: Option<i64>) -> rusqlite::Result<UsageTotal> {
         let (clause, parameter) = match since_ms {
-            Some(value) => ("WHERE e.occurred_at >= ?1", Some(value)),
+            Some(value) => ("WHERE occurred_at >= ?1", Some(value)),
             None => ("", None),
         };
         let sql = format!(
-            "SELECT SUM(e.input_total + e.output_total),
-                    SUM(e.cost_usd),
-                    COUNT(*),
-                    SUM(CASE WHEN e.cost_usd IS NULL THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN e.cost_usd IS NULL AND IFNULL(a.ignore, 0) = 1 THEN 1 ELSE 0 END)
-             FROM usage_event e
-             LEFT JOIN model_alias a ON a.raw_model = e.model
+            "SELECT SUM(input_total + output_total),
+                    SUM(cost_usd)
+             FROM usage_event
              {clause}"
         );
         let read = |row: &rusqlite::Row<'_>| {
-            // `SUM` over an empty table is NULL, not 0, so every aggregate is
-            // read as an Option. `COUNT(*)` still yields a row here.
+            // `SUM` over an empty table is NULL, not 0, so both aggregates are
+            // read as an Option.
             let tokens: Option<i64> = row.get(0)?;
             let cost: Option<f64> = row.get(1)?;
-            let events: i64 = row.get(2)?;
-            let unpriced: Option<i64> = row.get(3)?;
-            let ignored: Option<i64> = row.get(4)?;
-            Ok((
-                tokens.unwrap_or(0),
-                cost.unwrap_or(0.0),
-                events,
-                unpriced.unwrap_or(0),
-                ignored.unwrap_or(0),
-            ))
+            Ok((tokens.unwrap_or(0), cost.unwrap_or(0.0)))
         };
-        let (tokens, cost, events, unpriced, ignored) = match parameter {
+        let (tokens, cost) = match parameter {
             Some(value) => self.connection.query_row(&sql, [value], read)?,
             None => self.connection.query_row(&sql, [], read)?,
         };
-        let denominator = events.saturating_sub(ignored);
         Ok(UsageTotal {
             tokens: tokens.max(0) as u64,
             cost,
-            coverage: (denominator > 0)
-                .then(|| events.saturating_sub(unpriced) as f64 / denominator as f64),
         })
     }
 
@@ -145,86 +127,82 @@ impl Reader {
         rows.collect()
     }
 
-    /// One histogram, bucketed by a calendar field so a 28-day month cannot
-    /// shift the bars (a fixed 31-day width would misfile 2026-03-01 into the
-    /// February bucket).
+    /// One histogram, bucketed by a local-time calendar field so a 28-day month
+    /// cannot shift the bars and a quarter hour always lands in its own column.
+    /// Tokens and money come back together, so the two charts over one period
+    /// share a single grouped scan.
     fn buckets(&self, bucket: Bucket, since_ms: i64) -> rusqlite::Result<Bucketed> {
-        let bucket_expr = match bucket {
-            Bucket::DayOfWeek => "(CAST(strftime('%w', e.occurred_at / 1000, 'unixepoch', 'localtime') AS INTEGER) + 6) % 7 + 1".to_string(),
-            _ => format!(
-                "CAST(strftime('{}', e.occurred_at / 1000, 'unixepoch', 'localtime') AS INTEGER)",
-                bucket.format()
-            ),
-        };
         let sql = format!(
-            "SELECT {bucket_expr} AS bucket,
-                    SUM(e.input_total + e.output_total)
+            "SELECT {} AS bucket,
+                    SUM(e.input_total + e.output_total),
+                    SUM(e.cost_usd)
              FROM usage_event e
              WHERE e.occurred_at >= ?1
-             GROUP BY bucket"
+             GROUP BY bucket",
+            bucket.expression()
         );
         let mut statement = self.connection.prepare(&sql)?;
         let rows = statement.query_map([since_ms], |row| {
             let index: i64 = row.get(0)?;
             let tokens: Option<i64> = row.get(1)?;
-            Ok((index, tokens.unwrap_or(0).max(0) as u64))
+            let cost: Option<f64> = row.get(2)?;
+            Ok((
+                index,
+                tokens.unwrap_or(0).max(0) as u64,
+                cost.unwrap_or(0.0),
+            ))
         })?;
         let mut buckets = vec![0u64; bucket.len()];
+        let mut costs = vec![0f64; bucket.len()];
         for row in rows {
-            let (index, tokens) = row?;
-            let offset = index - i64::from(bucket.first());
-            if let Some(slot) = buckets.get_mut(offset.max(0) as usize) {
+            let (index, tokens, cost) = row?;
+            if let Some(slot) = buckets.get_mut(index.max(0) as usize) {
                 *slot = tokens;
             }
+            if let Some(slot) = costs.get_mut(index.max(0) as usize) {
+                *slot = cost;
+            }
         }
-        Ok(Bucketed {
-            buckets,
-            first_bucket: bucket.first(),
-        })
+        Ok(Bucketed { buckets, costs })
     }
 }
 
-/// Which calendar field a histogram is cut on.
+/// How a histogram cuts a local-time interval into buckets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Bucket {
-    /// 0..23
-    Hour,
-    /// 1..=7, Monday through Sunday
-    DayOfWeek,
-    /// 1..=31, but only the days this month actually has
-    DayOfMonth,
-    /// 1..=12
-    Month,
+    /// Today in quarter hours: 96 slots, index 0 is 00:00.
+    QuarterHour,
+    /// This month in six-hour blocks: four slots per day, index 0 is the first
+    /// day at 00:00.
+    SixHour,
 }
 
 impl Bucket {
-    fn format(self) -> &'static str {
+    /// The SQL expression that maps `occurred_at` (UTC ms) onto a local-time
+    /// bucket index. Computed in SQL so a whole day or month is one grouped
+    /// scan rather than one row fetched per event.
+    fn expression(self) -> &'static str {
         match self {
-            Bucket::Hour => "%H",
-            Bucket::DayOfWeek => "%w",
-            Bucket::DayOfMonth => "%d",
-            Bucket::Month => "%m",
+            Self::QuarterHour => concat!(
+                "CAST(strftime('%H', e.occurred_at / 1000, 'unixepoch', 'localtime') AS INTEGER) * 4",
+                " + CAST(strftime('%M', e.occurred_at / 1000, 'unixepoch', 'localtime') AS INTEGER) / 15"
+            ),
+            Self::SixHour => concat!(
+                "(CAST(strftime('%d', e.occurred_at / 1000, 'unixepoch', 'localtime') AS INTEGER) - 1) * 4",
+                " + CAST(strftime('%H', e.occurred_at / 1000, 'unixepoch', 'localtime') AS INTEGER) / 6"
+            ),
         }
     }
 
-    fn first(self) -> u32 {
-        match self {
-            Bucket::Hour => 0,
-            _ => 1,
-        }
-    }
-
-    /// Bucket count. The month group follows the real month length, so the row
-    /// never shows a 31st in February.
+    /// Bucket count. The month follows the real month length, so February never
+    /// draws a 31st.
     fn len(self) -> usize {
         match self {
-            Bucket::Hour => 24,
-            Bucket::DayOfWeek => 7,
-            Bucket::DayOfMonth => {
+            Self::QuarterHour => 96,
+            Self::SixHour => {
                 let now = Local::now();
-                days_in_month(now.year(), now.month()) as usize
+                days_in_month(now.year(), now.month()) as usize * 4
             }
-            Bucket::Month => 12,
         }
     }
 }
@@ -334,9 +312,9 @@ mod tests {
     }
 
     #[test]
-    fn coverage_excludes_ignored_events_from_both_sides() {
+    fn totals_count_every_event_ignored_models_included() {
         let connection = seeded();
-        // 3 events: 2 ignored + 1 priced -> 1/1 = 1.00
+        // Two unpriced events of a model the ranking ignores, one priced event.
         insert(
             &connection,
             "opencode",
@@ -377,45 +355,17 @@ mod tests {
             )
             .expect("alias");
         let total = reader(connection).total(None).expect("total");
-        assert_eq!(total.coverage, Some(1.0));
+        // The alias is the ranking's filter, not the totals': every event counts
+        // toward the interval figures, and unpriced events add no money.
         assert_eq!(total.tokens, 33);
         assert_eq!(total.cost, 0.5);
     }
 
     #[test]
-    fn an_unpriced_event_stays_in_the_denominator() {
-        let connection = seeded();
-        insert(
-            &connection,
-            "omp",
-            "1",
-            "vendor/paid",
-            10,
-            0,
-            1,
-            Some(0.5),
-            100,
-        );
-        insert(
-            &connection,
-            "omp",
-            "2",
-            "vendor/unknown",
-            10,
-            0,
-            1,
-            None,
-            100,
-        );
-        let total = reader(connection).total(None).expect("total");
-        assert_eq!(total.coverage, Some(0.5), "1 of 2 events is priceable");
-    }
-
-    #[test]
-    fn an_empty_table_reports_no_coverage_rather_than_zero_percent() {
+    fn an_empty_table_totals_zero() {
         let total = reader(seeded()).total(None).expect("total");
-        assert_eq!(total.coverage, None);
         assert_eq!(total.tokens, 0);
+        assert_eq!(total.cost, 0.0);
     }
 
     #[test]
@@ -550,7 +500,7 @@ mod tests {
         let connection = seeded();
         let now = Local::now();
         let day_start = local_midnight(now, Period::Day);
-        // Exactly one event, inside the current hour.
+        // Exactly one event, inside the current quarter hour, and priced.
         insert(
             &connection,
             "omp",
@@ -563,28 +513,33 @@ mod tests {
             now.timestamp_millis(),
         );
         let buckets = reader(connection)
-            .buckets(Bucket::Hour, day_start)
+            .buckets(Bucket::QuarterHour, day_start)
             .expect("buckets");
-        assert_eq!(buckets.buckets.len(), 24, "every hour needs a slot");
+        assert_eq!(buckets.buckets.len(), 96, "every quarter hour needs a slot");
+        assert_eq!(buckets.costs.len(), 96, "money shares the token slots");
         let filled = buckets.buckets.iter().filter(|value| **value > 0).count();
         assert_eq!(
             filled, 1,
-            "an absent hour must stay a zero, not shift the row"
+            "an absent quarter hour must stay a zero, not shift the row"
         );
-        assert_eq!(buckets.buckets[now.hour() as usize], 11);
+        let slot = now.hour() as usize * 4 + now.minute() as usize / 15;
+        assert_eq!(buckets.buckets[slot], 11);
+        assert_eq!(
+            buckets.costs[slot], 1.0,
+            "the cost lands in the same bucket"
+        );
     }
 
     #[test]
     fn the_month_histogram_follows_the_real_month_length() {
         let connection = seeded();
         let buckets = reader(connection)
-            .buckets(Bucket::DayOfMonth, 0)
+            .buckets(Bucket::SixHour, 0)
             .expect("buckets");
-        assert_eq!(
-            buckets.buckets.len(),
-            days_in_month(Local::now().year(), Local::now().month()) as usize
-        );
-        assert!(buckets.buckets.len() <= 31);
+        let days = days_in_month(Local::now().year(), Local::now().month()) as usize;
+        assert_eq!(buckets.buckets.len(), days * 4, "four blocks per day");
+        assert_eq!(buckets.costs.len(), days * 4);
+        assert!(buckets.buckets.len() <= 31 * 4);
     }
 
     #[test]
@@ -661,41 +616,51 @@ mod tests {
     }
 
     #[test]
-    fn week_bucket_aggregates_monday_to_sunday() {
+    fn six_hour_buckets_split_a_day_into_four() {
         let connection = seeded();
         let now = Local::now();
-        let week_start = local_midnight(now, Period::Week);
-        // Insert one event on Monday (week_start + 1 hour)
+        let day = NaiveDate::from_ymd_opt(now.year(), now.month(), 2).expect("day 2");
+        let at = |hour: u32, minute: u32| {
+            Local
+                .from_local_datetime(&day.and_hms_opt(hour, minute, 0).expect("valid time"))
+                .earliest()
+                .expect("valid local time")
+                .timestamp_millis()
+        };
+        // Day 2 at 00:30 and at 07:00: different six-hour blocks of the same day.
         insert(
             &connection,
             "omp",
-            "mon",
+            "a",
             "m",
             100,
             0,
             50,
-            Some(1.0),
-            week_start + 3600 * 1000,
+            Some(1.5),
+            at(0, 30),
         );
-        // Insert one event on Sunday (week_start + 6 days + 1 hour)
         insert(
             &connection,
             "omp",
-            "sun",
+            "b",
             "m",
             200,
             0,
             50,
-            Some(2.0),
-            week_start + (6 * 86400 + 3600) * 1000,
+            Some(2.5),
+            at(7, 0),
         );
         let buckets = reader(connection)
-            .buckets(Bucket::DayOfWeek, week_start)
+            .buckets(Bucket::SixHour, local_midnight(now, Period::Month))
             .expect("buckets");
-        assert_eq!(buckets.first_bucket, 1);
-        assert_eq!(buckets.buckets.len(), 7);
-        assert_eq!(buckets.buckets[0], 150, "Monday slot (offset 0) mismatch");
-        assert_eq!(buckets.buckets[6], 250, "Sunday slot (offset 6) mismatch");
+        assert_eq!(buckets.buckets[4], 150, "day 2, first block");
+        assert_eq!(buckets.buckets[5], 250, "day 2, second block");
+        assert_eq!(buckets.costs[4], 1.5, "money rides the same block");
+        assert_eq!(buckets.costs[5], 2.5);
+        assert!(
+            buckets.buckets[..4].iter().all(|value| *value == 0),
+            "day 1 must stay empty rather than shift the row"
+        );
     }
 
     #[test]

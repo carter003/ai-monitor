@@ -79,9 +79,9 @@ fn codex_card(title: &str, value: &Value) -> Result<Card, FetchError> {
     Ok(card)
 }
 
-pub fn go(value: &Value) -> Result<Vec<Card>, FetchError> {
+pub fn go(value: &Value, title: &str) -> Result<Vec<Card>, FetchError> {
     let usage = value.get("usage").ok_or_else(FetchError::format)?;
-    let mut card = Card::empty("OpenCode Go");
+    let mut card = Card::empty(title);
     for (key, label) in [("rolling", "5H"), ("weekly", "周"), ("monthly", "月")] {
         let window = usage.get(key).ok_or_else(FetchError::format)?;
         let used_value = window.get("percent").ok_or_else(FetchError::format)?;
@@ -245,23 +245,39 @@ mod tests {
     #[test]
     fn go_shows_remaining_and_never_uses_a_local_billing_estimate() {
         let w = |p| json!({"percent":p,"resetsAt":"2026-09-08T05:42:58Z"});
-        let cards = go(&json!({"usage":{"rolling":w(0),"weekly":w(31),"monthly":w(98)}})).unwrap();
+        let cards = go(
+            &json!({"usage":{"rolling":w(0),"weekly":w(31),"monthly":w(98)}}),
+            "OpenCode Go",
+        )
+        .unwrap();
         assert_eq!(cards[0].meters[2].remaining, Some(2.));
-        assert!(go(&json!({"usage":{"monthly":w(98)}})).is_err());
+        assert!(go(&json!({"usage":{"monthly":w(98)}}), "OpenCode Go").is_err());
     }
     #[test]
     fn go_keeps_official_precision_without_padding_integers() {
-        let cards = go(&json!({"usage":{
+        let value = json!({"usage":{
             "rolling": {"percent": 12.5, "resetsAt": "2026-09-08T05:42:58Z"},
             "weekly": {"percent": 31, "resetsAt": "2026-09-15T05:42:58Z"},
             "monthly": {"percent": 0, "resetsAt": "2026-10-01T05:42:58Z"},
-        }}))
-        .unwrap();
+        }});
+        let cards = go(&value, "OpenCode Go").unwrap();
         assert!((cards[0].meters[0].remaining.unwrap() - 87.5).abs() < 0.001);
         assert_eq!(cards[0].meters[0].decimals, 1);
         assert_eq!(cards[0].meters[1].decimals, 0);
         assert_eq!(cards[0].meters[2].remaining, Some(100.));
         assert_eq!(cards[0].meters[2].decimals, 0);
+    }
+    #[test]
+    fn go_renders_either_card_title() {
+        let w = |p| json!({"percent":p,"resetsAt":"2026-09-08T05:42:58Z"});
+        for title in ["OpenCode Go", "OpenCode GO-2"] {
+            let cards = go(
+                &json!({"usage":{"rolling":w(0),"weekly":w(0),"monthly":w(0)}}),
+                title,
+            )
+            .unwrap();
+            assert_eq!(cards[0].title, title);
+        }
     }
     #[test]
     fn agy_fraction_precision_shifts_with_remaining_percent() {
