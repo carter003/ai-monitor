@@ -1,0 +1,82 @@
+name: Chart visual regression
+on:
+  push:
+    branches: [agent/chart-tiles-daily-line-20260912]
+    paths: [.github/workflows/chart-visuals.yml]
+permissions:
+  contents: read
+jobs:
+  apply-once:
+    if: github.repository == 'carter003/ai-monitor' && github.ref == 'refs/heads/agent/chart-tiles-daily-line-20260912'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - run: rustup toolchain install stable --profile minimal --component rustfmt
+      - name: Apply exact-source patch and format
+        run: |
+          python3 scripts/apply-chart-tiles-once.py
+          sed -i 's/costs.iter().sum());/costs.iter().sum::<f64>());/' crates/ai-monitor/src/ui/token/daily_money.rs
+          cargo +stable fmt --all
+          rm scripts/apply-chart-tiles-once.py
+      - name: Commit only the requested source repair
+        id: commit
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/ai-monitor/src/ui.rs crates/ai-monitor/src/ui/token.rs crates/ai-monitor/src/ui/token/tests.rs crates/ai-monitor/src/ui/token/daily_money.rs scripts/apply-chart-tiles-once.py
+          git commit -m 'fix(charts): tile native bins without gaps and draw daily cost points'
+          git push origin HEAD:refs/heads/agent/chart-tiles-daily-line-20260912
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  verify:
+    needs: apply-once
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.apply-once.outputs.sha }}
+          persist-credentials: false
+      - run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+          mkdir -p /tmp/chart-previews
+          git rev-parse HEAD | tee /tmp/chart-previews/commit.txt
+          rustc --version
+          cargo --version
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Tests
+        if: success() || failure()
+        run: cargo test --workspace --locked
+      - name: Clippy
+        if: success() || failure()
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Export real Ratatui-Crossterm fixtures
+        if: success() || failure()
+        env:
+          CHART_PREVIEW_DIR: /tmp/chart-previews
+        run: cargo test -p ai-monitor --locked export_real_chart_terminal_fixtures -- --nocapture
+      - name: Install terminal renderer
+        if: success() || failure()
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3-gi gir1.2-vte-2.91 xvfb xauth fonts-noto-cjk
+      - name: Capture GTK-VTE terminal screenshots
+        if: success() || failure()
+        run: xvfb-run -a -s '-screen 0 2400x1400x24' /usr/bin/python3 scripts/capture_chart_vte.py /tmp/chart-previews
+      - name: Include inspected sources
+        if: always()
+        run: tar --exclude=.git --exclude=target -czf /tmp/chart-previews/source.tar.gz .
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chart-terminal-previews
+          path: /tmp/chart-previews
+          retention-days: 7
