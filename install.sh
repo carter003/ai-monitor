@@ -6,7 +6,7 @@ install_bin_dir=${AI_MONITOR_INSTALL_DIR:-"$HOME/.local/bin"}
 
 echo "==> 编译工作区 (Release)..."
 cd "$workspace_dir"
-cargo build --release
+cargo build --release --all-features
 
 mkdir -p -- "$install_bin_dir"
 

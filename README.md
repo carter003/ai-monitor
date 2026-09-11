@@ -126,6 +126,9 @@ sh install.sh
 - `herdr-usage`：Token 采集守护程序
 - `import_prices`：价格表同步工具
 
+安装脚本使用 `--all-features` 编译；若只需采集器，可单独执行
+`cargo build --release -p herdr-usage`（跳过价格同步工具的 HTTP 依赖编译）。
+
 ### 2. 运行 TUI 监控看板
 
 ```sh
