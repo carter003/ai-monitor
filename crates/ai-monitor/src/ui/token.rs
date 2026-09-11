@@ -632,7 +632,7 @@ fn histogram(chart: &Chart<'_>, width: u16, rows: usize, origin: usize) -> Vec<L
                 ));
             }
         } else {
-            for pair in owners.chunks_exact(2) {
+            for pair in owners.as_chunks::<2>().0 {
                 let ink = |owner: Option<usize>| {
                     owner
                         .filter(|index| heights[*index] > base)
