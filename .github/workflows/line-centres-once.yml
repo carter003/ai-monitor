@@ -1,0 +1,53 @@
+name: One-shot line centre correction
+on:
+  push:
+    branches: [agent/chart-tiles-daily-line-20260912]
+    paths: [.github/workflows/line-centres-once.yml]
+permissions:
+  contents: read
+jobs:
+  apply:
+    if: github.repository == 'carter003/ai-monitor' && github.ref == 'refs/heads/agent/chart-tiles-daily-line-20260912'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - run: rustup toolchain install stable --profile minimal --component rustfmt
+      - name: Exact-source correction
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          def check(path, expected):
+              data = path.read_bytes()
+              assert hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest() == expected
+          p = Path('crates/ai-monitor/src/ui/token/daily_money.rs')
+          check(p, '5085f1400cfb433efa4af04a834482e3f3b29ec8')
+          s = p.read_text()
+          s = s.replace('.x_bounds([0., geometry.plot.saturating_sub(1).max(1) as f64])\n        .y_bounds([0., max])', '.x_bounds([0., (geometry.plot * 2 - 1) as f64])\n        .y_bounds([0., ((rows + 1) * 4 - 1) as f64])')
+          assert 'geometry.plot * 2 - 1' in s
+          s = s.replace('x1: ticks[day - 1].0 as f64,\n                        y1: previous,\n                        x2: ticks[day].0 as f64,\n                        y2: value,', 'x1: (ticks[day - 1].0 * 2 + 1) as f64,\n                        y1: ((rows - point_row(previous, max, rows)) * 4 + 2) as f64,\n                        x2: (ticks[day].0 * 2 + 1) as f64,\n                        y2: ((rows - point_row(value, max, rows)) * 4 + 2) as f64,')
+          assert 'point_row(previous' in s
+          s = s.replace('let y = ((1. - value / max) * rows as f64).round() as u16;', 'let y = point_row(value, max, rows) as u16;')
+          # U+2219 is neutral-width. U+25CF is East-Asian ambiguous and the CJK
+          # font in the actual VTE screenshots overhung the one-cell marker.
+          s = s.replace('●', '∙')
+          helper = '\n// A point and BOTH adjoining line segments use this same visible row.\n// Canvas coordinates are its 2x4 braille raster, so the stroke passes through\n// the centre of the marker cell instead of ending half a row away.\nfn point_row(value: f64, max: f64, rows: usize) -> usize {\n    (((1. - value / max) * rows as f64).round() as usize).min(rows)\n}\n\n'
+          s = s.replace('#[cfg(test)]\nmod tests {', helper + '#[cfg(test)]\nmod tests {')
+          p.write_text(s)
+          p = Path('crates/ai-monitor/src/ui/token/tests.rs')
+          check(p, '51924541a18b4d93fb52826803f7d8bedb144f55')
+          p.write_text(p.read_text().replace('●', '∙'))
+          PY
+          cargo +stable fmt --all
+      - name: Commit only point rendering changes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/ai-monitor/src/ui/token/daily_money.rs crates/ai-monitor/src/ui/token/tests.rs
+          git commit -m 'fix(charts): connect strokes to point cell centres and avoid wide marker glyphs'
+          git push origin HEAD:refs/heads/agent/chart-tiles-daily-line-20260912
