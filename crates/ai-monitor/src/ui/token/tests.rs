@@ -201,12 +201,26 @@ fn unknown_cost_is_not_presented_as_zero() {
 }
 
 #[test]
-fn the_historical_total_survives_a_tiny_height() {
+fn the_historical_total_survives_compact_and_scrollable_summaries() {
     let usage = usage();
-    let rendered = text(&lines(&usage, 80, 2));
-    assert!(rendered.contains("历史累计"));
-    assert!(rendered.contains("126.3B tokens"));
-    assert!(rendered.contains("$318.6"));
+    // Four peer summary cards already fit in two rows at this width. This
+    // path must not be mistaken for the three-row historical-only fallback.
+    let compact = lines(&usage, 80, 2);
+    assert_eq!(compact.len(), 2);
+    let rendered = text(&compact);
+    for value in ["当日", "本周", "本月", "历史累计", "126.3B", "$318.6"] {
+        assert!(rendered.contains(value), "missing {value}: {rendered}");
+    }
+    assert!(!rendered.contains('╔'));
+
+    // One available row cannot hold the summary. Keep the historical values
+    // in the scrollable content rather than discarding them to fit a frame.
+    let fallback = lines(&usage, 80, 1);
+    assert_eq!(fallback.len(), 3);
+    let rendered = text(&fallback);
+    for value in ["历史累计", "126.3B tokens", "$318.6"] {
+        assert!(rendered.contains(value), "missing {value}: {rendered}");
+    }
     assert!(!rendered.contains('╔'));
 }
 
