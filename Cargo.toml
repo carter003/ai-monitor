@@ -1,0 +1,19 @@
+[workspace]
+members = [
+    "crates/ai-monitor",
+    "crates/herdr-usage",
+]
+resolver = "2"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+
+
+# 限制 Debug 与测试编译的符号表体积，防止 target/ 无节制膨胀
+[profile.dev]
+debug = 1
+
+[profile.test]
+debug = 1

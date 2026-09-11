@@ -1,0 +1,20 @@
+[Unit]
+Description=Herdr agent token usage collector
+After=network-online.target
+
+[Service]
+Type=simple
+# The release binary by absolute path; systemd does not expand `~`, so `%h` is
+# required rather than a literal tilde.
+ExecStart=%h/.local/bin/herdr-usage
+WorkingDirectory=%h/.local/share/herdr
+Restart=on-failure
+RestartSec=10s
+# The collector never uses the network, but it does need HOME/XDG_DATA_HOME to
+# locate the four sources and the database.
+Environment=HOME=%h
+Environment=XDG_DATA_HOME=%h/.local/share
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target

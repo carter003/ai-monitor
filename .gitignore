@@ -1,0 +1,23 @@
+# Rust build artifacts
+target/
+**/*.rs.bk
+
+# Local databases and logs
+*.db
+*.db-wal
+*.db-shm
+*.db.bak
+probe.db
+*.log
+
+# Sensitive credentials & local configs
+*.key
+config.toml
+ai-monitor.toml
+
+# Editor & OS files
+.DS_Store
+*~
+*.swp
+.idea/
+.vscode/
