@@ -1,0 +1,50 @@
+name: Chart visual regression
+on:
+  pull_request:
+    paths:
+      - 'crates/ai-monitor/src/ui/**'
+      - 'crates/ai-monitor/src/ui.rs'
+      - 'scripts/capture_chart_vte.py'
+      - '.github/workflows/chart-visuals.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/ai-monitor/src/ui/**'
+      - 'crates/ai-monitor/src/ui.rs'
+      - 'scripts/capture_chart_vte.py'
+      - '.github/workflows/chart-visuals.yml'
+permissions:
+  contents: read
+concurrency:
+  group: chart-visuals-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  terminal-screenshots:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          mkdir -p /tmp/chart-previews
+          git rev-parse HEAD | tee /tmp/chart-previews/commit.txt
+      - name: Export real Ratatui-Crossterm fixtures
+        env:
+          CHART_PREVIEW_DIR: /tmp/chart-previews
+        run: cargo test -p ai-monitor --locked export_real_chart_terminal_fixtures -- --nocapture
+      - name: Install terminal renderer
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3-gi gir1.2-vte-2.91 xvfb xauth fonts-noto-cjk
+      - name: Capture GTK-VTE terminal screenshots
+        run: xvfb-run -a -s '-screen 0 2400x1400x24' /usr/bin/python3 scripts/capture_chart_vte.py /tmp/chart-previews
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chart-terminal-previews
+          path: /tmp/chart-previews
+          retention-days: 7

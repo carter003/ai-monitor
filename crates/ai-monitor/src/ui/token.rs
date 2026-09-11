@@ -11,6 +11,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 
+mod daily_money;
 #[cfg(test)]
 mod tests;
 
@@ -347,11 +348,18 @@ fn local_charts(usage: &UsageStats) -> [Chart<'_>; 3] {
     ]
 }
 
-pub(super) fn draw_charts(frame: &mut Frame, areas: &[Rect], usage: &UsageStats) {
+pub(super) fn draw_charts(frame: &mut Frame, areas: &[Rect], usage: &UsageStats, now: i64) {
     let charts = local_charts(usage);
     let origin = plot_origin(&charts);
+    let through_day = chrono::DateTime::from_timestamp(now, 0)
+        .map(|time| chrono::Datelike::day(&time.with_timezone(&chrono::Local)) as usize)
+        .unwrap_or(0);
     for (chart, area) in charts.iter().zip(areas) {
         if area.height >= MIN_CHART_HEIGHT {
+            if chart.series.money() {
+                daily_money::draw(frame, *area, chart, origin, through_day);
+                continue;
+            }
             frame.render_widget(
                 Paragraph::new(histogram(
                     chart,
@@ -425,7 +433,10 @@ fn plot_origin(charts: &[Chart<'_>]) -> usize {
     let label_width = charts
         .iter()
         .map(|chart| {
-            let max = nice_ceiling(series_peak(&chart.series));
+            let max = match &chart.series {
+                Series::Money(costs) => daily_money::ceiling(costs),
+                _ => nice_ceiling(series_peak(&chart.series)),
+            };
             columns(&value_label(max, max, chart.series.money()))
         })
         .max()
@@ -466,15 +477,16 @@ fn bar_color(share: f64) -> Color {
     }
 }
 
-/// Full-period geometry. First remove compulsory gaps, then use half-cell
-/// bars if one column per original bucket cannot fit. Never crop or aggregate.
-/// Coordinates are measured in `resolution` horizontal units per terminal cell.
+/// Full-period, gap-free tiling. Each shared edge ends one bucket AND starts
+/// its neighbour. Rounding changes a bin's raster width by at most one unit;
+/// it can never create unowned half-cells between positive adjacent buckets.
+/// Do not centre a narrower, fixed-width bar inside independently rounded
+/// slots: that was the source of the alternating blank/no-blank regression.
 struct Geometry {
     origin: usize,
     plot: usize,
     resolution: usize,
-    bar_width: usize,
-    starts: Vec<usize>,
+    edges: Vec<usize>,
 }
 
 impl Geometry {
@@ -485,34 +497,25 @@ impl Geometry {
         }
         let resolution = if plot >= count { 1 } else { 2 };
         let available = plot * resolution;
-        let mut bar_width = available / count;
-        if bar_width.is_multiple_of(2) {
-            bar_width -= 1;
-        }
-        let starts = (0..count)
-            .map(|index| {
-                let left = index * available / count;
-                let right = (index + 1) * available / count;
-                left + (right - left - bar_width) / 2
-            })
-            .collect();
+        let edges = (0..=count).map(|index| index * available / count).collect();
         Some(Self {
             origin,
             plot,
             resolution,
-            bar_width,
-            starts,
+            edges,
         })
     }
 
     fn centre(&self, index: usize) -> usize {
-        (self.starts[index] + self.bar_width / 2) / self.resolution
+        // The terminal column containing the bin midpoint. Half-cell mode
+        // still has character-level ticks; it does not claim subpixel ticks.
+        (self.edges[index] + self.edges[index + 1] - 1) / (2 * self.resolution)
     }
 
     fn owners(&self) -> Vec<Option<usize>> {
         let mut owners = vec![None; self.plot * self.resolution];
-        for (index, start) in self.starts.iter().copied().enumerate() {
-            owners[start..start + self.bar_width].fill(Some(index));
+        for (index, edges) in self.edges.windows(2).enumerate() {
+            owners[edges[0]..edges[1]].fill(Some(index));
         }
         owners
     }
