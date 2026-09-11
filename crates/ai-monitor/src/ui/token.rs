@@ -246,7 +246,11 @@ fn model_table(models: &[ModelUsage], width: usize, limit: usize) -> Vec<Line<'s
                 spans.push(Span::raw(" "));
             }
             spans.push(Span::styled(
-                format!("{}{}", " ".repeat(cell_width.saturating_sub(columns(&text))), text),
+                format!(
+                    "{}{}",
+                    " ".repeat(cell_width.saturating_sub(columns(&text))),
+                    text
+                ),
                 Style::default().fg(color),
             ));
         }
@@ -255,7 +259,10 @@ fn model_table(models: &[ModelUsage], width: usize, limit: usize) -> Vec<Line<'s
     let mut result = vec![row(
         "模型",
         MUTED,
-        slots.iter().map(|(column, _)| (column.label().into(), MUTED)).collect(),
+        slots
+            .iter()
+            .map(|(column, _)| (column.label().into(), MUTED))
+            .collect(),
     )];
     for model in taken {
         result.push(row(
@@ -344,6 +351,9 @@ pub(super) fn draw_charts(frame: &mut Frame, areas: &[Rect], usage: &UsageStats)
     // label-width bound before the width-dependent bucket merge is selected.
     let origin = plot_origin(&charts);
     for (chart, area) in charts.iter().zip(areas) {
+        if area.height < MIN_CHART_HEIGHT {
+            continue;
+        }
         if area.width as usize <= origin {
             frame.render_widget(
                 Paragraph::new(truncate("请拉宽查看趋势", area.width as usize))
@@ -352,7 +362,12 @@ pub(super) fn draw_charts(frame: &mut Frame, areas: &[Rect], usage: &UsageStats)
             );
         } else {
             frame.render_widget(
-                Paragraph::new(histogram(chart, area.width, chart_rows(area.height), origin)),
+                Paragraph::new(histogram(
+                    chart,
+                    area.width,
+                    chart_rows(area.height),
+                    origin,
+                )),
                 *area,
             );
         }
@@ -476,7 +491,11 @@ impl Geometry {
     fn new(width: u16, origin: usize, count: usize) -> Self {
         let plot = (width as usize).saturating_sub(origin);
         let count = count.max(1);
-        let bar_width = plot.saturating_sub(count - 1).checked_div(count).unwrap_or(0).max(1);
+        let bar_width = plot
+            .saturating_sub(count - 1)
+            .checked_div(count)
+            .unwrap_or(0)
+            .max(1);
         let gap_cells = plot.saturating_sub(count * bar_width);
         let starts = (0..count)
             .map(|index| {
@@ -488,7 +507,12 @@ impl Geometry {
                     }
             })
             .collect();
-        Self { origin, plot, bar_width, starts }
+        Self {
+            origin,
+            plot,
+            bar_width,
+            starts,
+        }
     }
 
     fn centre(&self, index: usize) -> usize {
@@ -497,7 +521,11 @@ impl Geometry {
 
     fn gap_after(&self, index: usize) -> usize {
         let end = self.starts[index] + self.bar_width;
-        self.starts.get(index + 1).copied().unwrap_or(self.plot).saturating_sub(end)
+        self.starts
+            .get(index + 1)
+            .copied()
+            .unwrap_or(self.plot)
+            .saturating_sub(end)
     }
 }
 
@@ -509,7 +537,11 @@ fn histogram(chart: &Chart<'_>, width: u16, rows: usize, origin: usize) -> Vec<L
     let factor = merge_factor(chart, plot);
     let merged = merged_values(&chart.series, factor);
     let geometry = Geometry::new(width, origin, merged.len());
-    let peak = merged.iter().copied().filter(|value| value.is_finite()).fold(0f64, f64::max);
+    let peak = merged
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .fold(0f64, f64::max);
     let max = nice_ceiling(peak);
     let subrows = rows * 8;
     let eighths: Vec<_> = merged
@@ -530,7 +562,11 @@ fn histogram(chart: &Chart<'_>, width: u16, rows: usize, origin: usize) -> Vec<L
             )
         })
         .collect();
-    let partial = if chart.series.len() % factor == 0 { "" } else { " · 末柱不足" };
+    let partial = if chart.series.len().is_multiple_of(factor) {
+        ""
+    } else {
+        " · 末柱不足"
+    };
     let title = format!(
         " {} · 每柱 {}{}",
         chart.label,
@@ -546,8 +582,12 @@ fn histogram(chart: &Chart<'_>, width: u16, rows: usize, origin: usize) -> Vec<L
     // vertical scale that could disagree with the bar's height.
     let tick_step = rows.div_ceil(4);
     for row in 0..rows {
-        let head = if row % tick_step == 0 {
-            value_label(max * (rows - row) as f64 / rows as f64, max, chart.series.money())
+        let head = if row.is_multiple_of(tick_step) {
+            value_label(
+                max * (rows - row) as f64 / rows as f64,
+                max,
+                chart.series.money(),
+            )
         } else {
             String::new()
         };
@@ -573,8 +613,15 @@ fn histogram(chart: &Chart<'_>, width: u16, rows: usize, origin: usize) -> Vec<L
             *cell = '┴';
         }
     }
-    let mut baseline = axis_prefix(&value_label(0., max, chart.series.money()), '└', geometry.origin);
-    baseline.push(Span::styled(rule.into_iter().collect::<String>(), Style::default().fg(TRACK)));
+    let mut baseline = axis_prefix(
+        &value_label(0., max, chart.series.money()),
+        '└',
+        geometry.origin,
+    );
+    baseline.push(Span::styled(
+        rule.into_iter().collect::<String>(),
+        Style::default().fg(TRACK),
+    ));
     result.push(Line::from(baseline));
     result.push(tick_labels(&ticks, &geometry));
     result
@@ -583,7 +630,10 @@ fn histogram(chart: &Chart<'_>, width: u16, rows: usize, origin: usize) -> Vec<L
 fn axis_prefix(label: &str, mark: char, origin: usize) -> Vec<Span<'static>> {
     let padding = origin.saturating_sub(columns(label) + 3);
     vec![
-        Span::styled(format!(" {}{label} ", " ".repeat(padding)), Style::default().fg(MUTED)),
+        Span::styled(
+            format!(" {}{label} ", " ".repeat(padding)),
+            Style::default().fg(MUTED),
+        ),
         Span::styled(mark.to_string(), Style::default().fg(TRACK)),
     ]
 }
@@ -596,7 +646,9 @@ fn tick_labels(ticks: &[(usize, String)], geometry: &Geometry) -> Line<'static> 
     let mut next_free = 0;
     for (centre, text) in ticks {
         let width = columns(text);
-        let Some(start) = centre.checked_sub(width / 2) else { continue };
+        let Some(start) = centre.checked_sub(width / 2) else {
+            continue;
+        };
         if start < next_free || start + width > geometry.plot {
             continue;
         }

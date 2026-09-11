@@ -40,12 +40,30 @@ fn sample_usage() -> UsageStats {
                 cost: Some(3.5),
             })
             .collect(),
-        hours: Bucketed { buckets: vec![1_000_000; 96], costs: vec![0.1; 96] },
-        month: Bucketed { buckets: vec![1_000_000; 124], costs: vec![0.1; 124] },
-        day_total: UsageTotal { tokens: 1_400_000, cost: 1.25 },
-        week_total: UsageTotal { tokens: 4_200_000, cost: 6.8 },
-        month_total: UsageTotal { tokens: 18_700_000_000, cost: 31.05 },
-        all_total: UsageTotal { tokens: 126_300_000_000, cost: 318.62 },
+        hours: Bucketed {
+            buckets: vec![1_000_000; 96],
+            costs: vec![0.1; 96],
+        },
+        month: Bucketed {
+            buckets: vec![1_000_000; 124],
+            costs: vec![0.1; 124],
+        },
+        day_total: UsageTotal {
+            tokens: 1_400_000,
+            cost: 1.25,
+        },
+        week_total: UsageTotal {
+            tokens: 4_200_000,
+            cost: 6.8,
+        },
+        month_total: UsageTotal {
+            tokens: 18_700_000_000,
+            cost: 31.05,
+        },
+        all_total: UsageTotal {
+            tokens: 126_300_000_000,
+            cost: 318.62,
+        },
         ..UsageStats::default()
     }
 }
@@ -53,7 +71,11 @@ fn sample_usage() -> UsageStats {
 fn relative_luminance((r, g, b): (u8, u8, u8)) -> f64 {
     let channel = |value: u8| {
         let value = f64::from(value) / 255.;
-        if value <= 0.04045 { value / 12.92 } else { ((value + 0.055) / 1.055).powf(2.4) }
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
     };
     0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
 }
@@ -121,13 +143,34 @@ fn all_terminal_sizes_render_and_scrolling_is_bounded() {
         .map(|source| SourceState::new(source, Duration::from_secs(60)))
         .collect();
     for (width, height) in [
-        (1, 1), (20, 10), (26, 12), (32, 24), (40, 40), (52, 48),
-        (80, 24), (100, 30), (120, 40), (160, 50), (220, 70),
+        (1, 1),
+        (20, 10),
+        (26, 12),
+        (32, 24),
+        (40, 40),
+        (52, 48),
+        (80, 24),
+        (100, 30),
+        (120, 40),
+        (160, 50),
+        (220, 70),
     ] {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        let mut view = View { scroll: usize::MAX, ..View::default() };
+        let mut view = View {
+            scroll: usize::MAX,
+            ..View::default()
+        };
         terminal
-            .draw(|f| draw(f, &SystemStats::default(), &states, &sample_usage(), &mut view, 100))
+            .draw(|f| {
+                draw(
+                    f,
+                    &SystemStats::default(),
+                    &states,
+                    &sample_usage(),
+                    &mut view,
+                    100,
+                )
+            })
             .unwrap();
         if width >= 26 && height >= 12 {
             assert!(view.scroll <= view.max_scroll, "{width}x{height}");
@@ -223,8 +266,11 @@ fn percentage_keeps_near_full_precision() {
 #[test]
 fn percentage_keeps_official_decimal_places() {
     for (value, places, expected) in [
-        (100., 1, "100.0%"), (68.8, 1, "68.8%"), (0., 1, "0.0%"),
-        (67.24, 2, "67.24%"), (82., 0, "82%"),
+        (100., 1, "100.0%"),
+        (68.8, 1, "68.8%"),
+        (0., 1, "0.0%"),
+        (67.24, 2, "67.24%"),
+        (82., 0, "82%"),
     ] {
         assert_eq!(percent(value, places), expected);
     }
@@ -241,7 +287,10 @@ fn footer_shows_version_at_bottom_right() {
 fn the_readme_changelog_matches_the_crate_version() {
     let readme = include_str!("../../README.md");
     let expected = format!("## {} 更新", env!("CARGO_PKG_VERSION"));
-    let first = readme.lines().find(|line| line.starts_with("## ") && line.ends_with(" 更新")).unwrap();
+    let first = readme
+        .lines()
+        .find(|line| line.starts_with("## ") && line.ends_with(" 更新"))
+        .unwrap();
     assert_eq!(first.trim(), expected);
     assert!(readme.contains(concat!("`v", env!("CARGO_PKG_VERSION"), "`")));
 }
@@ -271,18 +320,31 @@ fn twelve_logical_cpus_form_a_vertical_axis_beside_history() {
         .unwrap();
     let text = buffer_text(terminal.backend().buffer());
     let lines: Vec<_> = text.lines().collect();
-    let first = lines.iter().position(|line| line.contains("CPU01")).unwrap();
-    let last = lines.iter().position(|line| line.contains("CPU12")).unwrap();
+    let first = lines
+        .iter()
+        .position(|line| line.contains("CPU01"))
+        .unwrap();
+    let last = lines
+        .iter()
+        .position(|line| line.contains("CPU12"))
+        .unwrap();
     assert_eq!(last - first, 11);
     assert!(lines[first..=last].iter().all(|line| line.contains('%')));
-    assert!(lines[first..=last].iter().all(|line| line.chars().any(|c| "▁▂▃▄▅▆▇█".contains(c))));
+    assert!(
+        lines[first..=last]
+            .iter()
+            .all(|line| line.chars().any(|c| "▁▂▃▄▅▆▇█".contains(c)))
+    );
     assert!(view.page_size > 0);
     assert!(last < 20);
 }
 
 #[test]
 fn a_missing_database_says_so_instead_of_showing_zeros() {
-    let usage = UsageStats { error: Some("unable to open database file".into()), ..sample_usage() };
+    let usage = UsageStats {
+        error: Some("unable to open database file".into()),
+        ..sample_usage()
+    };
     let (text, _) = render(&usage, 120, 40);
     assert!(text.contains("未连接 usage.db"));
     assert!(!text.contains("$0.00"));
@@ -301,7 +363,15 @@ fn the_total_survives_a_short_pane_without_a_double_frame() {
 #[test]
 fn the_panels_identify_local_usage_and_cloud_remaining_separately() {
     let (text, _) = render(&sample_usage(), 120, 40);
-    for label in ["系统资源 · 已用", "AI 额度 · 剩余", "本地消耗 · Token", "最近24小时", "今日 Token", "本月 Token", "本月金额"] {
+    for label in [
+        "系统资源 · 已用",
+        "AI 额度 · 剩余",
+        "本地消耗 · Token",
+        "最近24小时",
+        "今日 Token",
+        "本月 Token",
+        "本月金额",
+    ] {
         assert!(text.contains(label), "missing {label}: {text}");
     }
     assert!(!text.contains("Token (24H)"));
@@ -333,11 +403,17 @@ fn charts_stay_fixed_when_the_quota_list_scrolls() {
     let usage = sample_usage();
     let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
     let mut view = View::default();
-    let states: Vec<_> = (0..30).map(|_| SourceState::new(Source::Go, Duration::from_secs(60))).collect();
-    terminal.draw(|f| draw(f, &SystemStats::default(), &states, &usage, &mut view, 100)).unwrap();
+    let states: Vec<_> = (0..30)
+        .map(|_| SourceState::new(Source::Go, Duration::from_secs(60)))
+        .collect();
+    terminal
+        .draw(|f| draw(f, &SystemStats::default(), &states, &usage, &mut view, 100))
+        .unwrap();
     let before = terminal.backend().buffer().clone();
     view.scroll = usize::MAX;
-    terminal.draw(|f| draw(f, &SystemStats::default(), &states, &usage, &mut view, 100)).unwrap();
+    terminal
+        .draw(|f| draw(f, &SystemStats::default(), &states, &usage, &mut view, 100))
+        .unwrap();
     let after = terminal.backend().buffer();
     let token_x = sidebar_width(160) + 1;
     for y in 1..49 {
@@ -355,7 +431,11 @@ fn footer_hints_expose_clickable_regions_that_match_their_text() {
     assert!(!view.footer_hits.is_empty());
     for (first, last, action) in &view.footer_hits {
         assert!(first <= last);
-        let slice: String = footer.chars().skip(*first as usize).take((last - first + 1) as usize).collect();
+        let slice: String = footer
+            .chars()
+            .skip(*first as usize)
+            .take((last - first + 1) as usize)
+            .collect();
         let expected = match action {
             FooterAction::Refresh => "r",
             FooterAction::ScrollUp => "↑",
@@ -370,7 +450,11 @@ fn footer_hints_expose_clickable_regions_that_match_their_text() {
 fn clicking_the_footer_refresh_region_works_on_a_narrow_pane() {
     for width in [40, 80] {
         let (_, view) = render(&sample_usage(), width, 24);
-        assert!(view.footer_hits.iter().any(|(_, _, action)| *action == FooterAction::Refresh));
+        assert!(
+            view.footer_hits
+                .iter()
+                .any(|(_, _, action)| *action == FooterAction::Refresh)
+        );
     }
 }
 
@@ -383,7 +467,18 @@ fn a_too_small_frame_clears_stale_mouse_regions() {
         body: Some(Rect::new(0, 0, 80, 23)),
         ..View::default()
     };
-    terminal.draw(|f| draw(f, &SystemStats::default(), &[], &sample_usage(), &mut view, 100)).unwrap();
+    terminal
+        .draw(|f| {
+            draw(
+                f,
+                &SystemStats::default(),
+                &[],
+                &sample_usage(),
+                &mut view,
+                100,
+            )
+        })
+        .unwrap();
     assert!(view.footer_hits.is_empty());
     assert!(view.footer_row.is_none());
     assert!(view.body.is_none());
@@ -400,4 +495,35 @@ fn truncate_and_padding_support_wide_and_combining_characters() {
     assert_eq!(truncate("智谱-GLM", 4), "智…");
     assert_eq!(columns("e\u{301}"), 1);
     assert!(columns(&truncate("智谱-e\u{301}-GLM", 8)) <= 8);
+}
+
+#[test]
+fn short_panes_show_as_many_readable_charts_as_fit() {
+    let usage = sample_usage();
+    let height = token::lines(&usage, 100, usize::MAX).len() as u16;
+    for count in 0..=3u16 {
+        let (parts, drawn) = token_rects(
+            Rect::new(0, 0, 100, height + count * token::MIN_CHART_HEIGHT),
+            &usage,
+        );
+        assert_eq!(drawn, count > 0);
+        assert_eq!(
+            parts[1..]
+                .iter()
+                .filter(|area| area.height >= token::MIN_CHART_HEIGHT)
+                .count(),
+            count as usize
+        );
+        if count > 0 {
+            assert_eq!(parts[0].height, height);
+        }
+    }
+}
+
+#[test]
+fn layout_preview_fixtures() {
+    for (width, height) in [(80, 24), (120, 40), (160, 50)] {
+        let (text, _) = render(&sample_usage(), width, height);
+        println!("RATATUI BUFFER {width}x{height}\n{text}\nEND BUFFER");
+    }
 }

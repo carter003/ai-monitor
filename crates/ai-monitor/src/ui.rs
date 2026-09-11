@@ -13,9 +13,9 @@ use ratatui::{
     },
 };
 
-mod token;
 #[cfg(test)]
 mod tests;
+mod token;
 
 const CYAN: Color = Color::Rgb(11, 93, 107);
 const MUTED: Color = Color::Rgb(74, 84, 95);
@@ -179,8 +179,8 @@ pub fn draw(
 }
 
 /// The summary and full-width ranking take only the rows they actually need.
-/// Charts share the remainder (within one row); short panes keep the list
-/// rather than drawing three unreadable, zero-height plots.
+/// Charts share the remainder (within one row). Short panes show as many
+/// readable charts as fit, rather than wasting space when all three cannot.
 fn token_rects(inner: Rect, usage: &UsageStats) -> ([Rect; 4], bool) {
     let content_height = token_panel_lines(
         usage,
@@ -192,10 +192,15 @@ fn token_rects(inner: Rect, usage: &UsageStats) -> ([Rect; 4], bool) {
     .len()
     .min(u16::MAX as usize) as u16;
     let remaining = inner.height.saturating_sub(content_height);
-    let charts_drawn = usage.error.is_none()
+    let chart_count = if usage.error.is_none()
         && (!usage.hours.buckets.is_empty() || !usage.month.buckets.is_empty())
         && inner.width >= token::MIN_CHART_WIDTH
-        && remaining / 3 >= token::MIN_CHART_HEIGHT;
+    {
+        (remaining / token::MIN_CHART_HEIGHT).min(3)
+    } else {
+        0
+    };
+    let charts_drawn = chart_count > 0;
     let top_height = if charts_drawn {
         content_height
     } else {
@@ -203,9 +208,21 @@ fn token_rects(inner: Rect, usage: &UsageStats) -> ([Rect; 4], bool) {
     };
     let parts = Layout::vertical([
         Constraint::Length(top_height),
-        Constraint::Fill(1),
-        Constraint::Fill(1),
-        Constraint::Fill(1),
+        if chart_count >= 1 {
+            Constraint::Fill(1)
+        } else {
+            Constraint::Length(0)
+        },
+        if chart_count >= 2 {
+            Constraint::Fill(1)
+        } else {
+            Constraint::Length(0)
+        },
+        if chart_count >= 3 {
+            Constraint::Fill(1)
+        } else {
+            Constraint::Length(0)
+        },
     ])
     .split(inner);
     ([parts[0], parts[1], parts[2], parts[3]], charts_drawn)

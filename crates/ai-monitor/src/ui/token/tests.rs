@@ -20,10 +20,22 @@ fn usage() -> UsageStats {
             buckets: vec![1_000_000; 120],
             costs: vec![0.1; 120],
         },
-        day_total: UsageTotal { tokens: 1_400_000, cost: 1.25 },
-        week_total: UsageTotal { tokens: 4_200_000, cost: 6.8 },
-        month_total: UsageTotal { tokens: 18_700_000_000, cost: 31.05 },
-        all_total: UsageTotal { tokens: 126_300_000_000, cost: 318.62 },
+        day_total: UsageTotal {
+            tokens: 1_400_000,
+            cost: 1.25,
+        },
+        week_total: UsageTotal {
+            tokens: 4_200_000,
+            cost: 6.8,
+        },
+        month_total: UsageTotal {
+            tokens: 18_700_000_000,
+            cost: 31.05,
+        },
+        all_total: UsageTotal {
+            tokens: 126_300_000_000,
+            cost: 318.62,
+        },
         ..UsageStats::default()
     }
 }
@@ -39,7 +51,11 @@ fn hourly(values: &[u64]) -> Chart<'_> {
 }
 
 fn text(lines: &[Line<'_>]) -> String {
-    lines.iter().map(Line::to_string).collect::<Vec<_>>().join("\n")
+    lines
+        .iter()
+        .map(Line::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn render_chart(chart: &Chart<'_>, width: u16, rows: usize, origin: usize) -> Buffer {
@@ -127,7 +143,20 @@ fn narrow_tables_preserve_total_and_cost_before_detail_columns() {
 fn input_and_cache_are_distinct_columns_with_original_accounting() {
     let usage = usage();
     let rendered = text(&model_table(&usage.models, 120, 6));
-    for cell in ["IN", "OUT", "THINK", "缓存命中", "合计", "COST", "9.6M", "400K", "120K", "87.50%", "10.0M", "$3.50"] {
+    for cell in [
+        "IN",
+        "OUT",
+        "THINK",
+        "缓存命中",
+        "合计",
+        "COST",
+        "9.6M",
+        "400K",
+        "120K",
+        "87.50%",
+        "10.0M",
+        "$3.50",
+    ] {
         assert!(rendered.contains(cell), "missing {cell}: {rendered}");
     }
     assert!(!rendered.contains("9.6M("));
@@ -146,10 +175,18 @@ fn table_headers_and_values_share_right_edges() {
         columns(&line[..offset]) + columns(needle)
     };
     for (label, number) in [
-        ("IN", "9.6M"), ("OUT", "400K"), ("THINK", "120K"),
-        ("缓存命中", "87.50%"), ("合计", "10.0M"), ("COST", "$3.50"),
+        ("IN", "9.6M"),
+        ("OUT", "400K"),
+        ("THINK", "120K"),
+        ("缓存命中", "87.50%"),
+        ("合计", "10.0M"),
+        ("COST", "$3.50"),
     ] {
-        assert_eq!(end(&header, label), end(&value, number), "{label}: {header}\n{value}");
+        assert_eq!(
+            end(&header, label),
+            end(&value, number),
+            "{label}: {header}\n{value}"
+        );
     }
 }
 
@@ -195,7 +232,7 @@ fn merged_buckets_conserve_totals_and_use_natural_intervals() {
         let original: u64 = data.iter().sum();
         for plot in 1..=250 {
             let factor = merge_factor(&chart, plot);
-            assert!(factor >= 4 && factor % 4 == 0);
+            assert!(factor >= 4 && factor.is_multiple_of(4));
             let merged = merged_values(&chart.series, factor);
             assert_eq!(merged.iter().sum::<f64>(), original as f64);
             assert!(merged.len() <= plot.div_ceil(2));
@@ -246,7 +283,10 @@ fn bars_ticks_and_labels_have_the_same_actual_buffer_coordinates() {
         let label = hour.to_string();
         let left = centre - label.len() as u16 / 2;
         for (offset, character) in label.chars().enumerate() {
-            assert_eq!(buffer[(left + offset as u16, 6)].symbol(), character.to_string());
+            assert_eq!(
+                buffer[(left + offset as u16, 6)].symbol(),
+                character.to_string()
+            );
         }
         if hour < 23 {
             assert_eq!(buffer[(start + 2, 4)].symbol(), " ");
@@ -277,7 +317,7 @@ fn dense_partial_caps_and_bodies_use_equal_width_full_cell_glyphs() {
 
 #[test]
 fn bar_widths_are_uniform_and_gaps_are_real_cells() {
-    for plot in 1..=300 {
+    for plot in 1usize..=300 {
         for count in 1..=plot.div_ceil(2) {
             let geometry = Geometry::new((plot + 8) as u16, 8, count);
             assert!(geometry.bar_width >= 1);
@@ -319,11 +359,19 @@ fn monthly_tokens_and_money_share_calendar_coordinates() {
             let money = histogram(&charts[2], width, 4, origin);
             let token_rule = tokens[5].to_string();
             let money_rule = money[5].to_string();
-            assert_eq!(token_rule.split_once('└').unwrap().1, money_rule.split_once('└').unwrap().1);
+            assert_eq!(
+                token_rule.split_once('└').unwrap().1,
+                money_rule.split_once('└').unwrap().1
+            );
             assert_eq!(tokens[6].to_string(), money[6].to_string());
             if width >= 80 {
                 assert_eq!(token_rule.matches('┴').count(), days);
-                assert!(tokens[6].to_string().split_whitespace().any(|label| label == days.to_string()));
+                assert!(
+                    tokens[6]
+                        .to_string()
+                        .split_whitespace()
+                        .any(|label| label == days.to_string())
+                );
             }
         }
     }
@@ -331,7 +379,16 @@ fn monthly_tokens_and_money_share_calendar_coordinates() {
 
 #[test]
 fn scale_tracks_the_merged_peak_instead_of_silently_clipping_it() {
-    for value in [0., 1., 900., 200_000_001., 2_000_000_001., 401., 1e12, u64::MAX as f64] {
+    for value in [
+        0.,
+        1.,
+        900.,
+        200_000_001.,
+        2_000_000_001.,
+        401.,
+        1e12,
+        u64::MAX as f64,
+    ] {
         let ceiling = nice_ceiling(value);
         assert!(ceiling.is_finite() && ceiling > 0.);
         assert!(ceiling >= value);
@@ -352,7 +409,12 @@ fn zero_and_missing_data_do_not_create_fake_bars() {
     let zeros = vec![0u64; 96];
     let chart = hourly(&zeros);
     let buffer = render_chart(&chart, 100, 8, 8);
-    assert!(buffer.content.iter().all(|cell| !cell.symbol().chars().any(|c| "█▊▁▂▃▄▅▆▇".contains(c))));
+    assert!(
+        buffer
+            .content
+            .iter()
+            .all(|cell| !cell.symbol().chars().any(|c| "█▊▁▂▃▄▅▆▇".contains(c)))
+    );
     assert!(histogram(&hourly(&[]), 100, 4, 8).is_empty());
     assert!(histogram(&chart, 8, 4, 8).is_empty());
     assert!(histogram(&chart, 100, 0, 8).is_empty());
