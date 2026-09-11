@@ -1,6 +1,6 @@
 use ai_monitor::{
     config::Config,
-    model::{Page, Source, SourceState, UsageStats},
+    model::{Source, SourceState, UsageStats},
     system::SystemSampler,
     ui::{self, View},
     worker::{Update, Workers},
@@ -26,6 +26,16 @@ const HANGUP_PROBE_SLICES: usize = 20;
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
+/// Set by the main loop once it has left its event loop, immediately before it
+/// joins the watchdog.
+///
+/// The watchdog must stop on this flag and *not* on `SHUTDOWN`: the kernel
+/// delivers `SIGHUP` when the pty is hung up, the handler sets `SHUTDOWN`, and
+/// the main loop is stuck in crossterm at that very moment. Stopping on
+/// `SHUTDOWN` would retire the watchdog at the one instant its probe is the
+/// only thing that can still end the process.
+static FINISHED: AtomicBool = AtomicBool::new(false);
+
 fn install_signal_handlers() {
     extern "C" fn on_signal(_: libc::c_int) {
         SHUTDOWN.store(true, Ordering::Relaxed);
@@ -37,10 +47,12 @@ fn install_signal_handlers() {
     }
 }
 
-/// True while the controlling terminal can still be queried. When the pty
-/// master is closed, `TIOCGWINSZ` fails with `EIO` (or `/dev/tty` disappears)
-/// and this returns `false`, so the UI exits instead of spinning in
-/// `event::poll` on a terminal that will never deliver input again.
+/// True while the controlling terminal can still be queried. A pty hangup
+/// makes `open("/dev/tty")` fail with `ENXIO`, and a terminal that is going
+/// away makes `TIOCGWINSZ` fail with `EIO`; either way this returns `false`, so
+/// the UI exits instead of spinning in `event::poll` on a terminal that will
+/// never deliver input again. Measured on Linux: a hung-up pty slave reports
+/// `POLLIN|POLLERR|POLLHUP` to pollers and `EIO` from `TIOCGWINSZ`.
 fn terminal_alive() -> bool {
     // SAFETY: both calls take pointers to local memory or plain ints and have
     // no preconditions beyond validity of the fd, which `open` just returned.
@@ -69,15 +81,14 @@ fn terminal_alive() -> bool {
 /// re-check the shutdown flag - a signal handler alone cannot rescue it. The
 /// watchdog therefore notices the hangup within one probe interval, restores
 /// the terminal, and exits the process; the spinning main thread dies with it.
+///
+/// It stops only on `FINISHED`. The hangup arrives together with `SIGHUP`, so
+/// keying the stop on `SHUTDOWN` would retire the watchdog microseconds before
+/// its probe - while the main loop is stuck and cannot act on that flag either.
 fn watch_terminal() -> thread::JoinHandle<()> {
     thread::spawn(move || {
         loop {
-            // Terminal first: after a hangup the kernel also delivers `SIGHUP`,
-            // whose handler sets the same flag the main loop is too stuck to
-            // read. If the flag short-circuited the probe, that hangup would be
-            // missed exactly when the main thread cannot save itself.
             if !terminal_alive() {
-                SHUTDOWN.store(true, Ordering::Relaxed);
                 // The main loop may be stuck inside crossterm, so it cannot run
                 // TerminalGuard's drop. Restore the terminal here, then end the
                 // process unconditionally.
@@ -90,13 +101,11 @@ fn watch_terminal() -> thread::JoinHandle<()> {
                 );
                 std::process::exit(0);
             }
-            if SHUTDOWN.load(Ordering::Relaxed) {
-                // A requested quit (key or signal) while the terminal is still
-                // healthy: the main loop is winding down and will join us.
+            if FINISHED.load(Ordering::Relaxed) {
                 return;
             }
             for _ in 0..HANGUP_PROBE_SLICES {
-                if SHUTDOWN.load(Ordering::Relaxed) {
+                if FINISHED.load(Ordering::Relaxed) {
                     return;
                 }
                 thread::sleep(HANGUP_PROBE_SLICE);
@@ -122,15 +131,6 @@ impl Drop for TerminalGuard {
 fn apply(view: &mut View, workers: &Workers, action: ui::FooterAction) {
     match action {
         ui::FooterAction::Refresh => workers.refresh(),
-        // The two pages carry different row semantics, so a scroll offset
-        // carried across would be meaningless.
-        ui::FooterAction::TogglePage => {
-            view.page = match view.page {
-                Page::Quotas => Page::Tokens,
-                Page::Tokens => Page::Quotas,
-            };
-            view.scroll = 0;
-        }
         ui::FooterAction::ScrollUp => view.scroll = view.scroll.saturating_sub(1),
         ui::FooterAction::ScrollDown => {
             view.scroll = view.scroll.saturating_add(1).min(view.max_scroll)
@@ -241,11 +241,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             break;
                         }
                         KeyCode::Char('r') => apply(&mut view, &workers, ui::FooterAction::Refresh),
-                        // The two pages carry different row semantics, so a
-                        // scroll offset carried across would be meaningless.
-                        KeyCode::Char('t') => {
-                            apply(&mut view, &workers, ui::FooterAction::TogglePage)
-                        }
                         KeyCode::Up | KeyCode::Char('k') => {
                             apply(&mut view, &workers, ui::FooterAction::ScrollUp)
                         }
@@ -305,8 +300,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    // Stop the watchdog before tearing down the terminal it probes.
-    SHUTDOWN.store(true, Ordering::Relaxed);
+    // Let the watchdog stop before tearing down the terminal it probes. Only
+    // `FINISHED` retires it: a `SHUTDOWN` set by a signal must leave the probe
+    // armed, since that signal is also how a pty hangup announces itself.
+    FINISHED.store(true, Ordering::Relaxed);
     let _ = hangup_watch.join();
     Ok(())
 }

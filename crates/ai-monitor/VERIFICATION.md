@@ -1,5 +1,54 @@
 # 验证记录
 
+## 0.4.0
+
+日期：2026-09-11，本机 Linux x86_64（WSL2）。
+
+- **单页左右两栏**（`src/ui.rs`）：删除 `Page` 枚举与 `t` 整页切换，`draw` 改为
+  `Layout::horizontal([Length(sidebar_width), Min(0)])`——左栏上为系统资源、下为 AI 额度，
+  右栏为本地 Token（模型表/柱状图/区间合计/总计）。左栏宽度取窗格 2/5 并夹在 28..48 列、
+  不超过一半；两栏内容各自建行，共用同一个 `view.scroll`（各自按自身长度收敛），
+  因此一个滚动位置即可翻动额度列表与 token 列表。系统面板高度 `cores+8` 与 `height/3` 取大，
+  并在窗格底部留 8 行给额度列表。
+- 删除项：`Page`、`FooterAction::TogglePage`、`ModelUsage::hit_ratio`、`local_usage_line`
+  （两页合并后「本地消耗」行与右栏「总计」重复，随之删除）；`main.rs` 去掉 `t` 键分支。
+- **缓存命中率两位小数截断**（`src/model.rs`）：`hit_display()` 用
+  `cache_read as u128 * 10_000 / input_total as u128` 整数取整到万分之一，再
+  `format!("{}.{:02}%", bp / 100, bp % 100)`。整数除法天然向下取整，不存在浮点误差把
+  `96.66%` 抬成 `96.67%` 的问题；`input_total == 0` 仍显示 `0(—)`。
+- 回归：`cargo test --offline`：ai-monitor 105 + 1 + 2（`tests/hangup.rs`）+ herdr-usage 65 + 19 项通过，
+  1 项联网测试默认忽略；`cargo clippy --offline --all-targets -- -D warnings`、`cargo fmt --check` 通过。
+  新增/改写回归：`cache_hit_share_is_truncated_at_two_decimals_not_rounded`
+  （1/3→`33.33%`、29/30→`96.66%`、7/8→`87.50%`）、`the_two_panels_carry_distinct_titles`、
+  `the_system_and_token_panels_share_one_screen`、`the_footer_no_longer_offers_a_page_switch`；
+  删除随功能消失的切页回归。
+- 真实 PTY（tmux 110×34，真实 `~/.local/share/herdr/usage.db`，只读）：
+  左栏 `系统资源 · 已用` + `AI 额度 · 剩余`，右栏 `本地消耗 · Token (24H)`；`IN` 列实测
+  `1.7B(98.25%)`/`212.0M(98.31%)`/`168.4M(99.19%)`/`59.6M(98.84%)`/`39.3M(95.13%)`/`23.6M(95.11%)`，
+  与 SQL 直算的截断值逐一相符（四舍五入会得到 98.26/98.32/99.20/98.85/95.12）；页脚为
+  `r 刷新   ↑↓ 滚动   q 退出`，无 `t` 提示；按 `t` 画面不变；`↓` 同时翻动两栏；`q` 退出后
+  tmux 会话关闭、无残留 `ai-monitor` 进程。
+- **修复 pty 挂断后残留满核自旋**（`src/main.rs`）。现象：关闭终端窗口 / `tmux kill-session`
+  后进程不退出、`state=R` 且持续烧满一个核。
+  - 根因（对照实验定位）：挂断时内核同时发出 `SIGHUP`，`on_signal` 置 `SHUTDOWN`；看门狗把
+    `SHUTDOWN` 当作「主循环会自己退」而直接 `return`，于是**恰好在它唯一还能救场的时刻收工**。
+    主循环此刻正卡在 crossterm 的事件源里（挂断后读到 EOF 空转，0.3.2 已定位），读不到该标志。
+  - 判活本身没有问题：实测挂断后 `open("/dev/tty")` 返回 `ENXIO`、`TIOCGWINSZ` 返回 `EIO`，
+    `terminal_alive()` 会正确返回 false。（本文件先前一版把根因写成「判活看不见挂断」，是错的：
+    那个探针的子进程继承了 pty master，pty 根本没挂断，结论作废。）
+  - 对照实验：`signal.pthread_sigmask` 屏蔽 SIGHUP 后再启动，挂断后能正常退出（证明判活有效）；
+    正常处理 SIGHUP 时残留（证明是 `SHUTDOWN` 提前退场）。
+  - 修复：新增 `FINISHED` 标志，只由主循环离开事件循环后设置；看门狗只在 `FINISHED` 时返回，
+    `SHUTDOWN` 不再让它退休。行为不变的部分：主循环正常退出前会 `join` 看门狗，`q` 仍是 200ms 级退出。
+  - 修复后实测三条路径（tmux 100×30）：`kill-session` 1014ms（一个探测周期）、`q` 202ms、
+    `SIGTERM` 201ms，均无残留进程。
+  - 回归测试 `tests/hangup.rs`（用 tmux + 独立 socket，tmux 缺失时跳过）：修复前
+    `killing_the_terminal_ends_the_ui` 失败（10s 后进程仍在），修复后 1.00s 退出；`q` 路径 50ms。
+    说明：自带 `posix_openpt` 的直连 pty 测不出这个 bug —— 由测试进程自己关闭 master 时，UI 走的是
+    crossterm 的报错退出路径，压根不用看门狗，因此那种写法在修复前后都会通过，故未采用。
+  - 清理：`2483803`（15:29 启动）与 `3028210`（17:55 启动）两个孤儿（ppid 为 init、无控制终端、
+    满核自旋、二进制已被覆盖）已 SIGKILL；`3137522` 是仍在用的交互会话（tty pts/34、0 CPU），未动。
+
 ## 0.3.2
 
 日期：2026-09-11，本机 Linux x86_64（WSL2）。

@@ -1,5 +1,5 @@
 use crate::{
-    model::{Bucketed, ModelUsage, Page, SourceState, UsageStats, UsageTotal, countdown},
+    model::{Bucketed, ModelUsage, SourceState, UsageStats, UsageTotal, countdown},
     system::{SystemStats, gib},
 };
 use ratatui::{
@@ -33,7 +33,6 @@ pub struct View {
     pub scroll: usize,
     pub max_scroll: usize,
     pub page_size: usize,
-    pub page: Page,
     /// Clickable footer hints, `(first column, last column, action)`, in the
     /// footer row. Filled by `draw` so the layout and the hit test cannot drift.
     pub footer_hits: Vec<(u16, u16, FooterAction)>,
@@ -48,31 +47,21 @@ pub struct View {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FooterAction {
     Refresh,
-    TogglePage,
     ScrollUp,
     ScrollDown,
 }
 
 impl FooterAction {
     /// The hints for a footer with `room` usable columns, left to right. Narrow
-    /// panes drop the least load-bearing hints; the switch key outlives the
-    /// scroll reminder, which only appears when there is something to scroll.
+    /// panes drop the scroll reminder, which only appears when there is
+    /// something to scroll.
     fn row(room: usize, scrollable: bool) -> Vec<(&'static str, FooterAction)> {
         let mut hints = if room >= 30 {
-            vec![
-                (" r 刷新   ", FooterAction::Refresh),
-                ("t 切换token   ", FooterAction::TogglePage),
-            ]
+            vec![(" r 刷新   ", FooterAction::Refresh)]
         } else if room >= 20 {
-            vec![
-                (" r 刷新  ", FooterAction::Refresh),
-                ("t 切换  ", FooterAction::TogglePage),
-            ]
+            vec![(" r 刷新  ", FooterAction::Refresh)]
         } else if room >= 10 {
-            vec![
-                (" r  ", FooterAction::Refresh),
-                ("t  ", FooterAction::TogglePage),
-            ]
+            vec![(" r  ", FooterAction::Refresh)]
         } else {
             vec![]
         };
@@ -104,38 +93,50 @@ pub fn draw(
         );
         return;
     }
-    // The token page is a full-pane view: it replaces the system band rather
-    // than sharing the pane with it, so `t` swaps the whole body and the CPU,
-    // memory and network rows do not linger above a table that never uses them.
     let version = concat!("v", env!("CARGO_PKG_VERSION"));
-    let footer_row = match view.page {
-        Page::Quotas => {
-            let desired_system_height = (system.cores.len() as u16)
-                .saturating_add(8)
-                .max(area.height / 3);
-            // Keep enough room for the quota panel while allowing a common
-            // 12-thread machine to show every logical CPU beside the chart.
-            let system_height = desired_system_height.min(area.height.saturating_sub(9));
-            let parts = Layout::vertical([
-                Constraint::Length(system_height),
-                Constraint::Min(0),
-                Constraint::Length(1),
-            ])
-            .split(area);
-            draw_system(frame, parts[0], system);
-            draw_quotas(frame, parts[1], states, usage, view, now);
-            parts[2]
-        }
-        Page::Tokens => {
-            let parts = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
-            draw_tokens(frame, parts[0], usage, view, now);
-            parts[1]
-        }
-    };
+    let parts = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
+    let body = parts[0];
+
+    // One page, two columns: the machine on the left, the tokens it burned on
+    // the right. The cloud quota list shares the left column with the gauges,
+    // scrolling beneath them rather than pushing them off screen.
+    let columns = Layout::horizontal([
+        Constraint::Length(sidebar_width(area.width)),
+        Constraint::Min(0),
+    ])
+    .split(body);
+    let desired_system_height = (system.cores.len() as u16)
+        .saturating_add(8)
+        .max(body.height / 3);
+    // Keep room for the quota list under the gauges even on a short pane.
+    let system_height = desired_system_height.min(body.height.saturating_sub(8));
+    let sidebar =
+        Layout::vertical([Constraint::Length(system_height), Constraint::Min(0)]).split(columns[0]);
+    draw_system(frame, sidebar[0], system);
+
+    let quota_area = sidebar[1];
+    let token_area = columns[1];
+    let quota_inner = panel(frame, quota_area, " AI 额度 · 剩余 ");
+    let token_inner = panel(frame, token_area, " 本地消耗 · Token (24H) ");
+
+    let quota = quota_panel_lines(states, quota_inner, now);
+    let token = token_panel_lines(usage, token_inner);
+
+    // Both lists share one offset: a wheel or an arrow key moves the page, and
+    // neither column needs its own focus. Each clamps to its own end, so the
+    // shorter list simply stops while the longer one keeps going.
+    let quota_max = quota.len().saturating_sub(quota_inner.height as usize);
+    let token_max = token.len().saturating_sub(token_inner.height as usize);
+    view.page_size = (quota_inner.height as usize).max(token_inner.height as usize);
+    view.max_scroll = quota_max.max(token_max);
+    view.scroll = view.scroll.min(view.max_scroll);
+    let scroll = view.scroll;
+    render_panel_lines(frame, quota_area, quota_inner, quota, scroll.min(quota_max));
+    render_panel_lines(frame, token_area, token_inner, token, scroll.min(token_max));
+
     // The footer shares its row with the version stamp, so hints are dropped as
-    // the pane narrows. The switch key outlives the scroll reminder, which only
-    // appears when there is something to scroll. The same table drives both the
-    // rendered text and the clickable regions, so they cannot drift apart.
+    // the pane narrows. The same table drives both the rendered text and the
+    // clickable regions, so they cannot drift apart.
     let room = (area.width as usize).saturating_sub(version.len() + 1);
     let hints = FooterAction::row(room, view.max_scroll > 0);
     let mut footer = String::from(" ");
@@ -157,15 +158,15 @@ pub fn draw(
     // be an accidental quit, which is the one action a stray click must not fire.
     footer.push_str("q 退出");
     let bar = Layout::horizontal([Constraint::Min(0), Constraint::Length(version.len() as u16)])
-        .split(footer_row);
+        .split(parts[1]);
     // Everything above the footer is the page body, so a click or wheel inside
     // it can be routed to the current page without re-deriving the layout.
-    view.footer_row = Some(footer_row.y);
+    view.footer_row = Some(parts[1].y);
     view.body = Some(Rect {
         x: area.x,
         y: area.y,
         width: area.width,
-        height: footer_row.y.saturating_sub(area.y),
+        height: parts[1].y.saturating_sub(area.y),
     });
     frame.render_widget(
         Paragraph::new(footer).style(Style::default().fg(MUTED)),
@@ -177,6 +178,83 @@ pub fn draw(
             .right_aligned(),
         bar[1],
     );
+}
+
+/// Left-column width: two fifths of the pane, kept in a band where the gauges
+/// and the quota bars stay readable, and never more than half so the token
+/// panel keeps at least as much room. Below 70 columns the two columns share
+/// the pane evenly and both degrade.
+fn sidebar_width(width: u16) -> u16 {
+    (width * 2 / 5).clamp(28, 48).min(width / 2)
+}
+
+/// Draw a bordered panel and return the area inside its border.
+fn panel(frame: &mut Frame, area: Rect, title: &str) -> Rect {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(Style::default().fg(CYAN));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    inner
+}
+
+/// The quota list, with its generous spacing dropped when the pane is short.
+fn quota_panel_lines(states: &[SourceState], inner: Rect, now: i64) -> Vec<Line<'static>> {
+    if inner.width == 0 || inner.height == 0 {
+        return vec![];
+    }
+    let mut lines = quota_lines(states, inner.width, now, true);
+    if lines.len() > inner.height as usize {
+        lines = quota_lines(states, inner.width, now, false);
+    }
+    lines
+}
+
+/// The token list, or the "not connected" notice when the database is missing.
+fn token_panel_lines(usage: &UsageStats, inner: Rect) -> Vec<Line<'static>> {
+    if inner.width == 0 || inner.height == 0 {
+        return vec![];
+    }
+    if usage.error.is_some() {
+        return vec![
+            Line::styled(" 未连接 usage.db", Style::default().fg(MUTED)),
+            Line::styled(" 采集未运行或数据库不存在", Style::default().fg(MUTED)),
+        ];
+    }
+    token_lines(usage, inner.width, inner.height as usize)
+}
+
+/// Paint one panel's lines at `scroll`, with a scrollbar when they overflow.
+fn render_panel_lines(
+    frame: &mut Frame,
+    area: Rect,
+    inner: Rect,
+    lines: Vec<Line<'static>>,
+    scroll: usize,
+) {
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(lines.clone()).scroll((scroll.min(u16::MAX as usize) as u16, 0)),
+        inner,
+    );
+    let max = lines.len().saturating_sub(inner.height as usize);
+    if max > 0 {
+        let mut bar = ScrollbarState::new(lines.len())
+            .position(scroll)
+            .viewport_content_length(inner.height as usize);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_style(Style::default().fg(TRACK))
+                .thumb_style(Style::default().fg(MUTED)),
+            area,
+            &mut bar,
+        );
+    }
 }
 
 fn draw_system(frame: &mut Frame, area: Rect, stats: &SystemStats) {
@@ -426,51 +504,6 @@ fn throughput(bytes_per_sec: f64) -> String {
     format!("{integer:03}{}/s", units[unit])
 }
 
-fn draw_quotas(
-    frame: &mut Frame,
-    area: Rect,
-    states: &[SourceState],
-    usage: &UsageStats,
-    view: &mut View,
-    now: i64,
-) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" AI 额度 · 剩余 ")
-        .border_style(Style::default().fg(CYAN));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let mut lines = quota_lines(states, inner.width, now, true);
-    if lines.len() > inner.height as usize {
-        lines = quota_lines(states, inner.width, now, false);
-    }
-    // Lifetime local consumption, the one figure this page shares with the token
-    // page. It is intentionally not coloured by amount: this money is already
-    // spent, so the red/amber/green "remaining quota" scale does not apply.
-    lines.push(local_usage_line(usage));
-    view.page_size = inner.height as usize;
-    view.max_scroll = lines.len().saturating_sub(view.page_size);
-    view.scroll = view.scroll.min(view.max_scroll);
-    frame.render_widget(
-        Paragraph::new(lines.clone()).scroll((view.scroll.min(u16::MAX as usize) as u16, 0)),
-        inner,
-    );
-    if view.max_scroll > 0 {
-        let mut scroll = ScrollbarState::new(lines.len())
-            .position(view.scroll)
-            .viewport_content_length(view.page_size);
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(None)
-                .end_symbol(None)
-                .track_style(Style::default().fg(TRACK))
-                .thumb_style(Style::default().fg(MUTED)),
-            area,
-            &mut scroll,
-        );
-    }
-}
-
 fn quota_lines(states: &[SourceState], width: u16, now: i64, gaps: bool) -> Vec<Line<'static>> {
     let mut lines = vec![];
     for state in states {
@@ -603,89 +636,10 @@ fn age(seconds: i64) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Token page
+// Token panel
 // ---------------------------------------------------------------------------
 
-/// Lifetime local consumption, one line, shared by both pages so the two cannot
-/// disagree. A database that cannot be read says so rather than showing zeros.
-fn local_usage_line(usage: &UsageStats) -> Line<'static> {
-    if let Some(error) = &usage.error {
-        let _ = error;
-        return Line::from(vec![
-            Span::styled(" 本地消耗  ", Style::default().fg(MUTED)),
-            Span::styled("未连接".to_string(), Style::default().fg(MUTED)),
-        ]);
-    }
-    Line::from(vec![
-        Span::styled(" 本地消耗  ", Style::default().fg(MUTED)),
-        Span::styled(
-            format!("{} tokens  ", compact(usage.all_total.tokens)),
-            Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            money(usage.all_total.cost),
-            Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-        ),
-    ])
-}
-
-fn draw_tokens(frame: &mut Frame, area: Rect, usage: &UsageStats, view: &mut View, now: i64) {
-    let _ = now;
-    let block = Block::default()
-        .borders(Borders::ALL)
-        // Deliberately not "额度": the four local clients and the six cloud quota
-        // sources are different things, and the title is the only thing stopping
-        // the two sets of numbers from being read as one.
-        .title(" 本地消耗 · Token (24H) ")
-        .border_style(Style::default().fg(CYAN));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
-        view.page_size = 0;
-        view.max_scroll = 0;
-        view.scroll = 0;
-        return;
-    }
-    if usage.error.is_some() {
-        view.page_size = inner.height as usize;
-        view.max_scroll = 0;
-        view.scroll = 0;
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::styled(" 未连接 usage.db", Style::default().fg(MUTED)),
-                Line::styled(" 采集未运行或数据库不存在", Style::default().fg(MUTED)),
-            ]),
-            inner,
-        );
-        return;
-    }
-
-    // `inner` is already the bordered interior, so these widths are exact.
-    let lines = token_lines(usage, inner.width, inner.height as usize);
-    view.page_size = inner.height as usize;
-    view.max_scroll = lines.len().saturating_sub(view.page_size);
-    view.scroll = view.scroll.min(view.max_scroll);
-    frame.render_widget(
-        Paragraph::new(lines.clone()).scroll((view.scroll.min(u16::MAX as usize) as u16, 0)),
-        inner,
-    );
-    if view.max_scroll > 0 {
-        let mut scroll = ScrollbarState::new(lines.len())
-            .position(view.scroll)
-            .viewport_content_length(view.page_size);
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(None)
-                .end_symbol(None)
-                .track_style(Style::default().fg(TRACK))
-                .thumb_style(Style::default().fg(MUTED)),
-            area,
-            &mut scroll,
-        );
-    }
-}
-
-/// Assemble the token page body. `caveat` is listed first so that, when the pane
+/// Assemble the token panel body. `caveat` is listed first so that, when the pane
 /// is short, the disappearing rows are the least load-bearing ones — the totals
 /// line is what the page exists for.
 fn token_lines(usage: &UsageStats, width: u16, height: usize) -> Vec<Line<'static>> {
@@ -1597,7 +1551,9 @@ mod tests {
             cpu_history: [10, 30, 80, 40].into(),
             ..SystemStats::default()
         };
-        let mut terminal = Terminal::new(TestBackend::new(44, 42)).unwrap();
+        // 110 columns give the sidebar a 44-column column, so the CPU axis keeps
+        // its `CPU01` labels (the short form appears only below 34 columns).
+        let mut terminal = Terminal::new(TestBackend::new(110, 42)).unwrap();
         let mut view = View::default();
         terminal
             .draw(|f| draw(f, &stats, &states, &UsageStats::default(), &mut view, 100))
@@ -1634,7 +1590,7 @@ mod tests {
 mod regression_tests {
     use super::*;
     use crate::model::{
-        Bucketed, Card, FetchError, Meter, ModelUsage, Page, Source, UsageStats, UsageTotal,
+        Bucketed, Card, FetchError, Meter, ModelUsage, Source, UsageStats, UsageTotal,
     };
     use ratatui::{Terminal, backend::TestBackend};
     use std::time::{Duration, Instant};
@@ -1682,7 +1638,7 @@ mod regression_tests {
     }
 
     // -----------------------------------------------------------------------
-    // Token page
+    // Token panel
     // -----------------------------------------------------------------------
 
     /// Whether a symbol occupies two terminal columns (shared with the renderer
@@ -1691,22 +1647,18 @@ mod regression_tests {
         symbol.chars().next().is_some_and(is_wide_char)
     }
 
-    fn render(page: Page, usage: &UsageStats, width: u16, height: u16) -> (String, View) {
-        render_with_system(page, usage, &SystemStats::default(), width, height)
+    fn render(usage: &UsageStats, width: u16, height: u16) -> (String, View) {
+        render_with_system(usage, &SystemStats::default(), width, height)
     }
 
     fn render_with_system(
-        page: Page,
         usage: &UsageStats,
         system: &SystemStats,
         width: u16,
         height: u16,
     ) -> (String, View) {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("backend");
-        let mut view = View {
-            page,
-            ..View::default()
-        };
+        let mut view = View::default();
         terminal
             .draw(|f| {
                 draw(
@@ -1739,6 +1691,21 @@ mod regression_tests {
             .collect::<Vec<_>>()
             .join("\n");
         (text, view)
+    }
+
+    /// The token panel's body text on its own, independent of the sidebar, so
+    /// the column-dropping rules can be exercised at exact widths.
+    fn token_text(usage: &UsageStats, width: u16, height: usize) -> String {
+        token_lines(usage, width, height)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn sample_usage() -> UsageStats {
@@ -1816,39 +1783,10 @@ mod regression_tests {
     }
 
     #[test]
-    fn switching_pages_resets_the_scroll_offset() {
-        let usage = sample_usage();
-        // Enter the token page with a scroll offset left over from the quota
-        // page: the rows mean something different, so the offset must not carry.
-        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("backend");
-        let mut view = View {
-            page: Page::Quotas,
-            scroll: 9,
-            max_scroll: 20,
-            page_size: 5,
-            ..View::default()
-        };
-        terminal
-            .draw(|f| draw(f, &SystemStats::default(), &[], &usage, &mut view, 100))
-            .expect("draw");
-        // Emulate the `t` handler in main.
-        view.page = Page::Tokens;
-        view.scroll = 0;
-        terminal
-            .draw(|f| draw(f, &SystemStats::default(), &[], &usage, &mut view, 100))
-            .expect("draw");
-        assert_eq!(view.page, Page::Tokens);
-        assert_eq!(
-            view.scroll, 0,
-            "a stale quota offset must not survive the switch"
-        );
-    }
-
-    #[test]
-    fn the_token_page_is_bounded_at_every_terminal_size() {
+    fn the_dashboard_is_bounded_at_every_terminal_size() {
         let usage = sample_usage();
         for (width, height) in [(20, 10), (26, 12), (40, 24), (80, 24), (120, 60)] {
-            let (_, view) = render(Page::Tokens, &usage, width, height);
+            let (_, view) = render(&usage, width, height);
             assert!(
                 view.scroll <= view.max_scroll,
                 "{width}x{height} left scroll {} above max {}",
@@ -1859,15 +1797,15 @@ mod regression_tests {
     }
 
     #[test]
-    fn both_pages_advertise_the_page_switch_key() {
+    fn the_footer_no_longer_offers_a_page_switch() {
         let usage = sample_usage();
-        for page in [Page::Quotas, Page::Tokens] {
-            let (text, _) = render(page, &usage, 80, 24);
-            assert!(
-                text.contains("t 切换token"),
-                "{page:?} footer is missing the switch hint: {text}"
-            );
-        }
+        let (text, _) = render(&usage, 80, 24);
+        let footer = text.lines().last().unwrap_or_default();
+        assert!(footer.contains("r 刷新"), "{footer}");
+        assert!(
+            !footer.contains("t 切换"),
+            "the page switch is gone, so its hint must be too: {footer}"
+        );
     }
 
     #[test]
@@ -1876,38 +1814,11 @@ mod regression_tests {
             error: Some("unable to open database file".into()),
             ..UsageStats::default()
         };
-        let (quota_text, _) = render(Page::Quotas, &usage, 80, 24);
+        let (text, _) = render(&usage, 80, 24);
+        assert!(text.contains("未连接 usage.db"), "{text}");
         assert!(
-            quota_text.contains("本地消耗  未连接"),
-            "homepage should report the gap: {quota_text}"
-        );
-        assert!(
-            !quota_text.contains("$0.00"),
+            !text.contains("$0.00"),
             "an unavailable database must not render as a real zero"
-        );
-        let (token_text, _) = render(Page::Tokens, &usage, 80, 24);
-        assert!(token_text.contains("未连接 usage.db"), "{token_text}");
-    }
-
-    #[test]
-    fn the_share_is_identical_on_the_homepage_row_and_the_token_total() {
-        // The two places show one number; drift between them would read as a bug.
-        let usage = sample_usage();
-        let (quota_text, _) = render(Page::Quotas, &usage, 100, 30);
-        let row = quota_text
-            .lines()
-            .find(|line| line.contains("本地消耗"))
-            .unwrap_or_default();
-        assert!(row.contains("126.3B tokens"), "{quota_text}");
-        // One formatter serves both places, so the money text must be identical
-        // rather than merely equal in value.
-        let token_total = usage.all_total;
-        assert!(row.contains(&money(token_total.cost)), "{quota_text}");
-        let (token_text, _) = render(Page::Tokens, &usage, 100, 40);
-        assert!(token_text.contains("126.3B tokens"), "{token_text}");
-        assert!(
-            token_text.contains(&money(token_total.cost)),
-            "{token_text}"
         );
     }
 
@@ -1916,7 +1827,7 @@ mod regression_tests {
         let usage = sample_usage();
         // The caveat and the histogram labels are the rows that may go; the total
         // is the anchor of the page and must stay visible.
-        let (text, _) = render(Page::Tokens, &usage, 80, 13);
+        let (text, _) = render(&usage, 80, 13);
         assert!(text.contains("总计"), "the total must not be cut: {text}");
         assert!(text.contains("126.3B tokens"), "{text}");
         assert!(text.contains("$318.6"), "{text}");
@@ -1925,7 +1836,7 @@ mod regression_tests {
     #[test]
     fn the_interval_rows_mark_partial_coverage() {
         let usage = sample_usage();
-        let (text, _) = render(Page::Tokens, &usage, 100, 40);
+        let text = token_text(&usage, 100, 38);
         // month_total is 92% priced, so its money is a lower bound.
         assert!(
             text.contains("计价 92%"),
@@ -1940,26 +1851,24 @@ mod regression_tests {
     }
 
     #[test]
-    fn the_token_title_avoids_the_quota_word() {
+    fn the_two_panels_carry_distinct_titles() {
         let usage = sample_usage();
-        let (tokens, _) = render(Page::Tokens, &usage, 80, 24);
-        assert!(tokens.contains("本地消耗 · Token"), "{tokens}");
-        assert!(
-            !tokens.contains("额度"),
-            "the token page must not say 额度: {tokens}"
-        );
-        let (quotas, _) = render(Page::Quotas, &usage, 80, 24);
-        assert!(quotas.contains("AI 额度 · 剩余"), "{quotas}");
+        let (text, _) = render(&usage, 80, 24);
+        // Both sets of numbers share the screen now, so the titles are the only
+        // thing keeping the local burn separate from the cloud remainder.
+        assert!(text.contains("本地消耗 · Token"), "{text}");
+        assert!(text.contains("AI 额度 · 剩余"), "{text}");
+        assert!(text.contains("系统资源 · 已用"), "{text}");
     }
 
     #[test]
     fn a_narrow_pane_drops_columns_rather_than_wrapping() {
         let usage = sample_usage();
         // One layout at every width: the stacked three-row block. There is no
-        // `IN(HIT)` label — the hit ratio rides inside the IN cell (`9.6M(88%)`).
-        // The tool's minimum pane is 26 columns; below that it shows a prompt to
-        // widen the window, so degradation is only observable at 26-34 columns.
-        let (wide, _) = render(Page::Tokens, &usage, 100, 30);
+        // `IN(HIT)` label — the hit ratio rides inside the IN cell. The tool's
+        // minimum pane is 26 columns; below that it shows a prompt to widen the
+        // window, so degradation is only observable at 26-34 columns.
+        let wide = token_text(&usage, 100, 30);
         assert!(!wide.contains("CACHE"), "{wide}");
         assert!(wide.contains("IN"), "{wide}");
         assert!(wide.contains("OUT"), "{wide}");
@@ -1968,7 +1877,7 @@ mod regression_tests {
         assert!(wide.contains("COST"), "{wide}");
         // 40 columns hold all five columns (each at its minimum width, the
         // spare shared out evenly) — the block, not the old inline row.
-        let (mid, _) = render(Page::Tokens, &usage, 40, 30);
+        let mid = token_text(&usage, 40, 30);
         assert!(mid.contains("IN"), "{mid}");
         assert!(mid.contains("OUT"), "{mid}");
         assert!(mid.contains("THINK"), "{mid}");
@@ -1977,14 +1886,14 @@ mod regression_tests {
         assert!(!mid.contains("IN(HIT)"), "{mid}");
         // 34 columns cannot hold COST; it drops from the right, leaving
         // IN / OUT / THINK / 合计. IN and OUT always survive.
-        let (narrow, _) = render(Page::Tokens, &usage, 34, 30);
+        let narrow = token_text(&usage, 34, 30);
         assert!(narrow.contains("IN"), "{narrow}");
         assert!(narrow.contains("OUT"), "{narrow}");
         assert!(narrow.contains("THINK"), "{narrow}");
         assert!(narrow.contains("合计"), "{narrow}");
         assert!(!narrow.contains("COST"), "{narrow}");
         // 26 columns (the tool minimum) drop COST and 合计, keeping IN / OUT / THINK.
-        let (tiny, _) = render(Page::Tokens, &usage, 26, 30);
+        let tiny = token_text(&usage, 26, 30);
         assert!(tiny.contains("IN"), "{tiny}");
         assert!(tiny.contains("OUT"), "{tiny}");
         assert!(tiny.contains("THINK"), "{tiny}");
@@ -2055,11 +1964,11 @@ mod regression_tests {
 
     #[test]
     fn the_last_column_survives_a_pane_that_barely_fits_it() {
-        // A 40-wide pane uses the same stacked block as wide panes (the header
-        // label is `COST`, not `IN(HIT)`); at this width all five columns still
-        // fit at their minima, so COST must neither be dropped nor clipped to "COS".
+        // A 40-wide token panel uses the same stacked block as wide panes; at
+        // this width all five columns still fit at their minima, so COST must
+        // neither be dropped nor clipped to "COS".
         let usage = sample_usage();
-        let (text, _) = render(Page::Tokens, &usage, 40, 30);
+        let text = token_text(&usage, 40, 30);
         let header = text
             .lines()
             .find(|line| line.contains("COST"))
@@ -2070,7 +1979,7 @@ mod regression_tests {
         );
         let row = text
             .lines()
-            .find(|line| line.contains("9.6M(88%)"))
+            .find(|line| line.contains("9.6M(87.50%)"))
             .unwrap_or_default();
         assert!(row.contains("$3.50"), "the cost value was clipped: {row}");
     }
@@ -2081,7 +1990,7 @@ mod regression_tests {
         // Wide panes render the stacked block: the header band names `IN OUT THINK
         // 合计 COST`, and the value row beneath it shows the same cells right-aligned
         // in the same slots, so each label and its value share a right edge.
-        let (text, _) = render(Page::Tokens, &usage, 100, 30);
+        let text = token_text(&usage, 100, 30);
         let header = text
             .lines()
             .find(|line| line.contains("IN") && line.contains("合计") && line.contains("COST"))
@@ -2089,7 +1998,7 @@ mod regression_tests {
         let row = text
             .lines()
             .find(|line| {
-                line.contains("9.6M(88%)") && line.contains("400K") && line.contains("$3.50")
+                line.contains("9.6M(87.50%)") && line.contains("400K") && line.contains("$3.50")
             })
             .unwrap_or_default();
         assert!(!header.is_empty(), "no header band: {text}");
@@ -2101,7 +2010,7 @@ mod regression_tests {
                 .map(|byte| columns(&line[..byte]) + columns(needle))
         };
         for (label, value) in [
-            ("IN", "9.6M(88%)"),
+            ("IN", "9.6M(87.50%)"),
             ("OUT", "400K"),
             ("合计", "10.0M"),
             ("COST", "$3.50"),
@@ -2116,9 +2025,9 @@ mod regression_tests {
     }
 
     #[test]
-    fn the_token_page_replaces_the_system_band_instead_of_stacking_on_it() {
-        // `t` switches the whole body: the token page owns the pane, so the
-        // CPU/memory/network rows must be gone rather than survive above it.
+    fn the_system_and_token_panels_share_one_screen() {
+        // The gauges and the local burn are columns of one page now: neither
+        // replaces the other, and the footer no longer offers a switch.
         let usage = sample_usage();
         let system = SystemStats {
             cpu: Some(50.),
@@ -2126,28 +2035,24 @@ mod regression_tests {
             load: "1.00 1.00 1.00".into(),
             ..SystemStats::default()
         };
-        let (quota, _) = render_with_system(Page::Quotas, &usage, &system, 80, 24);
-        assert!(quota.contains("系统资源"), "{quota}");
-        assert!(quota.contains("CPU01"), "{quota}");
-
-        let (token, _) = render_with_system(Page::Tokens, &usage, &system, 80, 24);
+        let (text, view) = render_with_system(&usage, &system, 110, 34);
+        assert!(text.contains("系统资源 · 已用"), "{text}");
+        assert!(text.contains("CPU01"), "{text}");
+        assert!(text.contains("AI 额度 · 剩余"), "{text}");
+        assert!(text.contains("本地消耗 · Token"), "{text}");
         assert!(
-            !token.contains("系统资源") && !token.contains("CPU01") && !token.contains("MEM"),
-            "the token page must not keep the system band: {token}"
+            text.contains(concat!("v", env!("CARGO_PKG_VERSION"))),
+            "{text}"
         );
-        assert!(token.contains("本地消耗 · Token"), "{token}");
-        // The footer row is still reserved for the switch key and version.
-        assert!(token.contains("t 切换token"), "{token}");
-        assert!(
-            token.contains(concat!("v", env!("CARGO_PKG_VERSION"))),
-            "{token}"
-        );
+        let footer = text.lines().last().unwrap_or_default();
+        assert!(!footer.contains("t 切换"), "{footer}");
+        assert!(view.body.is_some());
     }
 
     #[test]
     fn footer_hints_expose_clickable_regions_that_match_their_text() {
         let usage = sample_usage();
-        let (text, view) = render(Page::Quotas, &usage, 80, 24);
+        let (text, view) = render(&usage, 80, 24);
         let footer = text.lines().last().unwrap_or_default();
         // Every recorded region must land inside the footer row and point at the
         // label it rendered, so a click cannot act on what the user did not see.
@@ -2164,7 +2069,6 @@ mod regression_tests {
                 .collect();
             let expected = match action {
                 FooterAction::Refresh => "r",
-                FooterAction::TogglePage => "t",
                 FooterAction::ScrollUp => "↑",
                 FooterAction::ScrollDown => "↓",
             };
@@ -2176,11 +2080,11 @@ mod regression_tests {
     }
 
     #[test]
-    fn clicking_the_footer_regions_switches_and_refreshes() {
+    fn clicking_the_footer_refresh_region_works_on_a_narrow_pane() {
         let usage = sample_usage();
-        let (_, view) = render(Page::Quotas, &usage, 80, 24);
-        // Find the region the renderer published for each action and confirm the
-        // columns really do cover the letters the user reads.
+        let (_, view) = render(&usage, 80, 24);
+        // Find the region the renderer published and confirm the columns really
+        // do cover the letters the user reads.
         let region = |wanted: FooterAction| {
             view.footer_hits
                 .iter()
@@ -2188,17 +2092,18 @@ mod regression_tests {
                 .map(|(first, last, _)| (*first, *last))
                 .unwrap_or_else(|| panic!("no region for {wanted:?}"))
         };
-        let (first, last) = region(FooterAction::TogglePage);
-        assert!(last > first, "the toggle hint must be more than one column");
-        // A 40-column pane is narrow enough to drop the scroll reminder, but the
-        // two keys that act on click must survive.
-        let (_, narrow) = render(Page::Tokens, &usage, 40, 24);
-        for action in [FooterAction::Refresh, FooterAction::TogglePage] {
-            assert!(
-                narrow.footer_hits.iter().any(|(_, _, a)| *a == action),
-                "{action:?} must stay clickable on a 40-column pane"
-            );
-        }
+        let (first, last) = region(FooterAction::Refresh);
+        assert!(last >= first, "the refresh hint must be clickable");
+        // A 40-column pane drops the scroll reminder, but the refresh key must
+        // survive as a click target.
+        let (_, narrow) = render(&usage, 40, 24);
+        assert!(
+            narrow
+                .footer_hits
+                .iter()
+                .any(|(_, _, a)| *a == FooterAction::Refresh),
+            "refresh must stay clickable on a 40-column pane"
+        );
     }
 
     #[test]
@@ -2285,8 +2190,8 @@ mod regression_tests {
     #[test]
     fn a_period_chart_is_stretched_across_the_pane() {
         let usage = sample_usage();
-        let (narrow, _) = render(Page::Tokens, &usage, 60, 44);
-        let (wide, _) = render(Page::Tokens, &usage, 140, 44);
+        let narrow = token_text(&usage, 60, 44);
+        let wide = token_text(&usage, 140, 44);
         // The year histogram owns 12 buckets; on a wider pane they must claim
         // more columns instead of hugging the left edge.
         let bar_run = |text: &str| {
@@ -2304,10 +2209,10 @@ mod regression_tests {
     }
 
     #[test]
-    fn visual_render_check_token_page() {
+    fn visual_render_check_token_panel() {
         let usage = sample_usage();
-        let (text, _) = render(Page::Tokens, &usage, 100, 44);
-        println!("\n=== Rendered Token Page ===\n{text}\n===========================\n");
+        let (text, _) = render(&usage, 140, 46);
+        println!("\n=== Rendered Dashboard ===\n{text}\n===========================\n");
         assert!(text.contains("当日 · 24小时 (配额 3亿)"));
         assert!(text.contains("本周 · 7天 (配额 20亿)"));
         assert!(text.contains("当月 · 30天 (配额 80亿)"));
@@ -2326,7 +2231,7 @@ mod regression_tests {
             },
             ..UsageStats::default()
         };
-        let (text, _) = render(Page::Tokens, &usage, 80, 24);
+        let (text, _) = render(&usage, 80, 24);
         assert!(
             !text.contains('█'),
             "no bucket has data, so no full bars: {text}"
@@ -2335,12 +2240,13 @@ mod regression_tests {
     #[test]
     fn model_table_renders_in_hit_column_and_no_cache_column() {
         let usage = sample_usage();
-        let (text, _) = render(Page::Tokens, &usage, 100, 30);
+        let text = token_text(&usage, 100, 30);
         // The stacked block headers are `IN OUT THINK 合计 COST`; the hit ratio
-        // rides inside the IN value cell rather than a separate labelled column.
+        // rides inside the IN value cell rather than a separate labelled column,
+        // and it carries two truncated decimals.
         assert!(text.contains("IN"), "{text}");
         assert!(!text.contains("CACHE"), "{text}");
         assert!(!text.contains("HIT%"), "{text}");
-        assert!(text.contains("9.6M(88%)"), "{text}");
+        assert!(text.contains("9.6M(87.50%)"), "{text}");
     }
 }

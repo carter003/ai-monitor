@@ -1,15 +1,5 @@
 use std::time::{Duration, Instant};
 
-/// Which panel occupies the middle band of the screen.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Page {
-    /// Cloud quota remaining, per provider.
-    #[default]
-    Quotas,
-    /// Locally consumed tokens and their derived cost.
-    Tokens,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
     Codex,
@@ -134,21 +124,22 @@ impl ModelUsage {
         self.input_total.saturating_add(self.output)
     }
 
-    /// Cache utilisation, `0.0..=1.0`. `None` when nothing was sent.
-    pub fn hit_ratio(&self) -> Option<f64> {
-        (self.input_total > 0).then(|| self.cache_read as f64 / self.input_total as f64)
+    /// Cache hit share as a percentage with exactly two decimals, truncated
+    /// rather than rounded so a ratio one hundredth below a boundary never
+    /// reads as the boundary itself. Integer arithmetic keeps the truncation
+    /// exact: `97.00%` and `87.50%`, never `97.01%` or `87.51%`.
+    pub fn hit_display(&self) -> Option<String> {
+        (self.input_total > 0).then(|| {
+            let basis_points = self.cache_read as u128 * 10_000 / self.input_total as u128;
+            format!("{}.{:02}%", basis_points / 100, basis_points % 100)
+        })
     }
 
-    /// Formatted input total and hit ratio for display, e.g. "390.8M(97%)" or "0(—)".
+    /// Formatted input total and hit ratio for display, e.g. "390.8M(97.00%)" or "0(—)".
     pub fn input_display(&self) -> String {
-        if self.input_total > 0 {
-            format!(
-                "{}({:.0}%)",
-                compact(self.input_total),
-                self.hit_ratio().unwrap_or(0.0) * 100.0
-            )
-        } else {
-            "0(—)".into()
+        match self.hit_display() {
+            Some(hit) => format!("{}({hit})", compact(self.input_total)),
+            None => "0(—)".into(),
         }
     }
 }
@@ -443,7 +434,7 @@ mod tests {
             reasoning: 0,
             cost: None,
         };
-        assert_eq!(m1.input_display(), "390.8M(97%)");
+        assert_eq!(m1.input_display(), "390.8M(97.00%)");
 
         let m2 = ModelUsage {
             model: "test2".into(),
@@ -453,10 +444,40 @@ mod tests {
             reasoning: 0,
             cost: None,
         };
-        assert_eq!(m2.input_display(), "869K(92%)");
+        assert_eq!(m2.input_display(), "869K(92.00%)");
 
         let m_zero = ModelUsage::default();
         assert_eq!(m_zero.input_display(), "0(—)");
+    }
+
+    #[test]
+    fn cache_hit_share_is_truncated_at_two_decimals_not_rounded() {
+        // 1/3 = 33.333…%: the third decimal is dropped, not rounded up.
+        let third = ModelUsage {
+            input_total: 3,
+            cache_read: 1,
+            ..ModelUsage::default()
+        };
+        assert_eq!(third.hit_display().as_deref(), Some("33.33%"));
+
+        // 96.666…% would round to 96.67%, but truncation keeps 96.66%.
+        let two_thirds = ModelUsage {
+            input_total: 30,
+            cache_read: 29,
+            ..ModelUsage::default()
+        };
+        assert_eq!(two_thirds.hit_display().as_deref(), Some("96.66%"));
+
+        // An exact ratio keeps both decimals rather than dropping to an integer.
+        let exact = ModelUsage {
+            input_total: 8,
+            cache_read: 7,
+            ..ModelUsage::default()
+        };
+        assert_eq!(exact.hit_display().as_deref(), Some("87.50%"));
+
+        // Nothing sent: no ratio to print.
+        assert_eq!(ModelUsage::default().hit_display(), None);
     }
 }
 
