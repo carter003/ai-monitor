@@ -1,0 +1,120 @@
+name: One-shot UI repair formatting
+
+on:
+  pull_request:
+    types: [synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  format-repair:
+    if: github.repository == 'carter003/ai-monitor' && github.event.pull_request.number == 1 && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'agent/ui-repair-staging-20260911'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Guard the exact reviewed parent
+        run: test "$(git rev-parse HEAD^)" = ad355eb1a1162907765eff23cacbad9c6eb82554
+      - name: Apply reviewed CI fixes and short-pane layout
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          def replace_once(path, before, after):
+              p = Path(path)
+              source = p.read_text()
+              assert source.count(before) == 1, (path, before)
+              p.write_text(source.replace(before, after))
+          root = 'crates/ai-monitor/src/ui'
+          replace_once(root + '/token/tests.rs', 'for plot in 1..=300 {', 'for plot in 1usize..=300 {')
+          replace_once(root + '/token/tests.rs', 'factor % 4 == 0', 'factor.is_multiple_of(4)')
+          replace_once(root + '/token.rs', 'chart.series.len() % factor == 0', 'chart.series.len().is_multiple_of(factor)')
+          replace_once(root + '/token.rs', 'row % tick_step == 0', 'row.is_multiple_of(tick_step)')
+          replace_once(root + '.rs', '''    let charts_drawn = usage.error.is_none()
+              && (!usage.hours.buckets.is_empty() || !usage.month.buckets.is_empty())
+              && inner.width >= token::MIN_CHART_WIDTH
+              && remaining / 3 >= token::MIN_CHART_HEIGHT;''', '''    let chart_count = if usage.error.is_none()
+              && (!usage.hours.buckets.is_empty() || !usage.month.buckets.is_empty())
+              && inner.width >= token::MIN_CHART_WIDTH
+          {
+              (remaining / token::MIN_CHART_HEIGHT).min(3)
+          } else {
+              0
+          };
+          let charts_drawn = chart_count > 0;''')
+          replace_once(root + '.rs', '''        Constraint::Length(top_height),
+                  Constraint::Fill(1),
+                  Constraint::Fill(1),
+                  Constraint::Fill(1),''', '''        Constraint::Length(top_height),
+                  if chart_count >= 1 { Constraint::Fill(1) } else { Constraint::Length(0) },
+                  if chart_count >= 2 { Constraint::Fill(1) } else { Constraint::Length(0) },
+                  if chart_count >= 3 { Constraint::Fill(1) } else { Constraint::Length(0) },''')
+          replace_once(root + '.rs', '''/// Charts share the remainder (within one row); short panes keep the list
+          /// rather than drawing three unreadable, zero-height plots.''', '''/// Charts share the remainder (within one row). Short panes show as many
+          /// readable charts as fit, rather than wasting space when all three cannot.''')
+          replace_once(root + '/token.rs', '''    for (chart, area) in charts.iter().zip(areas) {
+                  if area.width as usize <= origin {''', '''    for (chart, area) in charts.iter().zip(areas) {
+                  if area.height < MIN_CHART_HEIGHT {
+                      continue;
+                  }
+                  if area.width as usize <= origin {''')
+          p = Path(root + '/tests.rs')
+          p.write_text(p.read_text() + '''
+          #[test]
+          fn short_panes_show_as_many_readable_charts_as_fit() {
+              let usage = sample_usage();
+              let height = token::lines(&usage, 100, usize::MAX).len() as u16;
+              for count in 0..=3u16 {
+                  let (parts, drawn) = token_rects(Rect::new(0, 0, 100, height + count * token::MIN_CHART_HEIGHT), &usage);
+                  assert_eq!(drawn, count > 0);
+                  assert_eq!(parts[1..].iter().filter(|area| area.height >= token::MIN_CHART_HEIGHT).count(), count as usize);
+                  if count > 0 {
+                      assert_eq!(parts[0].height, height);
+                  }
+              }
+          }
+
+          #[test]
+          fn layout_preview_fixtures() {
+              for (width, height) in [(80, 24), (120, 40), (160, 50)] {
+                  let (text, _) = render(&sample_usage(), width, height);
+                  println!("RATATUI BUFFER {width}x{height}\\n{text}\\nEND BUFFER");
+              }
+          }
+          ''')
+          PY
+      - name: Format the Rust sources
+        run: |
+          rustup component add rustfmt
+          cargo fmt --all
+          cargo fmt --all -- --check
+      - name: Commit only the reviewed UI files
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          allowed = {
+              'crates/ai-monitor/src/ui.rs',
+              'crates/ai-monitor/src/ui/tests.rs',
+              'crates/ai-monitor/src/ui/token.rs',
+              'crates/ai-monitor/src/ui/token/tests.rs',
+          }
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          assert changed and changed <= allowed, changed
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/ai-monitor/src/ui.rs crates/ai-monitor/src/ui/tests.rs crates/ai-monitor/src/ui/token.rs crates/ai-monitor/src/ui/token/tests.rs
+          git commit -m 'fix(ui): apply compiler feedback, format sources and fill short panes progressively'
+      - name: Fast-forward only the repair branch
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          AUTH=$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH" push origin HEAD:refs/heads/agent/ui-repair-staging-20260911
+          git rev-parse HEAD
