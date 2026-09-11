@@ -113,16 +113,16 @@ pub(super) fn draw(
     let canvas = Canvas::default()
         .background_color(Color::Reset)
         .marker(Marker::Braille)
-        .x_bounds([0., geometry.plot.saturating_sub(1).max(1) as f64])
-        .y_bounds([0., max])
+        .x_bounds([0., (geometry.plot * 2 - 1) as f64])
+        .y_bounds([0., ((rows + 1) * 4 - 1) as f64])
         .paint(|context| {
             for day in 1..shown {
                 if let (Some(previous), Some(value)) = (daily[day - 1], daily[day]) {
                     context.draw(&CanvasLine {
-                        x1: ticks[day - 1].0 as f64,
-                        y1: previous,
-                        x2: ticks[day].0 as f64,
-                        y2: value,
+                        x1: (ticks[day - 1].0 * 2 + 1) as f64,
+                        y1: ((rows - point_row(previous, max, rows)) * 4 + 2) as f64,
+                        x2: (ticks[day].0 * 2 + 1) as f64,
+                        y2: ((rows - point_row(value, max, rows)) * 4 + 2) as f64,
                         color: BAR_MID,
                     });
                 }
@@ -135,10 +135,10 @@ pub(super) fn draw(
     );
     for day in 0..shown {
         if let Some(value) = daily[day] {
-            let y = ((1. - value / max) * rows as f64).round() as u16;
+            let y = point_row(value, max, rows) as u16;
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    "●",
+                    "∙",
                     Style::default().fg(bar_color(value / max)),
                 )),
                 Rect::new(
@@ -150,6 +150,13 @@ pub(super) fn draw(
             );
         }
     }
+}
+
+// A point and BOTH adjoining line segments use this same visible row.
+// Canvas coordinates are its 2x4 braille raster, so the stroke passes through
+// the centre of the marker cell instead of ending half a row away.
+fn point_row(value: f64, max: f64, rows: usize) -> usize {
+    (((1. - value / max) * rows as f64).round() as usize).min(rows)
 }
 
 #[cfg(test)]
@@ -199,7 +206,7 @@ mod tests {
                     .content
                     .iter()
                     .enumerate()
-                    .filter(|(_, cell)| cell.symbol() == "●")
+                    .filter(|(_, cell)| cell.symbol() == "∙")
                     .map(|(offset, _)| (offset % width as usize, offset / width as usize))
                     .collect();
                 assert_eq!(points.len(), 12, "{days} days, {width} columns");
@@ -214,7 +221,7 @@ mod tests {
                     );
                 }
                 // The zero on day 1 is a real marker on the baseline, not missing data.
-                assert_eq!(buffer[(8 + geometry.centre(0) as u16, 11)].symbol(), "●");
+                assert_eq!(buffer[(8 + geometry.centre(0) as u16, 11)].symbol(), "∙");
                 // Date labels continue, but no point or curve exists after day 12.
                 for x in 8 + geometry.centre(12 * 4)..width as usize {
                     for y in 1..=10 {
@@ -236,7 +243,7 @@ mod tests {
             buffer
                 .content
                 .iter()
-                .filter(|cell| cell.symbol() == "●")
+                .filter(|cell| cell.symbol() == "∙")
                 .count(),
             3
         );
@@ -264,7 +271,7 @@ mod tests {
             buffer
                 .content
                 .iter()
-                .filter(|cell| cell.symbol() == "●")
+                .filter(|cell| cell.symbol() == "∙")
                 .count(),
             2
         );

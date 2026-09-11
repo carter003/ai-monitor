@@ -409,7 +409,7 @@ fn daily_money_points_and_monthly_token_ticks_share_the_exact_date_columns() {
                 let x = (origin + geometry.centre(day * 4)) as u16;
                 assert_eq!(
                     (1..=8)
-                        .filter(|row| buffer[(x, *row)].symbol() == "●")
+                        .filter(|row| buffer[(x, *row)].symbol() == "∙")
                         .count(),
                     1
                 );
@@ -569,7 +569,7 @@ fn export_real_chart_terminal_fixtures() {
                 buffer
                     .content
                     .iter()
-                    .filter(|cell| cell.symbol() == "●")
+                    .filter(|cell| cell.symbol() == "∙")
                     .count(),
                 12
             );
