@@ -52,9 +52,10 @@ fn parse_config(text: &str) -> Result<FileConfig, String> {
         let is_quoted = unquoted.len() != value.len();
         match key {
             "refresh_seconds" => {
-                config.refresh_seconds = Some(unquoted.parse().map_err(|_| {
-                    format!("refresh_seconds 必须是无符号整数，当前为 {}", value)
-                })?);
+                config.refresh_seconds =
+                    Some(unquoted.parse().map_err(|_| {
+                        format!("refresh_seconds 必须是无符号整数，当前为 {}", value)
+                    })?);
             }
             _ if is_quoted => match key {
                 "codex_home" => config.codex_home = Some(unquoted.to_owned()),
@@ -98,9 +99,8 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|| config_root.join("ai-monitor/config.toml"));
         let file: FileConfig = match fs::read_to_string(&path) {
-            Ok(text) => {
-                parse_config(&text).map_err(|e| format!("配置格式错误：{}：{}", path.display(), e))?
-            }
+            Ok(text) => parse_config(&text)
+                .map_err(|e| format!("配置格式错误：{}：{}", path.display(), e))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => FileConfig::default(),
             Err(_) => return Err(format!("无法读取配置：{}", path.display())),
         };
@@ -163,8 +163,8 @@ mod tests {
     /// defaults instead of raising, which is hard to notice in production.
     #[test]
     fn usage_db_is_an_accepted_config_key() {
-        let parsed = parse_config("usage_db = \"/tmp/other.db\"")
-            .expect("usage_db must be a declared key");
+        let parsed =
+            parse_config("usage_db = \"/tmp/other.db\"").expect("usage_db must be a declared key");
         assert_eq!(parsed.usage_db.as_deref(), Some("/tmp/other.db"));
     }
 

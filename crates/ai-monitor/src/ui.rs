@@ -753,47 +753,32 @@ fn model_table(models: &[ModelUsage], width: u16, limit: usize) -> Vec<Line<'sta
     if models.is_empty() {
         return vec![Line::styled(" 暂无用量记录", Style::default().fg(MUTED))];
     }
-    // One layout for every width: the stacked three-row block. Narrow panes shrink
-    // the even slots and drop columns from the right (see `model_block`); they
-    // never fall back to the old single-row shape.
     let taken: Vec<&ModelUsage> = models.iter().take(limit).collect();
-    let mut lines = vec![];
-    for model in &taken {
-        lines.extend(model_block(model, width));
-    }
-    lines
-}
-
-/// Three rows per model, the only model-table shape: the name on its own line,
-/// then a header band and the values. The value columns (`IN OUT THINK 合计 COST`)
-/// tile the full pane edge-to-edge, each right-aligned in its slot so every label
-/// sits above its value.
-///
-/// Degradation is by column, not by layout: each slot is at least its content
-/// width, any spare width is shared out evenly, and when the pane is too narrow
-/// the rightmost columns are dropped (`COST`, then `合计`, then `THINK`) until it
-/// fits. `IN` and `OUT` always survive — they are what the page is for.
-fn model_block(model: &ModelUsage, width: u16) -> Vec<Line<'static>> {
-    let in_val = model.input_display();
-    let cost = match model.cost {
-        Some(c) => (money(c), GREEN),
-        None => ("—".into(), MUTED),
-    };
-    // Left to right; `COST` is the first to go, `合计` and `THINK` follow, `IN`
-    // and `OUT` are kept.
-    let mut cols: Vec<(&str, usize, String, Color)> = vec![
-        ("IN", columns(&in_val).max(2), in_val, INK),
-        ("OUT", 5, compact(model.output), INK),
-        ("THINK", 5, compact(model.reasoning), MUTED),
-        ("合计", 6, compact(model.total_tokens()), INK),
-        ("COST", 7, cost.0, cost.1),
+    // One header band names the columns; each model then takes two rows, a
+    // centred name and its values in the header's slots. The IN slot must hold
+    // the widest cell shown (the hit ratio rides inside it), the rest are
+    // fixed-width numbers. Narrow panes drop columns from the right (`COST`,
+    // then `合计`, then `THINK`); `IN` and `OUT` always survive.
+    let available = width as usize;
+    let mut cols: Vec<(&str, usize)> = vec![
+        (
+            "IN",
+            taken
+                .iter()
+                .map(|m| columns(&m.input_display()))
+                .max()
+                .unwrap_or(2)
+                .max(2),
+        ),
+        ("OUT", 5),
+        ("THINK", 5),
+        ("合计", 6),
+        ("COST", 7),
     ];
-    // Drop the rightmost columns until the minimum set fits the pane.
-    while cols.len() > 2 && (1 + cols.iter().map(|c| c.1).sum::<usize>()) > width as usize {
+    while cols.len() > 2 && (1 + cols.iter().map(|c| c.1).sum::<usize>()) > available {
         cols.pop();
     }
     let mins: usize = cols.iter().map(|c| c.1).sum();
-    let available = width as usize;
     let leftover = available.saturating_sub(mins);
     let k = cols.len();
     let base = leftover / k;
@@ -803,16 +788,8 @@ fn model_block(model: &ModelUsage, width: u16) -> Vec<Line<'static>> {
         .enumerate()
         .map(|(i, c)| c.1 + base + (i < extra) as usize)
         .collect();
-
-    // Row 1: the model name on its own line, left-aligned and truncated.
-    let name = truncate(&model.model, available.saturating_sub(1).max(1));
-    let name_row = Line::from(vec![Span::styled(
-        format!(" {name}"),
-        Style::default().fg(CYAN),
-    )]);
-
-    // Header band and value band: right-align each cell in its slot and tile the
-    // whole pane, so the band is flush to both edges.
+    // Right-align each cell in its slot and tile the whole pane, so the band
+    // is flush to both edges and every label sits above its value.
     let band = |cells: Vec<(String, Color)>| -> Line<'static> {
         let mut spans = vec![];
         for (index, (text, color)) in cells.into_iter().enumerate() {
@@ -824,17 +801,35 @@ fn model_block(model: &ModelUsage, width: u16) -> Vec<Line<'static>> {
         }
         Line::from(spans)
     };
-    let header = band(
+    let mut lines = vec![band(
         cols.iter()
-            .map(|(label, _, _, _)| (label.to_string(), MUTED))
+            .map(|(label, _)| (label.to_string(), MUTED))
             .collect(),
-    );
-    let values = band(
-        cols.iter()
-            .map(|(_, _, val, color)| (val.clone(), *color))
-            .collect(),
-    );
-    vec![name_row, header, values]
+    )];
+    for model in &taken {
+        // The name is centred across the pane, reading as a caption for the
+        // value row beneath it.
+        let name = truncate(&model.model, available.saturating_sub(2).max(1));
+        let pad = available.saturating_sub(columns(&name)) / 2;
+        lines.push(Line::from(vec![
+            Span::raw(" ".repeat(pad)),
+            Span::styled(name, Style::default().fg(CYAN)),
+        ]));
+        let cost = match model.cost {
+            Some(c) => (money(c), GREEN),
+            None => ("—".into(), MUTED),
+        };
+        let mut cells: Vec<(String, Color)> = vec![
+            (model.input_display(), INK),
+            (compact(model.output), INK),
+            (compact(model.reasoning), MUTED),
+            (compact(model.total_tokens()), INK),
+            (cost.0, cost.1),
+        ];
+        cells.truncate(cols.len());
+        lines.push(band(cells));
+    }
+    lines
 }
 
 /// One block per group: the plot, the axis, the tick line, then the period name.
@@ -2093,7 +2088,9 @@ mod regression_tests {
             .unwrap_or_default();
         let row = text
             .lines()
-            .find(|line| line.contains("9.6M(88%)") && line.contains("400K") && line.contains("$3.50"))
+            .find(|line| {
+                line.contains("9.6M(88%)") && line.contains("400K") && line.contains("$3.50")
+            })
             .unwrap_or_default();
         assert!(!header.is_empty(), "no header band: {text}");
         assert!(!row.is_empty(), "no value row: {text}");
@@ -2103,7 +2100,12 @@ mod regression_tests {
             line.find(needle)
                 .map(|byte| columns(&line[..byte]) + columns(needle))
         };
-        for (label, value) in [("IN", "9.6M(88%)"), ("OUT", "400K"), ("合计", "10.0M"), ("COST", "$3.50")] {
+        for (label, value) in [
+            ("IN", "9.6M(88%)"),
+            ("OUT", "400K"),
+            ("合计", "10.0M"),
+            ("COST", "$3.50"),
+        ] {
             let header_end = ends(header, label).unwrap_or_default();
             let value_end = ends(row, value).unwrap_or_default();
             assert_eq!(

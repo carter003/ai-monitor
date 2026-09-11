@@ -52,11 +52,27 @@ pub fn max_rowid(connection: &Connection) -> i64 {
         .unwrap_or(0)
 }
 
-/// Read the replay window: every row with `rowid > max_rowid - REPLAY_WINDOW`.
-///
-/// Rows are returned in rowid order so the caller processes them deterministically.
-pub fn read_window(connection: &Connection, max: i64) -> rusqlite::Result<Vec<RawMessage>> {
-    let floor = max.saturating_sub(REPLAY_WINDOW).max(0);
+/// The window's exclusive lower rowid bound for one round: never below the
+/// baseline recorded at the first ever round (the file sources' "不回填历史"
+/// rule — without it the first round would import the last `REPLAY_WINDOW`
+/// rows of pre-collector history), yet still reaching back `REPLAY_WINDOW`
+/// rows so a row filled in long after its creation is re-read.
+pub fn replay_floor(baseline: i64, max: i64) -> i64 {
+    baseline.max(max.saturating_sub(REPLAY_WINDOW))
+}
+
+/// The baseline rowid in the `{"max_rowid":N}` cursor. `None` — absent or
+/// unparsable cursor — (re)baselines the source on the caller's next write.
+pub fn baseline_from_cursor(cursor: &str) -> Option<i64> {
+    serde_json::from_str::<Value>(cursor)
+        .ok()?
+        .get("max_rowid")?
+        .as_i64()
+}
+
+/// Read the replay window: every row with `rowid > floor`, in rowid order so
+/// the caller processes them deterministically.
+pub fn read_window(connection: &Connection, floor: i64) -> rusqlite::Result<Vec<RawMessage>> {
     let mut statement =
         connection.prepare("SELECT rowid, data FROM message WHERE rowid > ?1 ORDER BY rowid")?;
     let rows = statement.query_map([floor], |row| {
@@ -240,9 +256,9 @@ mod tests {
 
         let max = max_rowid(&connection);
         assert_eq!(max, REPLAY_WINDOW);
-        let window = read_window(&connection, max).expect("window read");
-        // The window floor is `max - REPLAY_WINDOW` = 0, so row 1 remains in scope
-        // and the backfilled values are seen on this pass.
+        let window = read_window(&connection, replay_floor(0, max)).expect("window read");
+        // The floor is 0, so row 1 remains in scope and the backfilled values
+        // are seen on this pass.
         let recovered = window
             .iter()
             .find(|row| row.rowid == 1)
@@ -250,6 +266,31 @@ mod tests {
         let event = parse_message(recovered).expect("backfilled row now has usage");
         assert_eq!(event.usage.input_total, 999 + 128_881);
         assert_eq!(event.event_id, "1");
+    }
+
+    #[test]
+    fn the_replay_floor_never_drops_below_the_baseline() {
+        assert_eq!(replay_floor(700, 900), 700, "baseline still in force");
+        assert_eq!(
+            replay_floor(700, 5000),
+            3000,
+            "window reaches back REPLAY_WINDOW rows"
+        );
+        assert_eq!(
+            replay_floor(700, 1000),
+            700,
+            "a shrunken table cannot expose pre-baseline rows"
+        );
+    }
+
+    #[test]
+    fn the_baseline_is_recovered_from_the_cursor() {
+        assert_eq!(
+            baseline_from_cursor("{\"max_rowid\":158821}"),
+            Some(158_821)
+        );
+        assert_eq!(baseline_from_cursor("{}"), None);
+        assert_eq!(baseline_from_cursor("not json"), None);
     }
 
     #[test]
@@ -275,7 +316,8 @@ mod tests {
                 )
                 .expect("insert filler");
         }
-        let window = read_window(&connection, max_rowid(&connection)).expect("window read");
+        let window =
+            read_window(&connection, replay_floor(0, max_rowid(&connection))).expect("window read");
         assert_eq!(window.len(), REPLAY_WINDOW as usize);
         assert!(window.iter().all(|row| row.rowid > REPLAY_WINDOW));
     }

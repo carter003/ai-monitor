@@ -275,9 +275,8 @@ pub fn reprice_unpriced_events(
 
     let tx = connection.transaction()?;
     {
-        let mut update_stmt = tx.prepare(
-            "UPDATE usage_event SET cost_usd = ?1 WHERE source = ?2 AND event_id = ?3",
-        )?;
+        let mut update_stmt =
+            tx.prepare("UPDATE usage_event SET cost_usd = ?1 WHERE source = ?2 AND event_id = ?3")?;
         for (cost, source, event_id) in &updates {
             update_stmt.execute(rusqlite::params![cost, source, event_id])?;
         }
@@ -518,18 +517,30 @@ mod tests {
         assert_eq!(repriced, 1);
 
         let cost_1: Option<f64> = connection
-            .query_row("SELECT cost_usd FROM usage_event WHERE event_id = 'evt-1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT cost_usd FROM usage_event WHERE event_id = 'evt-1'",
+                [],
+                |r| r.get(0),
+            )
             .expect("query evt-1");
         assert!(cost_1.is_some());
         assert!(cost_1.unwrap() > 0.0);
 
         let cost_2: Option<f64> = connection
-            .query_row("SELECT cost_usd FROM usage_event WHERE event_id = 'evt-2'", [], |r| r.get(0))
+            .query_row(
+                "SELECT cost_usd FROM usage_event WHERE event_id = 'evt-2'",
+                [],
+                |r| r.get(0),
+            )
             .expect("query evt-2");
         assert_eq!(cost_2, None);
 
         let cost_3: Option<f64> = connection
-            .query_row("SELECT cost_usd FROM usage_event WHERE event_id = 'evt-3'", [], |r| r.get(0))
+            .query_row(
+                "SELECT cost_usd FROM usage_event WHERE event_id = 'evt-3'",
+                [],
+                |r| r.get(0),
+            )
             .expect("query evt-3");
         assert_eq!(cost_3, None);
     }

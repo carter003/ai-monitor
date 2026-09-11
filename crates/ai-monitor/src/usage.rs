@@ -516,9 +516,29 @@ mod tests {
     fn events_older_than_rolling_window_are_excluded_from_models() {
         let connection = seeded();
         // Event 1: occurred 25 hours ago (older than rolling 24H)
-        insert(&connection, "omp", "1", "old-model", 1000, 0, 100, Some(1.0), 1000);
+        insert(
+            &connection,
+            "omp",
+            "1",
+            "old-model",
+            1000,
+            0,
+            100,
+            Some(1.0),
+            1000,
+        );
         // Event 2: occurred 1 hour ago
-        insert(&connection, "omp", "2", "recent-model", 500, 0, 50, Some(0.5), 100_000);
+        insert(
+            &connection,
+            "omp",
+            "2",
+            "recent-model",
+            500,
+            0,
+            50,
+            Some(0.5),
+            100_000,
+        );
 
         let models = reader(connection).models(50_000).expect("models");
         assert_eq!(models.len(), 1);
@@ -718,10 +738,23 @@ mod tests {
         let stats = reader.load().expect("load stats");
         assert!(!stats.models.is_empty(), "models should not be empty");
         for m in &stats.models {
-            assert!(!m.model.contains("hy3"), "hy3 should not be in 24H models: {}", m.model);
-            assert!(!m.model.contains("ox-alpha-free"), "ox-alpha-free should not be in 24H models: {}", m.model);
-            println!("24H Model: {:<35} IN(HIT): {:<14} OUT: {:<8} COST: {:?}",
-                m.model, m.input_display(), m.output, m.cost);
+            assert!(
+                !m.model.contains("hy3"),
+                "hy3 should not be in 24H models: {}",
+                m.model
+            );
+            assert!(
+                !m.model.contains("ox-alpha-free"),
+                "ox-alpha-free should not be in 24H models: {}",
+                m.model
+            );
+            println!(
+                "24H Model: {:<35} IN(HIT): {:<14} OUT: {:<8} COST: {:?}",
+                m.model,
+                m.input_display(),
+                m.output,
+                m.cost
+            );
         }
     }
 }

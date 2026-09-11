@@ -214,7 +214,26 @@ impl Collector {
             }
         };
         let max = opencode::max_rowid(&reader);
-        let window = match opencode::read_window(&reader, max) {
+        // The cursor's `max_rowid` is the never-backfill baseline recorded at
+        // the first ever round; it stays fixed for the life of the source. A
+        // first round (no cursor yet) records the current top rowid and reads
+        // nothing, exactly like the file sources' baseline. Without it the
+        // 2000-row replay window would import the last stretch of
+        // pre-collector history on the first ever run. Later rounds read with
+        // `replay_floor`, which never reaches below the baseline yet still
+        // re-reads the last `REPLAY_WINDOW` rows for late backfills.
+        let (baseline, floor) = match db::offset(connection, kind)?
+            .as_deref()
+            .and_then(opencode::baseline_from_cursor)
+        {
+            Some(baseline) => (baseline, opencode::replay_floor(baseline, max)),
+            None => {
+                let baseline = max;
+                db::save_offset(connection, kind, &format!("{{\"max_rowid\":{baseline}}}"))?;
+                (baseline, max)
+            }
+        };
+        let window = match opencode::read_window(&reader, floor) {
             Ok(window) => window,
             Err(error) => {
                 eprintln!("[warn] opencode 查询失败：{error}");
@@ -230,9 +249,9 @@ impl Collector {
             batch.push((event, priced));
         }
         let inserted = db::insert_events(connection, kind, &batch, now)?;
-        // The watermark is the window's top rowid; the replay overlap is applied
-        // at read time (`read_window`), not here.
-        db::save_offset(connection, kind, &format!("{{\"max_rowid\":{max}}}"))?;
+        // The baseline never moves; rewriting it here is idempotent and keeps
+        // the cursor write in the same round as the inserts.
+        db::save_offset(connection, kind, &format!("{{\"max_rowid\":{baseline}}}"))?;
         Ok(inserted)
     }
 

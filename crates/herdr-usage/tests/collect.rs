@@ -526,30 +526,61 @@ fn insert_message(connection: &rusqlite::Connection, rowid: i64, model: &str, in
 }
 
 #[test]
-fn opencode_replays_its_window_without_double_counting() {
-    let fixture = Fixture::new("opencode-window");
+fn the_first_opencode_round_baselines_instead_of_backfilling() {
+    let fixture = Fixture::new("opencode-baseline");
     seed_opencode(&fixture.paths.opencode_db);
     {
         let reader = rusqlite::Connection::open(&fixture.paths.opencode_db).expect("open");
-        insert_message(&reader, 1, "deepseek-v4-flash", 100);
+        // Pre-collector history, exactly what must NOT be collected.
+        for rowid in 1..=3 {
+            insert_message(&reader, rowid, "deepseek-v4-flash", 100);
+        }
     }
     let mut connection = fixture.connection();
     let mut collector = sources::Collector::new(fixture.paths.clone());
 
-    // opencode is not a log file: the cursor is a rowid watermark inside the
-    // database, so the row that already exists is collected on the first round.
-    assert_eq!(
-        collector
-            .run_round(&mut connection, 1_000)
-            .expect("first round")
-            .inserted,
-        1
-    );
+    let report = collector
+        .run_round(&mut connection, 1_000)
+        .expect("first round");
+    assert_eq!(report.inserted, 0, "第一轮只记录水位，不回填 opencode 历史");
+    assert_eq!(count(&connection, "opencode"), 0);
+
+    // Activity after the baseline is collected; the replayed window must not
+    // resurrect the baselined rows.
+    {
+        let reader = rusqlite::Connection::open(&fixture.paths.opencode_db).expect("open");
+        insert_message(&reader, 4, "deepseek-v4-flash", 200);
+    }
+    let report = collector
+        .run_round(&mut connection, 2_000)
+        .expect("second round");
+    assert_eq!(report.inserted, 1);
+    for at in 3_000..3_003 {
+        assert_eq!(
+            collector
+                .run_round(&mut connection, at)
+                .expect("replay round")
+                .inserted,
+            0,
+            "every later round re-reads the window; rows must stay single"
+        );
+    }
     assert_eq!(count(&connection, "opencode"), 1);
+}
+
+#[test]
+fn opencode_replays_its_window_without_double_counting() {
+    let fixture = Fixture::new("opencode-window");
+    seed_opencode(&fixture.paths.opencode_db);
+    let mut connection = fixture.connection();
+    let mut collector = sources::Collector::new(fixture.paths.clone());
+    collector
+        .run_round(&mut connection, 1_000)
+        .expect("baseline");
 
     {
         let reader = rusqlite::Connection::open(&fixture.paths.opencode_db).expect("open");
-        insert_message(&reader, 2, "deepseek-v4-flash", 200);
+        insert_message(&reader, 1, "deepseek-v4-flash", 100);
     }
     assert_eq!(
         collector
@@ -558,9 +589,20 @@ fn opencode_replays_its_window_without_double_counting() {
             .inserted,
         1
     );
+    {
+        let reader = rusqlite::Connection::open(&fixture.paths.opencode_db).expect("open");
+        insert_message(&reader, 2, "deepseek-v4-flash", 200);
+    }
+    assert_eq!(
+        collector
+            .run_round(&mut connection, 3_000)
+            .expect("round")
+            .inserted,
+        1
+    );
     // Every later round re-reads the same 2000-row window; both rows must stay
     // single rows rather than being counted again.
-    for at in 3_000..3_005 {
+    for at in 4_000..4_005 {
         assert_eq!(
             collector
                 .run_round(&mut connection, at)
@@ -576,9 +618,15 @@ fn opencode_replays_its_window_without_double_counting() {
 fn an_opencode_row_filled_after_the_first_pass_is_picked_up_later() {
     let fixture = Fixture::new("opencode-backfill");
     seed_opencode(&fixture.paths.opencode_db);
+    let mut connection = fixture.connection();
+    let mut collector = sources::Collector::new(fixture.paths.clone());
+    collector
+        .run_round(&mut connection, 1_000)
+        .expect("baseline");
     {
         let reader = rusqlite::Connection::open(&fixture.paths.opencode_db).expect("open");
-        // A row that exists but has no usage yet — the measured "先建后填" shape.
+        // A row that exists but has no usage yet — the measured "先建后填" shape,
+        // created while the collector is already running.
         let empty = r#"{"role":"assistant","modelID":"deepseek-v4-flash","providerID":"opencode-go","tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1700000000000}}"#;
         reader
             .execute(
@@ -587,11 +635,6 @@ fn an_opencode_row_filled_after_the_first_pass_is_picked_up_later() {
             )
             .expect("insert empty");
     }
-    let mut connection = fixture.connection();
-    let mut collector = sources::Collector::new(fixture.paths.clone());
-    collector
-        .run_round(&mut connection, 1_000)
-        .expect("baseline");
     collector.run_round(&mut connection, 2_000).expect("round");
     assert_eq!(
         count(&connection, "opencode"),

@@ -46,6 +46,7 @@ pub fn insert_events(
 ) -> rusqlite::Result<usize> {
     let transaction = connection.transaction()?;
     let mut inserted = 0usize;
+    let mut newly_unresolved: Vec<&ParsedEvent> = vec![];
     {
         let mut statement = transaction.prepare(
             "INSERT OR IGNORE INTO usage_event(
@@ -70,7 +71,7 @@ pub fn insert_events(
                 // event row.
                 Priced::Ignored | Priced::Unresolved => None,
             };
-            inserted += statement.execute(rusqlite::params![
+            let inserted_row = statement.execute(rusqlite::params![
                 source,
                 event.event_id,
                 event.model,
@@ -83,6 +84,14 @@ pub fn insert_events(
                 cost,
                 event.occurred_at,
             ])?;
+            // Only a genuinely new row reaches the unresolved ledger. The
+            // opencode replay window re-offers the same rows every round;
+            // counting replays would inflate `hit_count` once per minute and
+            // drown the signal that ranks models needing an alias.
+            if inserted_row == 1 && *priced == Priced::Unresolved {
+                newly_unresolved.push(event);
+            }
+            inserted += inserted_row;
         }
     }
     {
@@ -93,10 +102,7 @@ pub fn insert_events(
                  hit_count = hit_count + 1,
                  last_seen = excluded.last_seen",
         )?;
-        for (event, priced) in events {
-            if *priced != Priced::Unresolved {
-                continue;
-            }
+        for event in newly_unresolved.iter() {
             let Some(model) = &event.model else { continue };
             statement.execute(rusqlite::params![source, model, now_ms])?;
         }
@@ -178,6 +184,33 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM usage_event", [], |row| row.get(0))
             .expect("count");
         assert_eq!(count, 2, "a replayed window must not double count");
+    }
+
+    #[test]
+    fn a_replayed_batch_does_not_inflate_the_unresolved_ledger() {
+        let mut connection = memory();
+        let batch = [(event("1", 10), Priced::Unresolved)];
+        assert_eq!(
+            insert_events(&mut connection, "opencode", &batch, 1_000).expect("insert"),
+            1
+        );
+        // The opencode replay window re-offers the same row every round; each
+        // replay must leave `hit_count` untouched.
+        for now in [2_000, 3_000, 4_000] {
+            assert_eq!(
+                insert_events(&mut connection, "opencode", &batch, now).expect("replay"),
+                0
+            );
+        }
+        let (hit_count, last_seen): (i64, i64) = connection
+            .query_row(
+                "SELECT hit_count, last_seen FROM unresolved_model WHERE source='opencode'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("ledger row");
+        assert_eq!(hit_count, 1, "replays must not inflate hit_count");
+        assert_eq!(last_seen, 1_000, "replays must not bump last_seen");
     }
 
     #[test]
