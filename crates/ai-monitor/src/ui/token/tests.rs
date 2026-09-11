@@ -63,7 +63,7 @@ fn render_chart(chart: &Chart<'_>, width: u16, rows: usize, origin: usize) -> Bu
     terminal
         .draw(|frame| {
             frame.render_widget(
-                Paragraph::new(histogram(chart, width, rows, origin)),
+                Paragraph::new(histogram(chart, width, rows, origin, 0)),
                 frame.area(),
             );
         })
@@ -225,237 +225,6 @@ fn the_historical_total_survives_compact_and_scrollable_summaries() {
 }
 
 #[test]
-fn default_granularity_does_not_change_on_wider_panes() {
-    let usage = usage();
-    let charts = local_charts(&usage);
-    for width in [100, 140, 220, 400] {
-        for chart in &charts {
-            assert_eq!(merge_factor(chart, width - 8), 4);
-        }
-    }
-    assert!(text(&histogram(&charts[0], 100, 4, 8)).contains("每柱 1小时"));
-    assert!(text(&histogram(&charts[1], 100, 4, 8)).contains("每柱 1天"));
-    assert!(text(&histogram(&charts[2], 100, 4, 8)).contains("每柱 1天"));
-}
-
-#[test]
-fn merged_buckets_conserve_totals_and_use_natural_intervals() {
-    for base_len in [96, 28 * 4, 29 * 4, 30 * 4, 31 * 4] {
-        let data: Vec<_> = (1..=base_len as u64).collect();
-        let chart = hourly(&data);
-        let original: u64 = data.iter().sum();
-        for plot in 1..=250 {
-            let factor = merge_factor(&chart, plot);
-            assert!(factor >= 4 && factor.is_multiple_of(4));
-            let merged = merged_values(&chart.series, factor);
-            assert_eq!(merged.iter().sum::<f64>(), original as f64);
-            assert!(merged.len() <= plot.div_ceil(2));
-        }
-    }
-    let values: Vec<_> = (0..124).map(|i| i as f64 * 0.01).collect();
-    let original: f64 = values.iter().sum();
-    for factor in [4, 8, 12, 20, 124] {
-        let merged = merged_values(&Series::Money(&values), factor);
-        assert!((merged.iter().sum::<f64>() - original).abs() < 1e-9);
-    }
-}
-
-#[test]
-fn partial_final_calendar_bucket_is_retained_and_labelled() {
-    let values = vec![1u64; 31 * 4];
-    let chart = Chart {
-        label: "本月 Token",
-        series: Series::Tokens(&values),
-        span_seconds: 6 * 3_600,
-        tick_buckets: 4,
-        first_tick: 1,
-    };
-    let factor = merge_factor(&chart, 32);
-    assert_eq!(factor, 8);
-    let merged = merged_values(&chart.series, factor);
-    assert_eq!(merged.len(), 16);
-    assert_eq!(merged.last(), Some(&4.));
-    let rendered = text(&histogram(&chart, 40, 4, 8));
-    assert!(rendered.contains("2天"));
-    assert!(rendered.contains("末柱不足"));
-}
-
-#[test]
-fn bars_ticks_and_labels_have_the_same_actual_buffer_coordinates() {
-    // 71 plot columns: 24 two-cell bars plus 23 one-cell gaps.
-    // Expected positions are independent of Geometry's implementation.
-    let values = vec![5u64; 96];
-    let chart = hourly(&values);
-    let buffer = render_chart(&chart, 79, 4, 8);
-    assert_eq!(buffer[(7, 5)].symbol(), "└");
-    for hour in 0..24u16 {
-        let start = 8 + hour * 3;
-        let centre = start + 1;
-        assert_eq!(buffer[(start, 4)].symbol(), "█");
-        assert_eq!(buffer[(start + 1, 4)].symbol(), "█");
-        assert_eq!(buffer[(centre, 5)].symbol(), "┴");
-        let label = hour.to_string();
-        let left = centre - label.len() as u16 / 2;
-        for (offset, character) in label.chars().enumerate() {
-            assert_eq!(
-                buffer[(left + offset as u16, 6)].symbol(),
-                character.to_string()
-            );
-        }
-        if hour < 23 {
-            assert_eq!(buffer[(start + 2, 4)].symbol(), " ");
-        }
-    }
-}
-
-#[test]
-fn dense_partial_caps_and_bodies_use_equal_width_full_cell_glyphs() {
-    // Each hourly sum is 12; at a nice ceiling of 20 over three plot rows,
-    // the second row is a partial cap and the third is a full body.
-    let values = vec![3u64; 96];
-    let chart = hourly(&values);
-    let buffer = render_chart(&chart, 55, 3, 8);
-    for hour in 0..24u16 {
-        let x = 8 + hour * 2;
-        assert_eq!(buffer[(x, 2)].symbol(), "▆");
-        assert_eq!(buffer[(x, 3)].symbol(), "█");
-        assert_eq!(buffer[(x, 2)].fg, BAR);
-        assert_eq!(buffer[(x, 3)].fg, BAR);
-        if hour < 23 {
-            assert_eq!(buffer[(x + 1, 2)].symbol(), " ");
-            assert_eq!(buffer[(x + 1, 3)].symbol(), " ");
-        }
-    }
-    assert!(buffer.content.iter().all(|cell| cell.symbol() != "▊"));
-}
-
-#[test]
-fn bar_widths_are_uniform_and_gaps_are_real_cells() {
-    for plot in 1usize..=300 {
-        for count in 1..=plot.div_ceil(2) {
-            let geometry = Geometry::new((plot + 8) as u16, 8, count);
-            assert!(geometry.bar_width >= 1);
-            for index in 0..count {
-                assert!(geometry.starts[index] + geometry.bar_width <= plot);
-                if index + 1 < count {
-                    assert!(geometry.gap_after(index) >= 1);
-                }
-            }
-            assert_eq!(geometry.starts[0], 0);
-            assert_eq!(geometry.starts[count - 1] + geometry.bar_width, plot);
-        }
-    }
-}
-
-#[test]
-fn edge_labels_are_skipped_not_pinned_to_an_unrelated_position() {
-    let geometry = Geometry::new(17, 8, 3);
-    let ticks = [(0, "10".into()), (3, "3".into()), (8, "888".into())];
-    let line = tick_labels(&ticks, &geometry).to_string();
-    assert!(!line.contains("10") && !line.contains("888"));
-    assert_eq!(line.find('3'), Some(11));
-}
-
-#[test]
-fn monthly_tokens_and_money_share_calendar_coordinates() {
-    for days in [28, 29, 30, 31] {
-        let usage = UsageStats {
-            month: Bucketed {
-                buckets: vec![1_000_000; days * 4],
-                costs: vec![12_345.0; days * 4],
-            },
-            ..UsageStats::default()
-        };
-        let charts = local_charts(&usage);
-        let origin = plot_origin(&charts);
-        for width in [40, 80, 120, 160] {
-            let tokens = histogram(&charts[1], width, 4, origin);
-            let money = histogram(&charts[2], width, 4, origin);
-            let token_rule = tokens[5].to_string();
-            let money_rule = money[5].to_string();
-            assert_eq!(
-                token_rule.split_once('└').unwrap().1,
-                money_rule.split_once('└').unwrap().1
-            );
-            assert_eq!(tokens[6].to_string(), money[6].to_string());
-            if width >= 80 {
-                assert_eq!(token_rule.matches('┴').count(), days);
-                assert!(
-                    tokens[6]
-                        .to_string()
-                        .split_whitespace()
-                        .any(|label| label == days.to_string())
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn scale_tracks_the_merged_peak_instead_of_silently_clipping_it() {
-    for value in [
-        0.,
-        1.,
-        900.,
-        200_000_001.,
-        2_000_000_001.,
-        401.,
-        1e12,
-        u64::MAX as f64,
-    ] {
-        let ceiling = nice_ceiling(value);
-        assert!(ceiling.is_finite() && ceiling > 0.);
-        assert!(ceiling >= value);
-    }
-    assert_eq!(nice_ceiling(210_000_000.), 250_000_000.);
-    assert_eq!(nice_ceiling(3_000_000_000.), 5_000_000_000.);
-    let values = vec![1_000_000_000; 96];
-    let chart = hourly(&values);
-    let merged = merged_values(&chart.series, merge_factor(&chart, 92));
-    assert_eq!(merged[0], 4_000_000_000.);
-    let rendered = text(&histogram(&chart, 100, 4, 8));
-    assert!(rendered.contains("5B"));
-    assert!(!rendered.contains("200M"));
-}
-
-#[test]
-fn zero_and_missing_data_do_not_create_fake_bars() {
-    let zeros = vec![0u64; 96];
-    let chart = hourly(&zeros);
-    let buffer = render_chart(&chart, 100, 8, 8);
-    assert!(
-        buffer
-            .content
-            .iter()
-            .all(|cell| !cell.symbol().chars().any(|c| "█▊▁▂▃▄▅▆▇".contains(c)))
-    );
-    assert!(histogram(&hourly(&[]), 100, 4, 8).is_empty());
-    assert!(histogram(&chart, 8, 4, 8).is_empty());
-    assert!(histogram(&chart, 100, 0, 8).is_empty());
-}
-
-#[test]
-fn all_chart_rows_fit_and_height_is_not_snapped() {
-    let values: Vec<_> = (1..=96).map(|value| value * 1_000_000).collect();
-    let chart = hourly(&values);
-    for width in 0..=220 {
-        for rows in [0, 1, 2, 3, 7, 9, 15, 30] {
-            let rendered = histogram(&chart, width, rows, 8);
-            for line in &rendered {
-                assert!(line.width() <= width as usize, "{width}x{rows}: {line}");
-            }
-            if width > 8 && rows > 0 {
-                assert_eq!(rendered.len(), rows + 3);
-            }
-        }
-    }
-    for room in 0..=60 {
-        assert_eq!(chart_rows(room), room.saturating_sub(4) as usize);
-    }
-    assert_eq!(chart_rows(24), 20);
-}
-
-#[test]
 fn axis_labels_and_sub_dollar_amounts_remain_readable() {
     assert_eq!(axis_scale(900.), (1., ""));
     assert_eq!(axis_scale(7_000.), (1e3, "K"));
@@ -476,4 +245,283 @@ fn no_priced_share_badge_or_decorative_frame_is_reintroduced() {
         assert!(!rendered.contains("计价"));
         assert!(!rendered.contains('╔'));
     }
+}
+
+#[test]
+fn native_buckets_never_merge_at_any_terminal_width() {
+    let usage = usage();
+    let charts = local_charts(&usage);
+    assert_eq!(charts[0].series.len(), 96);
+    assert_eq!(charts[1].series.len(), 120);
+    assert_eq!(charts[2].series.len(), 120);
+    for width in [40, 80, 100, 160, 260, 400] {
+        for (index, chart) in charts.iter().enumerate() {
+            let rendered = text(&histogram(chart, width, 4, 8, 0));
+            let grain = if index == 0 { "15分钟" } else { "6小时" };
+            assert!(rendered.contains(grain), "{width}: {rendered}");
+            let window = Window::new(chart.series.len(), 4, width as usize - 8, 0).unwrap();
+            assert_eq!(window.len, window.groups * 4);
+            // Each bar is the source value, not the sum of four neighbours.
+            assert_eq!(
+                chart.series.value(window.start),
+                if index == 2 { 0.1 } else { 1_000_000. }
+            );
+        }
+    }
+}
+
+#[test]
+fn every_native_bucket_remains_reachable_including_zero_and_last_buckets() {
+    for len in [96usize, 28 * 4, 29 * 4, 30 * 4, 31 * 4] {
+        for plot in [9usize, 33, 65, 101, 249, 401] {
+            let mut seen = vec![false; len];
+            let first = Window::new(len, 4, plot, 0).unwrap();
+            for start in 0..=first.max_start {
+                let window = Window::new(len, 4, plot, start).unwrap();
+                assert!(window.start.is_multiple_of(4));
+                assert_eq!(window.len, window.groups * 4);
+                seen[window.start..window.start + window.len].fill(true);
+            }
+            assert!(seen.iter().all(|seen| *seen), "len {len}, plot {plot}");
+            let last = Window::new(len, 4, plot, usize::MAX).unwrap();
+            assert_eq!(last.start + last.len, len);
+        }
+    }
+}
+
+#[test]
+fn ninety_six_bars_have_independent_minor_ticks_and_four_per_hour() {
+    // 96 one-cell bars, 95 one-cell gaps and a blank on EACH side.
+    // Expected coordinates are independent of the Geometry implementation.
+    let values = vec![100u64; 96];
+    let buffer = render_chart(&hourly(&values), 201, 4, 8);
+    assert_eq!(buffer[(7, 5)].symbol(), "└");
+    for quarter in 0..96u16 {
+        let x = 9 + quarter * 2;
+        assert_eq!(buffer[(x, 4)].symbol(), "█");
+        assert_eq!(buffer[(x, 5)].symbol(), "┴");
+        assert_eq!(buffer[(x + 1, 4)].symbol(), " ");
+        if quarter.is_multiple_of(4) {
+            let label = (quarter / 4).to_string();
+            let left = x - label.len() as u16 / 2;
+            assert_eq!(buffer[(x, 5)].fg, CYAN);
+            for (offset, character) in label.chars().enumerate() {
+                assert_eq!(
+                    buffer[(left + offset as u16, 6)].symbol(),
+                    character.to_string()
+                );
+            }
+        } else {
+            assert_eq!(buffer[(x, 5)].fg, TRACK);
+        }
+    }
+}
+
+#[test]
+fn real_bar_extents_are_symmetric_about_ticks_even_at_awkward_widths() {
+    let values = vec![100u64; 96];
+    for width in [201, 202, 250, 300, 350, 400, 450, 500, 600] {
+        let buffer = render_chart(&hourly(&values), width, 4, 8);
+        let mut bars = Vec::new();
+        let mut x = 8;
+        while x < width {
+            if buffer[(x, 4)].symbol() != "█" {
+                x += 1;
+                continue;
+            }
+            let left = x;
+            while x < width && buffer[(x, 4)].symbol() == "█" {
+                x += 1;
+            }
+            let right = x - 1;
+            assert_eq!((right - left + 1) % 2, 1, "even width at {width}");
+            let centre = (left + right) / 2;
+            assert_eq!(centre - left, right - centre, "optical centre at {width}");
+            assert_eq!(buffer[(centre, 5)].symbol(), "┴");
+            bars.push((left, right));
+        }
+        assert_eq!(bars.len(), 96, "{width}: {bars:?}");
+        let expected = bars[0].1 - bars[0].0;
+        assert!(bars.iter().all(|(left, right)| right - left == expected));
+    }
+}
+
+#[test]
+fn partial_caps_and_bodies_have_equal_width_without_burr_glyphs() {
+    let values = vec![3u64; 96];
+    // Native value 3 / ceiling 5 * 24 eighths = 14: six-eighth cap + body.
+    let buffer = render_chart(&hourly(&values), 201, 3, 8);
+    for quarter in 0..96u16 {
+        let x = 9 + quarter * 2;
+        assert_eq!(buffer[(x, 2)].symbol(), "▆");
+        assert_eq!(buffer[(x, 3)].symbol(), "█");
+        assert_eq!(buffer[(x, 2)].fg, BAR_MID);
+        assert_eq!(buffer[(x, 3)].fg, BAR_MID);
+        assert_eq!(buffer[(x + 1, 2)].symbol(), " ");
+        assert_eq!(buffer[(x + 1, 3)].symbol(), " ");
+    }
+    assert!(buffer.content.iter().all(|cell| cell.symbol() != "▊"));
+}
+
+#[test]
+fn the_requested_colour_boundaries_are_exact() {
+    for (share, colour) in [
+        (0., BAR_LOW),
+        (0.2999, BAR_LOW),
+        (0.30, BAR_MID),
+        (0.7999, BAR_MID),
+        (0.80, BAR_HIGH),
+        (0.9499, BAR_HIGH),
+        (0.95, BAR_RED),
+        (1., BAR_RED),
+        (2., BAR_RED),
+    ] {
+        assert_eq!(bar_color(share), colour, "share {share}");
+    }
+    assert_eq!(BAR_LOW, Color::Rgb(144, 202, 249));
+    assert_eq!(BAR_MID, Color::Rgb(33, 150, 243));
+    assert_eq!(BAR_HIGH, Color::Rgb(13, 71, 161));
+}
+
+#[test]
+fn buffer_bars_use_the_same_band_for_caps_and_bodies() {
+    let mut values = vec![0u64; 96];
+    values[..7].copy_from_slice(&[29, 30, 79, 80, 94, 95, 100]);
+    let buffer = render_chart(&hourly(&values), 201, 10, 8);
+    for (quarter, colour) in [
+        BAR_LOW, BAR_MID, BAR_MID, BAR_HIGH, BAR_HIGH, BAR_RED, BAR_RED,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let x = 9 + quarter as u16 * 2;
+        assert_eq!(buffer[(x, 10)].fg, colour);
+        for row in 1..=10 {
+            if !buffer[(x, row)].symbol().trim().is_empty() {
+                assert_eq!(buffer[(x, row)].fg, colour);
+            }
+        }
+    }
+}
+
+#[test]
+fn monthly_money_and_tokens_share_all_four_daily_coordinates() {
+    for days in [28usize, 29, 30, 31] {
+        let usage = UsageStats {
+            month: Bucketed {
+                buckets: vec![100; days * 4],
+                costs: vec![12_345.; days * 4],
+            },
+            ..UsageStats::default()
+        };
+        let charts = local_charts(&usage);
+        let origin = plot_origin(&charts);
+        let width = (origin + 2 * days * 4 + 1) as u16;
+        let tokens = histogram(&charts[1], width, 4, origin, 0);
+        let money = histogram(&charts[2], width, 4, origin, 0);
+        assert_eq!(tokens[5].to_string().matches('┴').count(), days * 4);
+        assert_eq!(
+            tokens[5].to_string().split_once('└').unwrap().1,
+            money[5].to_string().split_once('└').unwrap().1
+        );
+        assert_eq!(tokens[6].to_string(), money[6].to_string());
+        assert!(
+            tokens[6]
+                .to_string()
+                .split_whitespace()
+                .any(|label| label == days.to_string())
+        );
+        for start in [0, 9, 20, usize::MAX] {
+            let tokens = histogram(&charts[1], 80, 4, origin, start);
+            let money = histogram(&charts[2], 80, 4, origin, start);
+            assert_eq!(tokens[6].to_string(), money[6].to_string());
+        }
+    }
+}
+
+#[test]
+fn scale_and_colours_do_not_change_when_panning_or_resizing() {
+    let mut values = vec![30u64; 96];
+    values[95] = 100;
+    let chart = hourly(&values);
+    for width in [40, 80, 201, 400] {
+        for start in [0, 5, 10, usize::MAX] {
+            let rendered = histogram(&chart, width, 4, 8, start);
+            assert!(rendered[1].to_string().contains("100"));
+        }
+    }
+    let mut terminal = Terminal::new(TestBackend::new(41, 7)).unwrap();
+    terminal
+        .draw(|f| f.render_widget(Paragraph::new(histogram(&chart, 41, 4, 8, 5)), f.area()))
+        .unwrap();
+    assert_eq!(terminal.backend().buffer()[(9, 4)].fg, BAR_MID);
+    assert_eq!(nice_ceiling(series_peak(&chart.series)), 100.);
+}
+
+#[test]
+fn zero_missing_and_tiny_windows_never_invent_bars_or_merge_values() {
+    let zeros = vec![0u64; 96];
+    let chart = hourly(&zeros);
+    let buffer = render_chart(&chart, 100, 8, 8);
+    assert!(
+        buffer
+            .content
+            .iter()
+            .all(|cell| !cell.symbol().chars().any(|c| "█▊▁▂▃▄▅▆▇".contains(c)))
+    );
+    assert!(histogram(&hourly(&[]), 100, 4, 8, 0).is_empty());
+    assert!(histogram(&chart, 8, 4, 8, 0).is_empty());
+    assert!(histogram(&chart, 100, 0, 8, 0).is_empty());
+    assert!(Window::new(96, 4, 8, 0).is_none());
+    assert!(Geometry::new(8, 8, 96).is_none());
+    assert!(Geometry::new(40, 8, 96).is_none());
+}
+
+#[test]
+fn chart_rows_fit_at_all_sizes_and_keep_all_available_height() {
+    let values: Vec<_> = (1..=96).map(|value| value * 1_000_000).collect();
+    for width in 0..=420 {
+        for rows in [0, 1, 2, 3, 7, 9, 15, 30] {
+            let rendered = histogram(&hourly(&values), width, rows, 8, 0);
+            for line in &rendered {
+                assert!(line.width() <= width as usize, "{width}x{rows}: {line}");
+            }
+            if width >= 17 && rows > 0 {
+                assert_eq!(rendered.len(), rows + 3);
+            }
+        }
+    }
+    for room in 0..=60 {
+        assert_eq!(chart_rows(room), room.saturating_sub(4) as usize);
+    }
+}
+
+#[test]
+fn navigation_is_bounded_and_monthly_charts_share_one_day_offset() {
+    let mut view = View {
+        chart_starts: [8, 10],
+        max_chart_starts: [12, 20],
+        ..View::default()
+    };
+    view.pan_charts(false);
+    assert_eq!(view.chart_starts, [7, 9]);
+    assert!(view.chart_manual);
+    for _ in 0..40 {
+        view.pan_charts(true);
+    }
+    assert_eq!(view.chart_starts, [12, 20]);
+    for _ in 0..40 {
+        view.pan_charts(false);
+    }
+    assert_eq!(view.chart_starts, [0, 0]);
+    let mut empty = View::default();
+    empty.pan_charts(true);
+    assert!(!empty.chart_manual);
+}
+
+#[test]
+fn window_preserves_a_partial_final_group_without_summing_it() {
+    let window = Window::new(123, 4, 65, usize::MAX).unwrap();
+    assert_eq!(window.start + window.len, 123);
+    assert_eq!(window.len % 4, 3);
 }

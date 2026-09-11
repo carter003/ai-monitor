@@ -247,6 +247,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Down | KeyCode::Char('j') => {
                             apply(&mut view, &workers, ui::FooterAction::ScrollDown)
                         }
+                        KeyCode::Left => view.pan_charts(false),
+                        KeyCode::Right => view.pan_charts(true),
+                        KeyCode::Char('0') => view.chart_manual = false,
                         KeyCode::PageUp => {
                             view.scroll = view.scroll.saturating_sub(view.page_size.max(1))
                         }

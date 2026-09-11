@@ -31,6 +31,11 @@ pub struct View {
     pub scroll: usize,
     pub max_scroll: usize,
     pub page_size: usize,
+    /// Native-bucket window starts, measured in hours and days (not bars).
+    /// The two monthly charts share the day start and always pan together.
+    pub chart_starts: [usize; 2],
+    pub max_chart_starts: [usize; 2],
+    pub chart_manual: bool,
     /// Clickable footer hints, `(first column, last column, action)`, in the
     /// footer row. Filled by `draw` so the layout and the hit test cannot drift.
     pub footer_hits: Vec<(u16, u16, FooterAction)>,
@@ -39,6 +44,23 @@ pub struct View {
     /// The scrollable body, so a click or wheel inside it can be routed to the
     /// page. `None` when the pane is too small to draw.
     pub body: Option<Rect>,
+}
+
+impl View {
+    /// Pan both timelines independently at their ends. No data is rebucketed.
+    pub fn pan_charts(&mut self, later: bool) {
+        if self.max_chart_starts.iter().all(|max| *max == 0) {
+            return;
+        }
+        self.chart_manual = true;
+        for (start, max) in self.chart_starts.iter_mut().zip(self.max_chart_starts) {
+            *start = if later {
+                start.saturating_add(1).min(max)
+            } else {
+                start.saturating_sub(1).min(max)
+            };
+        }
+    }
 }
 
 /// What a footer hint or a mouse gesture asks the app to do.
@@ -77,6 +99,7 @@ pub fn draw(
     now: i64,
 ) {
     let area = frame.area();
+    view.max_chart_starts = [0; 2];
     if area.width < 26 || area.height < 12 {
         view.footer_hits.clear();
         view.footer_row = None;
@@ -128,7 +151,7 @@ pub fn draw(
     render_panel_lines(frame, quota_area, quota_inner, quota, scroll.min(quota_max));
     render_panel_lines(frame, token_top, token_top, token, scroll.min(token_max));
     if charts_drawn {
-        token::draw_charts(frame, &token_parts[1..], usage);
+        token::draw_charts(frame, &token_parts[1..], usage, view, now);
     }
 
     let room = (area.width as usize).saturating_sub(version.len() + 1);
@@ -160,6 +183,9 @@ pub fn draw(
     footer.push_str("q 退出");
     hint_spans.push(Span::styled("q", key));
     hint_spans.push(Span::styled(" 退出", muted));
+    if room >= 60 && view.max_chart_starts.iter().any(|max| *max > 0) {
+        hint_spans.push(Span::styled("  ←→ 时段  0 当前", muted));
+    }
     let bar = Layout::horizontal([Constraint::Min(0), Constraint::Length(version.len() as u16)])
         .split(parts[1]);
     view.footer_row = Some(parts[1].y);

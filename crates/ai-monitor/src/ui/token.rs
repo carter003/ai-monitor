@@ -1,8 +1,9 @@
 //! Local usage presentation only. SQL, pricing, cache accounting and provider
 //! polling stay in their existing owners. All geometry is in terminal cells.
 
-use super::{CYAN, GREEN, INK, MUTED, TRACK, columns, compact, truncate};
+use super::{CYAN, GREEN, INK, MUTED, TRACK, View, columns, compact, truncate};
 use crate::model::{ModelUsage, UsageStats, UsageTotal};
+use chrono::{Datelike, Timelike};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -18,7 +19,10 @@ pub(super) const MIN_CHART_HEIGHT: u16 = 5;
 pub(super) const MIN_CHART_WIDTH: u16 = 16;
 const NAME_MIN: usize = 10;
 const GAP: usize = 2;
-const BAR: Color = Color::Rgb(33, 150, 243);
+const BAR_LOW: Color = Color::Rgb(144, 202, 249);
+const BAR_MID: Color = Color::Rgb(33, 150, 243);
+const BAR_HIGH: Color = Color::Rgb(13, 71, 161);
+const BAR_RED: Color = Color::Rgb(163, 22, 22);
 
 pub(super) fn lines(usage: &UsageStats, width: u16, height: usize) -> Vec<Line<'static>> {
     if width == 0 || height == 0 {
@@ -313,7 +317,7 @@ struct Chart<'a> {
     label: &'static str,
     series: Series<'a>,
     span_seconds: u64,
-    /// Four quarter hours per hourly bar, or four six-hour buckets per day.
+    /// Four independent bars per hour/day. This groups ticks, never values.
     tick_buckets: usize,
     first_tick: u32,
 }
@@ -344,33 +348,53 @@ fn local_charts(usage: &UsageStats) -> [Chart<'_>; 3] {
     ]
 }
 
-pub(super) fn draw_charts(frame: &mut Frame, areas: &[Rect], usage: &UsageStats) {
+pub(super) fn draw_charts(
+    frame: &mut Frame,
+    areas: &[Rect],
+    usage: &UsageStats,
+    view: &mut View,
+    now: i64,
+) {
     let charts = local_charts(usage);
-    // A shared gutter keeps the monthly money and token timelines aligned even
-    // when one Y axis needs an extra digit. Summing the series gives a safe
-    // label-width bound before the width-dependent bucket merge is selected.
     let origin = plot_origin(&charts);
-    for (chart, area) in charts.iter().zip(areas) {
+    let local =
+        chrono::DateTime::from_timestamp(now, 0).map(|time| time.with_timezone(&chrono::Local));
+    for (index, (chart, area)) in charts.iter().zip(areas).enumerate() {
         if area.height < MIN_CHART_HEIGHT {
             continue;
         }
-        if area.width as usize <= origin {
-            frame.render_widget(
-                Paragraph::new(truncate("请拉宽查看趋势", area.width as usize))
-                    .style(Style::default().fg(MUTED)),
-                *area,
-            );
-        } else {
-            frame.render_widget(
-                Paragraph::new(histogram(
-                    chart,
-                    area.width,
-                    chart_rows(area.height),
-                    origin,
-                )),
-                *area,
-            );
+        // Monthly tokens and money deliberately use the same navigation state.
+        let nav = usize::from(index > 0);
+        let plot = (area.width as usize).saturating_sub(origin);
+        if let Some(window) = Window::new(chart.series.len(), chart.tick_buckets, plot, 0) {
+            view.max_chart_starts[nav] = window.max_start;
+            let current = local.as_ref().map_or(0, |time| {
+                if nav == 0 {
+                    time.hour() as usize
+                } else {
+                    time.day0() as usize
+                }
+            });
+            if !view.chart_manual {
+                // Follow the current hour/day, not the far-right future zeros.
+                view.chart_starts[nav] = current
+                    .saturating_add(1)
+                    .saturating_sub(window.groups)
+                    .min(window.max_start);
+            } else {
+                view.chart_starts[nav] = view.chart_starts[nav].min(window.max_start);
+            }
         }
+        frame.render_widget(
+            Paragraph::new(histogram(
+                chart,
+                area.width,
+                chart_rows(area.height),
+                origin,
+                view.chart_starts[nav],
+            )),
+            *area,
+        );
     }
 }
 
@@ -434,11 +458,7 @@ fn plot_origin(charts: &[Chart<'_>]) -> usize {
     let label_width = charts
         .iter()
         .map(|chart| {
-            let total: f64 = (0..chart.series.len())
-                .map(|index| chart.series.value(index))
-                .filter(|value| value.is_finite() && *value > 0.)
-                .sum();
-            let max = nice_ceiling(total);
+            let max = nice_ceiling(series_peak(&chart.series));
             columns(&value_label(max, max, chart.series.money()))
         })
         .max()
@@ -458,28 +478,65 @@ fn span_label(seconds: u64) -> String {
     }
 }
 
-/// Defaults stay at one hour / one day regardless of spare screen width.
-/// Coarsen only when real one-cell gaps cannot fit, always in whole hours or
-/// days. Never invent a 45-minute / 18-hour bucket just to fill a row.
-fn merge_factor(chart: &Chart<'_>, plot: usize) -> usize {
-    let capacity = plot.div_ceil(2).max(1);
-    let needed = chart.series.len().div_ceil(capacity);
-    needed.max(chart.tick_buckets).div_ceil(chart.tick_buckets) * chart.tick_buckets
+/// The scale is computed over ALL native buckets, not just the visible window.
+/// Panning/resizing cannot change a bucket's height ratio or colour band.
+fn series_peak(series: &Series<'_>) -> f64 {
+    (0..series.len())
+        .map(|index| series.value(index))
+        .filter(|value| value.is_finite())
+        .fold(0., f64::max)
 }
 
-fn merged_values(series: &Series<'_>, factor: usize) -> Vec<f64> {
-    (0..series.len().div_ceil(factor))
-        .map(|index| {
-            let start = index * factor;
-            let end = (start + factor).min(series.len());
-            (start..end).map(|bucket| series.value(bucket)).sum()
+fn bar_color(share: f64) -> Color {
+    if share >= 0.95 {
+        BAR_RED
+    } else if share >= 0.80 {
+        BAR_HIGH
+    } else if share >= 0.30 {
+        BAR_MID
+    } else {
+        BAR_LOW
+    }
+}
+
+/// Show complete hour/day groups without merging their four native buckets.
+/// A narrow terminal pans through the original series instead of changing time
+/// resolution. Empty buckets keep their slots. Each bar needs a real gap.
+#[derive(Debug)]
+struct Window {
+    first_group: usize,
+    groups: usize,
+    max_start: usize,
+    start: usize,
+    len: usize,
+}
+
+impl Window {
+    fn new(len: usize, group: usize, plot: usize, requested: usize) -> Option<Self> {
+        if len == 0 || group == 0 {
+            return None;
+        }
+        let groups = (plot.saturating_sub(1) / (2 * group)).min(len.div_ceil(group));
+        if groups == 0 {
+            return None;
+        }
+        let max_start = len.div_ceil(group).saturating_sub(groups);
+        let first_group = requested.min(max_start);
+        let start = first_group * group;
+        Some(Self {
+            first_group,
+            groups,
+            max_start,
+            start,
+            len: (groups * group).min(len - start),
         })
-        .collect()
+    }
 }
 
-/// A single integer-cell geometry for bars and the ticks naming those bars.
-/// All bars have equal width; leftover columns become real space, not a
-/// three-quarter glyph whose full-width top would produce a burr.
+/// Odd-width full-cell bars have a real centre cell. The old two-column bar
+/// placed its tick in the right cell: that was half a cell off optically even
+/// though a test using the same floor(width/2) convention claimed alignment.
+/// One blank at each plot edge also keeps two-digit group labels in bounds.
 struct Geometry {
     origin: usize,
     plot: usize,
@@ -488,31 +545,29 @@ struct Geometry {
 }
 
 impl Geometry {
-    fn new(width: u16, origin: usize, count: usize) -> Self {
+    fn new(width: u16, origin: usize, count: usize) -> Option<Self> {
         let plot = (width as usize).saturating_sub(origin);
-        let count = count.max(1);
-        let bar_width = plot
-            .saturating_sub(count - 1)
-            .checked_div(count)
-            .unwrap_or(0)
-            .max(1);
-        let gap_cells = plot.saturating_sub(count * bar_width);
+        if count == 0 || plot < 2 * count + 1 {
+            return None;
+        }
+        let available = plot - 1;
+        let mut bar_width = (available / count - 1).max(1);
+        if bar_width.is_multiple_of(2) {
+            bar_width -= 1;
+        }
         let starts = (0..count)
             .map(|index| {
-                index * bar_width
-                    + if count > 1 {
-                        index * gap_cells / (count - 1)
-                    } else {
-                        0
-                    }
+                let left = index * available / count;
+                let right = (index + 1) * available / count;
+                1 + left + (right - left - bar_width - 1) / 2
             })
             .collect();
-        Self {
+        Some(Self {
             origin,
             plot,
             bar_width,
             starts,
-        }
+        })
     }
 
     fn centre(&self, index: usize) -> usize {
@@ -529,22 +584,40 @@ impl Geometry {
     }
 }
 
-fn histogram(chart: &Chart<'_>, width: u16, rows: usize, origin: usize) -> Vec<Line<'static>> {
+fn histogram(
+    chart: &Chart<'_>,
+    width: u16,
+    rows: usize,
+    origin: usize,
+    first_group: usize,
+) -> Vec<Line<'static>> {
     let plot = (width as usize).saturating_sub(origin);
     if chart.series.len() == 0 || plot == 0 || rows == 0 {
         return vec![];
     }
-    let factor = merge_factor(chart, plot);
-    let merged = merged_values(&chart.series, factor);
-    let geometry = Geometry::new(width, origin, merged.len());
-    let peak = merged
-        .iter()
-        .copied()
-        .filter(|value| value.is_finite())
-        .fold(0f64, f64::max);
-    let max = nice_ceiling(peak);
+    let Some(window) = Window::new(chart.series.len(), chart.tick_buckets, plot, first_group)
+    else {
+        return vec![Line::styled(
+            truncate(
+                &format!(
+                    "{} · 请拉宽，保留每柱{}",
+                    chart.label,
+                    span_label(chart.span_seconds)
+                ),
+                width as usize,
+            ),
+            Style::default().fg(MUTED),
+        )];
+    };
+    let Some(geometry) = Geometry::new(width, origin, window.len) else {
+        return vec![];
+    };
+    let max = nice_ceiling(series_peak(&chart.series));
     let subrows = rows * 8;
-    let eighths: Vec<_> = merged
+    let values: Vec<_> = (window.start..window.start + window.len)
+        .map(|index| chart.series.value(index))
+        .collect();
+    let eighths: Vec<_> = values
         .iter()
         .map(|value| {
             if !value.is_finite() || *value <= 0. {
@@ -554,32 +627,34 @@ fn histogram(chart: &Chart<'_>, width: u16, rows: usize, origin: usize) -> Vec<L
             }
         })
         .collect();
-    let ticks: Vec<_> = (0..merged.len())
+    // All four bars get a small tick. Integer hours/dates label the FIRST
+    // bucket of the group (00 minutes / 00 hours), never an arbitrary bar.
+    let ticks: Vec<_> = (0..window.len)
+        .step_by(chart.tick_buckets)
         .map(|index| {
             (
                 geometry.centre(index),
-                (chart.first_tick as usize + index * factor / chart.tick_buckets).to_string(),
+                (chart.first_tick as usize + window.first_group + index / chart.tick_buckets)
+                    .to_string(),
             )
         })
         .collect();
-    let partial = if chart.series.len().is_multiple_of(factor) {
-        ""
-    } else {
-        " · 末柱不足"
-    };
+    let first = chart.first_tick as usize + window.first_group;
+    let last = first + window.groups - 1;
+    let unit = if chart.first_tick == 0 { "时" } else { "日" };
     let title = format!(
-        " {} · 每柱 {}{}",
+        " {} · 每柱 {} · {}-{}{}{}",
         chart.label,
-        span_label(chart.span_seconds * factor as u64),
-        partial,
+        span_label(chart.span_seconds),
+        first,
+        last,
+        unit,
+        if window.max_start > 0 { " ←→" } else { "" }
     );
     let mut result = vec![Line::styled(
         truncate(&title, width as usize),
         Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
     )];
-    // Labels are sparse, independently of the number of usable plot rows.
-    // Each labelled boundary is computed from its actual row, not a second
-    // vertical scale that could disagree with the bar's height.
     let tick_step = rows.div_ceil(4);
     for row in 0..rows {
         let head = if row.is_multiple_of(tick_step) {
@@ -592,6 +667,7 @@ fn histogram(chart: &Chart<'_>, width: u16, rows: usize, origin: usize) -> Vec<L
             String::new()
         };
         let mut spans = axis_prefix(&head, '┤', geometry.origin);
+        spans.push(Span::raw(" ".repeat(geometry.starts[0])));
         let base = (rows - 1 - row) * 8;
         for (index, filled) in eighths.iter().enumerate() {
             let glyph = match filled.saturating_sub(base).min(8) {
@@ -601,27 +677,29 @@ fn histogram(chart: &Chart<'_>, width: u16, rows: usize, origin: usize) -> Vec<L
             };
             spans.push(Span::styled(
                 glyph.to_string().repeat(geometry.bar_width),
-                Style::default().fg(BAR),
+                Style::default().fg(bar_color(values[index] / max)),
             ));
             spans.push(Span::raw(" ".repeat(geometry.gap_after(index))));
         }
         result.push(Line::from(spans));
     }
     let mut rule = vec!['─'; geometry.plot];
-    for (column, _) in &ticks {
-        if let Some(cell) = rule.get_mut(*column) {
-            *cell = '┴';
-        }
+    for index in 0..window.len {
+        rule[geometry.centre(index)] = '┴';
     }
     let mut baseline = axis_prefix(
         &value_label(0., max, chart.series.money()),
         '└',
         geometry.origin,
     );
-    baseline.push(Span::styled(
-        rule.into_iter().collect::<String>(),
-        Style::default().fg(TRACK),
-    ));
+    // Emphasise the four-bucket group starts without shifting a tick's cell.
+    for (column, glyph) in rule.into_iter().enumerate() {
+        let major = ticks.iter().any(|(centre, _)| *centre == column);
+        baseline.push(Span::styled(
+            glyph.to_string(),
+            Style::default().fg(if major { CYAN } else { TRACK }),
+        ));
+    }
     result.push(Line::from(baseline));
     result.push(tick_labels(&ticks, &geometry));
     result
@@ -638,9 +716,9 @@ fn axis_prefix(label: &str, mark: char, origin: usize) -> Vec<Span<'static>> {
     ]
 }
 
-/// A label may be skipped for collision or an edge, but never moved away from
-/// the tick it names. Even-length labels use the same integer-cell centre
-/// convention as an even-width bar (at most half a character optically).
+/// Only hour/day labels are thinned on narrow panes; buckets are NEVER merged.
+/// Two-digit labels use the conventional integer-cell centring rule. A label
+/// is not pinned elsewhere to fit an edge; the plot includes label gutters.
 fn tick_labels(ticks: &[(usize, String)], geometry: &Geometry) -> Line<'static> {
     let mut row = String::new();
     let mut next_free = 0;
