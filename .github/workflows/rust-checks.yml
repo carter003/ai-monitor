@@ -1,0 +1,40 @@
+name: Rust checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+          rustc --version
+          cargo --version
+          git rev-parse HEAD
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Tests
+        if: success() || failure()
+        run: cargo test --workspace --locked
+      - name: Clippy
+        if: success() || failure()
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Ratatui buffer layout previews
+        if: success() || failure()
+        run: cargo test -p ai-monitor --locked ui::tests::layout_preview_fixtures -- --nocapture
