@@ -128,7 +128,7 @@ pub fn draw(
     render_panel_lines(frame, quota_area, quota_inner, quota, scroll.min(quota_max));
     render_panel_lines(frame, token_top, token_top, token, scroll.min(token_max));
     if charts_drawn {
-        token::draw_charts(frame, &token_parts[1..], usage);
+        token::draw_charts(frame, &token_parts[1..], usage, now);
     }
 
     let room = (area.width as usize).saturating_sub(version.len() + 1);

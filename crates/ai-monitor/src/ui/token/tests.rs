@@ -248,32 +248,29 @@ fn no_priced_share_badge_or_decorative_frame_is_reintroduced() {
 }
 
 #[test]
-fn all_buckets_fit_without_mandatory_gaps_or_a_window() {
+fn every_native_bucket_tiles_the_plot_with_exactly_zero_unowned_units() {
     for count in [96usize, 112, 116, 120, 124] {
         for plot in count.div_ceil(2)..=420 {
             let geometry = Geometry::new((plot + 8) as u16, 8, count).unwrap();
-            assert_eq!(geometry.starts.len(), count);
             let owners = geometry.owners();
+            assert!(
+                owners.iter().all(Option::is_some),
+                "gap: {count} bins, {plot} columns"
+            );
+            assert_eq!(owners[0], Some(0));
+            assert_eq!(owners.last(), Some(&Some(count - 1)));
+            let minimum = owners.len() / count;
             for index in 0..count {
-                assert_eq!(
-                    owners.iter().filter(|owner| **owner == Some(index)).count(),
-                    geometry.bar_width
-                );
+                let occupied = owners.iter().filter(|owner| **owner == Some(index)).count();
+                assert!(occupied == minimum || occupied == minimum + 1);
             }
             assert!(
-                geometry
-                    .starts
+                owners
                     .windows(2)
-                    .all(|pair| pair[0] + geometry.bar_width <= pair[1])
+                    .all(|pair| pair[0] == pair[1] || pair[0].unwrap() + 1 == pair[1].unwrap())
             );
-            assert!(geometry.starts[count - 1] + geometry.bar_width <= owners.len());
         }
     }
-    // Exactly 96 columns: all 96 original quarter hours, NO compulsory gap.
-    let geometry = Geometry::new(104, 8, 96).unwrap();
-    assert_eq!(geometry.resolution, 1);
-    assert_eq!(geometry.starts, (0..96).collect::<Vec<_>>());
-    assert!(geometry.owners().iter().all(Option::is_some));
 }
 
 #[test]
@@ -383,7 +380,7 @@ fn the_requested_colour_boundaries_are_exact() {
 }
 
 #[test]
-fn monthly_tokens_and_money_share_all_four_buckets_and_all_date_labels() {
+fn daily_money_points_and_monthly_token_ticks_share_the_exact_date_columns() {
     for days in [28usize, 29, 30, 31] {
         let usage = UsageStats {
             month: Bucketed {
@@ -396,14 +393,29 @@ fn monthly_tokens_and_money_share_all_four_buckets_and_all_date_labels() {
         let origin = plot_origin(&charts);
         for width in [(origin + days * 2) as u16, 100, 140, 260] {
             let tokens = histogram(&charts[1], width, 7, origin);
-            let money = histogram(&charts[2], width, 7, origin);
-            assert_eq!(
-                tokens[8].to_string().split_once('└').unwrap().1,
-                money[8].to_string().split_once('└').unwrap().1
-            );
-            assert_eq!(text(&tokens[9..]), text(&money[9..]));
+            let mut terminal = Terminal::new(TestBackend::new(width, 11)).unwrap();
+            terminal
+                .draw(|frame| daily_money::draw(frame, frame.area(), &charts[2], origin, days))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            for (row, expected) in tokens.iter().enumerate().skip(9) {
+                let actual: String = (0..width)
+                    .map(|x| buffer[(x, row as u16)].symbol())
+                    .collect();
+                assert_eq!(actual.trim_end(), expected.to_string().trim_end());
+            }
+            let geometry = Geometry::new(width, origin, days * 4).unwrap();
+            for day in 0..days {
+                let x = (origin + geometry.centre(day * 4)) as u16;
+                assert_eq!(
+                    (1..=8)
+                        .filter(|row| buffer[(x, *row)].symbol() == "●")
+                        .count(),
+                    1
+                );
+            }
             assert_eq!(charts[1].series.len(), days * 4);
-            assert_eq!(charts[2].series.len(), days * 4);
+            assert_eq!(daily_money::totals(&usage.month.costs).len(), days);
         }
     }
 }
@@ -474,27 +486,108 @@ fn every_row_fits_and_the_full_period_is_not_height_dependent() {
 }
 
 #[test]
-fn awkward_widths_keep_bars_on_axis_and_all_major_labels() {
-    let values = vec![100u64; 96];
-    for width in [104, 105, 140, 201, 300, 400] {
-        let buffer = render_chart(&hourly(&values), width, 4, 8);
-        let mut bars = Vec::new();
-        let mut x = 8;
-        while x < width {
-            if buffer[(x, 4)].symbol() != "█" {
-                x += 1;
-                continue;
+fn the_actual_buffer_has_no_extra_gap_between_equal_positive_bars() {
+    // Decode the ACTUAL raster, independently of Geometry's edge formula.
+    // Equal nonzero heights expose false gaps that sparse real data masks.
+    for count in [96usize, 112, 116, 120, 124] {
+        let values = vec![100u64; count];
+        for width in (8 + count / 2) as u16..=260 {
+            let buffer = render_chart(&hourly(&values), width, 4, 8);
+            let mut raster = Vec::new();
+            for x in 8..width {
+                let cell = &buffer[(x, 4)];
+                match cell.symbol() {
+                    "█" => raster.extend([cell.fg, cell.fg]),
+                    "▌" => {
+                        assert_ne!(cell.fg, Color::Reset, "empty left half at {width}/{x}");
+                        assert_ne!(cell.bg, Color::Reset, "empty right half at {width}/{x}");
+                        raster.extend([cell.fg, cell.bg]);
+                    }
+                    other => panic!(
+                        "unexpected gap/glyph {other:?}, count {count}, width {width}, x {x}"
+                    ),
+                }
             }
-            let left = x;
-            let color = buffer[(x, 4)].fg;
-            while x < width && buffer[(x, 4)].symbol() == "█" && buffer[(x, 4)].fg == color {
-                x += 1;
-            }
-            let right = x - 1;
-            assert_eq!((right - left + 1) % 2, 1);
-            assert_eq!(buffer[((left + right) / 2, 5)].symbol(), "┴");
-            bars.push((left, right));
+            let transitions = raster.windows(2).filter(|pair| pair[0] != pair[1]).count();
+            assert_eq!(
+                transitions + 1,
+                count,
+                "all {count} adjacent bars must stay distinguishable at {width}"
+            );
         }
-        assert_eq!(bars.len(), 96, "width {width}");
+    }
+}
+
+#[test]
+fn export_real_chart_terminal_fixtures() {
+    use ratatui::backend::{Backend, CrosstermBackend};
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-12T12:00:00+08:00")
+        .unwrap()
+        .timestamp();
+    for width in [100u16, 120, 160] {
+        for case in ["equal", "varied"] {
+            let mut usage = usage();
+            usage.hours.buckets = vec![100_000_000; 96];
+            usage.month.buckets = vec![1_000_000_000; 120];
+            usage.month.costs = vec![0.; 120];
+            if case == "varied" {
+                usage.hours.buckets.fill(0);
+                usage.month.buckets.fill(0);
+                let values = [20, 48, 48, 48, 48, 32, 20, 40, 40, 20, 20, 0, 0, 0, 70, 90];
+                for (index, value) in values.into_iter().enumerate() {
+                    usage.hours.buckets[index] = value * 1_000_000;
+                }
+                usage.hours.buckets[95] = 35_000_000;
+                usage.month.buckets[40..46].copy_from_slice(&[
+                    300_000_000,
+                    1_100_000_000,
+                    1_100_000_000,
+                    1_100_000_000,
+                    300_000_000,
+                    300_000_000,
+                ]);
+            }
+            for (day, cost) in [12., 25., 10., 0., 45., 20., 15., 30., 70., 18., 390., 110.]
+                .into_iter()
+                .enumerate()
+            {
+                usage.month.costs[day * 4] = cost;
+            }
+            let mut terminal = Terminal::new(TestBackend::new(width, 36)).unwrap();
+            terminal
+                .draw(|frame| {
+                    let areas = [
+                        Rect::new(0, 0, width, 12),
+                        Rect::new(0, 12, width, 12),
+                        Rect::new(0, 24, width, 12),
+                    ];
+                    draw_charts(frame, &areas, &usage, now);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            assert_eq!(
+                buffer
+                    .content
+                    .iter()
+                    .filter(|cell| cell.symbol() == "●")
+                    .count(),
+                12
+            );
+            if let Some(directory) = std::env::var_os("CHART_PREVIEW_DIR") {
+                let directory = std::path::PathBuf::from(directory);
+                std::fs::create_dir_all(&directory).unwrap();
+                // This is real Crossterm ANSI from the actual Ratatui buffer,
+                // not an HTML/Python recreation of the chart geometry.
+                let mut output = b"\x1b[2J\x1b[H\x1b[?25l".to_vec();
+                {
+                    let mut backend = CrosstermBackend::new(&mut output);
+                    let blank = Buffer::empty(buffer.area);
+                    backend.draw(blank.diff(buffer).into_iter()).unwrap();
+                    backend.flush().unwrap();
+                }
+                let path = directory.join(format!("charts-{width}x36-{case}.ansi"));
+                std::fs::write(path, output).unwrap();
+            }
+        }
     }
 }
