@@ -11,6 +11,8 @@ use ratatui::{
     widgets::Paragraph,
 };
 
+mod money_line;
+
 #[cfg(test)]
 mod tests;
 
@@ -466,8 +468,10 @@ fn bar_color(share: f64) -> Color {
     }
 }
 
-/// Full-period geometry. First remove compulsory gaps, then use half-cell
-/// bars if one column per original bucket cannot fit. Never crop or aggregate.
+/// Fixed-pitch, zero-gap packing for the ENTIRE period. Width selects one
+/// uniform bar width/resolution. Remainder units belong only to the two outer
+/// margins, never to individual bucket slots. In particular, rounding the
+/// left/right edge of EACH proportional slot would reintroduce irregular gaps.
 /// Coordinates are measured in `resolution` horizontal units per terminal cell.
 struct Geometry {
     origin: usize,
@@ -489,12 +493,9 @@ impl Geometry {
         if bar_width.is_multiple_of(2) {
             bar_width -= 1;
         }
+        let padding = (available - count * bar_width) / 2;
         let starts = (0..count)
-            .map(|index| {
-                let left = index * available / count;
-                let right = (index + 1) * available / count;
-                left + (right - left - bar_width) / 2
-            })
+            .map(|index| padding + index * bar_width)
             .collect();
         Some(Self {
             origin,
@@ -565,9 +566,11 @@ fn histogram(chart: &Chart<'_>, width: u16, rows: usize, origin: usize) -> Vec<L
     }
     let last = chart.first_tick as usize + count.div_ceil(chart.tick_buckets) - 1;
     let unit = if chart.first_tick == 0 { "时" } else { "日" };
+    let mark = if chart.series.money() { "点" } else { "柱" };
     let title = format!(
-        " {} · 每柱 {} · {}-{}{}",
+        " {} · 每{} {} · {}-{}{}",
         chart.label,
+        mark,
         span_label(chart.span_seconds),
         chart.first_tick,
         last,
@@ -590,6 +593,10 @@ fn histogram(chart: &Chart<'_>, width: u16, rows: usize, origin: usize) -> Vec<L
         return result;
     };
     let max = nice_ceiling(series_peak(&chart.series));
+    let money_plot = chart
+        .series
+        .money()
+        .then(|| money_line::plot(chart, &geometry, rows, max));
     let vertical = if geometry.resolution == 1 { 8 } else { 1 };
     let heights: Vec<_> = (0..count)
         .map(|index| quantized_height(chart.series.value(index), max, rows * vertical))
@@ -620,7 +627,9 @@ fn histogram(chart: &Chart<'_>, width: u16, rows: usize, origin: usize) -> Vec<L
         };
         let mut spans = axis_prefix(&head, '┤', geometry.origin);
         let base = (rows - 1 - row) * vertical;
-        if geometry.resolution == 1 {
+        if let Some(ref plot) = money_plot {
+            spans.extend(plot[row].spans.iter().cloned());
+        } else if geometry.resolution == 1 {
             for owner in &owners {
                 let (used, color) = owner.map_or((0, Color::Reset), |index| {
                     (heights[index].saturating_sub(base).min(8), inks[index])

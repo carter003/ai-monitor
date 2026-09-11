@@ -18,7 +18,12 @@ use ratatui::{
 /// Integer coordinates on Canvas's 2-by-4 braille lattice. Every native sample
 /// retains its own x position, even when two samples share a terminal cell.
 /// Invalid samples break the line; an actual zero remains a valid point.
-fn samples(chart: &Chart<'_>, geometry: &Geometry, rows: usize, max: f64) -> Vec<Option<(usize, usize)>> {
+fn samples(
+    chart: &Chart<'_>,
+    geometry: &Geometry,
+    rows: usize,
+    max: f64,
+) -> Vec<Option<(usize, usize)>> {
     let top = rows.saturating_mul(4).saturating_sub(1);
     (0..chart.series.len())
         .map(|index| {
@@ -33,7 +38,12 @@ fn samples(chart: &Chart<'_>, geometry: &Geometry, rows: usize, max: f64) -> Vec
         .collect()
 }
 
-pub(super) fn plot(chart: &Chart<'_>, geometry: &Geometry, rows: usize, max: f64) -> Vec<Line<'static>> {
+pub(super) fn plot(
+    chart: &Chart<'_>,
+    geometry: &Geometry,
+    rows: usize,
+    max: f64,
+) -> Vec<Line<'static>> {
     if rows == 0 || geometry.plot == 0 {
         return vec![];
     }
@@ -64,7 +74,11 @@ pub(super) fn plot(chart: &Chart<'_>, geometry: &Geometry, rows: usize, max: f64
             // down to zero. No layer reset: preserve connecting line pixels.
             if geometry.resolution == 2 {
                 for (x, y) in points.iter().flatten() {
-                    let neighbour = if *y == top { y.saturating_sub(1) } else { y + 1 };
+                    let neighbour = if *y == top {
+                        y.saturating_sub(1)
+                    } else {
+                        y + 1
+                    };
                     context.draw(&Points {
                         coords: &[(*x as f64, *y as f64), (*x as f64, neighbour as f64)],
                         color: BAR_HIGH,
@@ -140,12 +154,20 @@ mod tests {
         let values = [25., 75., 25., 75.];
         let geometry = Geometry::new(40, 8, values.len()).unwrap();
         let lines = plot(&amount(&values), &geometry, 10, 100.);
-        let text = lines.iter().map(Line::to_string).collect::<Vec<_>>().join("\n");
+        let text = lines
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
         assert_eq!(text.matches('●').count(), values.len());
         assert!(text.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)));
         assert!(!text.chars().any(|c| "█▌▐▁▂▃▄▅▆▇".contains(c)));
         // A line around 25..75% does not fill the bottom 20% as a bar would.
-        assert!(lines[8..].iter().all(|line| line.to_string().trim().is_empty()));
+        assert!(
+            lines[8..]
+                .iter()
+                .all(|line| line.to_string().trim().is_empty())
+        );
     }
 
     #[test]
@@ -156,7 +178,11 @@ mod tests {
         assert_eq!(points[0].unwrap().1, 0);
         assert!(points[1].is_none() && points[3].is_none() && points[4].is_none());
         let lines = plot(&chart, &geometry, 10, 100.);
-        let text = lines.iter().map(Line::to_string).collect::<Vec<_>>().join("\n");
+        let text = lines
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
         assert_eq!(text.matches('●').count(), 3);
         assert!(!text.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)));
     }
@@ -167,11 +193,23 @@ mod tests {
         let geometry = Geometry::new(10, 8, 4).unwrap();
         assert_eq!(geometry.resolution, 2);
         let points = samples(&chart, &geometry, 10, 100.);
-        assert_eq!(points.iter().map(|p| p.unwrap().0).collect::<Vec<_>>(), vec![0, 1, 2, 3]);
+        assert_eq!(
+            points.iter().map(|p| p.unwrap().0).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
         assert!(points[0].unwrap().1 < points[1].unwrap().1);
         let lines = plot(&chart, &geometry, 10, 100.);
         assert!(lines.iter().all(|line| line.width() == 2));
-        assert!(lines[8..].iter().all(|line| line.to_string().trim().is_empty()));
-        assert!(lines.iter().flat_map(|line| &line.spans).all(|span| span.style.bg == Some(Color::Reset)));
+        assert!(
+            lines[8..]
+                .iter()
+                .all(|line| line.to_string().trim().is_empty())
+        );
+        assert!(
+            lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .all(|span| span.style.bg == Some(Color::Reset))
+        );
     }
 }
