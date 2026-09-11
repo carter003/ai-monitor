@@ -315,7 +315,7 @@ fn full_cell_bodies_ticks_and_caps_stay_aligned_without_empty_columns() {
         assert_eq!(buffer[(x, 3)].symbol(), "█");
         assert_eq!(buffer[(x, 4)].symbol(), "┴");
         assert_eq!(buffer[(x, 2)].fg, buffer[(x, 3)].fg);
-        if quarter % 4 == 0 {
+        if quarter.is_multiple_of(4) {
             assert_eq!(buffer[(x, 4)].fg, CYAN);
         }
     }
