@@ -1120,15 +1120,17 @@ fn histogram(chart: &Chart, width: u16, rows: usize) -> Vec<Line<'static>> {
     // one cell wide, the next two) made the spacing — and with it every hourly
     // tick — drift in and out, which is what read as uneven.
     //
-    // A whole-cell gap needs two cells per bar. When the plot is too narrow for
-    // that the bars stay one cell wide and the three-quarter block leaves the
-    // gap inside the cell instead.
+    // A whole-cell gap needs two cells per bar. When the plot is too narrow
+    // for that the bars shrink to one cell and lose their gap entirely; the
+    // body stays the full block rather than a three-quarter block, whose
+    // leftover sliver repeated down every bar is what reads as a bristly
+    // edge. Adjacent full blocks tile the plot cleanly.
     let columns = merged.len().max(1);
     let pitch = plot / columns;
     let (bar_width, body) = if pitch >= 2 {
         (pitch - 1, '█')
     } else {
-        (1, '▊')
+        (1, '█')
     };
     let gaps = columns.saturating_sub(1);
     let gap_cells = plot.saturating_sub(columns * bar_width);
@@ -1330,11 +1332,11 @@ fn stats_column(usage: &UsageStats, width: u16) -> Vec<Line<'static>> {
         })
         .find(|(_, amount, cost)| label_width + 1 + amount + 2 + cost <= room)
         .unwrap_or(("", 0, 0));
-    // The interval rows and the frame share one block: the rows stretch to the
-    // frame's width so their right edge and the frame's right rule line up.
-    let frame_width = room.min(TOTAL_BOX_MAX);
+    // The interval rows and the total share one block: the rows stretch to
+    // the block's width so their right edge and the total's rule line up.
+    let block_width = room.min(TOTAL_BOX_MAX);
     let natural = label_width + 1 + amount_width + 2 + cost_width;
-    let amount_width = amount_width + frame_width.saturating_sub(natural);
+    let amount_width = amount_width + block_width.saturating_sub(natural);
     let mut lines = vec![];
     for (label, total) in rows {
         lines.extend(interval_card(
@@ -1348,7 +1350,7 @@ fn stats_column(usage: &UsageStats, width: u16) -> Vec<Line<'static>> {
         ));
     }
     lines.push(Line::raw(""));
-    lines.extend(total_card(&usage.all_total, room));
+    lines.extend(total_card(&usage.all_total, block_width));
     lines
 }
 
@@ -1404,9 +1406,10 @@ fn interval_card(
     lines
 }
 
-/// The historical total, framed and centred so it reads as the headline of the
-/// summary column rather than one more interval. The frame shrinks with the
-/// column and is dropped entirely when the pane cannot hold it.
+/// The historical total, separated from the intervals by a thin rule rather
+/// than a frame, so it reads as the last row of the summary column instead of
+/// a card of its own. The block shrinks with the column and is dropped
+/// entirely when the pane cannot hold it.
 fn total_card(total: &UsageTotal, room: usize) -> Vec<Line<'static>> {
     let cost = money(total.cost);
     // The frame is capped so a very wide column does not leave the numbers
@@ -1437,39 +1440,36 @@ fn total_card(total: &UsageTotal, room: usize) -> Vec<Line<'static>> {
         return lines;
     };
     let inner = box_width - 2;
-    let border = Style::default().fg(CYAN).add_modifier(Modifier::BOLD);
-    let headline = Style::default().fg(CYAN).add_modifier(Modifier::BOLD);
+    // A single thin rule in the muted track separates the total from the
+    // intervals above; the rows share the intervals' left edge and need no
+    // frame to hold them together. The frame is what made the total read as
+    // a card of its own — a separate visual object competing with the panel
+    // it sits in — so it is dropped in favour of the rule.
+    let rule = Style::default().fg(TRACK);
+    let label = Style::default().fg(CYAN).add_modifier(Modifier::BOLD);
     let value = Style::default().fg(INK).add_modifier(Modifier::BOLD);
-    let mut lines = vec![Line::from(Span::styled(
-        format!("╔{}╗", "═".repeat(inner)),
-        border,
-    ))];
-    lines.push(framed_row("总计", inner, headline));
-    lines.push(framed_row(&amount, inner, value));
-    lines.push(framed_row(&cost, inner, headline));
-    lines.push(Line::from(Span::styled(
-        format!("╚{}╝", "═".repeat(inner)),
-        border,
-    )));
+    let cost_style = Style::default().fg(INK);
+    let mut lines = vec![Line::from(vec![
+        Span::raw(" "),
+        Span::styled("─".repeat(inner), rule),
+    ])];
+    lines.push(Line::from(vec![
+        Span::raw(" "),
+        Span::styled("总计", label),
+        Span::raw(" ".repeat(inner.saturating_sub(columns("总计") + 1))),
+    ]));
+    lines.push(Line::from(vec![
+        Span::raw(" "),
+        Span::styled(amount.clone(), value),
+        Span::raw(" ".repeat(inner.saturating_sub(columns(&amount) + 1))),
+    ]));
+    lines.push(Line::from(vec![
+        Span::raw(" "),
+        Span::styled(cost.clone(), cost_style),
+        Span::raw(" ".repeat(inner.saturating_sub(columns(&cost) + 1))),
+    ]));
     lines
 }
-
-/// A framed row: the rule on both sides with `text` centred between them.
-fn framed_row(text: &str, inner: usize, style: Style) -> Line<'static> {
-    let used = columns(text);
-    let left = inner.saturating_sub(used) / 2;
-    let right = inner.saturating_sub(used + left);
-    let border = Style::default().fg(CYAN).add_modifier(Modifier::BOLD);
-    Line::from(vec![
-        Span::styled("║", border),
-        Span::styled(
-            format!("{}{}{}", " ".repeat(left), text, " ".repeat(right)),
-            style,
-        ),
-        Span::styled("║", border),
-    ])
-}
-
 /// A token count with its unit word, e.g. `126.3B tokens`.
 fn amount_text(tokens: u64, unit: &str) -> String {
     if unit.is_empty() {
@@ -2281,10 +2281,10 @@ mod regression_tests {
         let name = row.find("deepseek/deepseek-v4").unwrap_or(usize::MAX);
         let interval = row.find("本周").unwrap_or(usize::MAX);
         assert!(name < interval, "the ranking must open the row: {row}");
-        // The total stays with the summary, framed, and is never repeated below
-        // the summary rows.
+        // The total stays with the summary, separated by a rule, and is never
+        // repeated below the summary rows.
         assert!(text.contains("总计"), "{text}");
-        assert!(text.contains("╔"), "the total is framed: {text}");
+        assert!(text.contains("─"), "the total is separated by a rule: {text}");
         assert!(
             !text.contains("模型表为近24小时"),
             "the explanatory caveat is gone: {text}"
@@ -2536,9 +2536,12 @@ mod regression_tests {
                 .unwrap_or_default()
         };
         // Dense: one cell per bar, no spare columns to spend on gaps, so the
-        // three-quarter block alone separates them. Every bar covers the plot.
+        // bars tile the plot edge to edge with full blocks. Adjacent full
+        // blocks read as one solid bar; the three-quarter block that used to
+        // stand in here left a sliver down every bar, which is what made the
+        // edges look bristly.
         let dense = plot_of(&histogram(&chart, 104, 4)[1].to_string());
-        assert_eq!(dense.matches('▊').count(), 96, "{dense}");
+        assert_eq!(dense.matches('█').count(), 96, "{dense}");
         assert!(!dense.contains(' '), "{dense}");
         // Roomy: bars stay one cell, the cells that are left over become gaps,
         // and every bar is the same width — no bar is twice its neighbour.
