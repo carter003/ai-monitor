@@ -21,7 +21,7 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
       - name: Guard the exact reviewed parent
-        run: test "$(git rev-parse HEAD^)" = f72d549468c457ede1c8787236990570a6d24ade
+        run: test "$(git rev-parse HEAD^)" = be53a82f1eb60627da5462cdf63982afab145558
       - name: Apply reviewed CI fixes and short-pane layout
         run: |
           python3 - <<'PY'
