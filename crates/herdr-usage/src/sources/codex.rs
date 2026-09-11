@@ -43,6 +43,11 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 
 use crate::event::{normalize_codex, CodexLastUsage, ModelSource, ParsedEvent};
 use crate::tail::TailLine;
+/// Upper bound for the head scan in `recover_model_from_head`, as a safety cap
+/// over the file size: a pathologically large rollout without any
+/// `turn_context` would otherwise be read in full on every first event after
+/// a restart.
+const RECOVER_SCAN_LIMIT: u64 = 16 * 1024 * 1024;
 
 /// Per-file derived state that must survive across incremental read passes.
 #[derive(Debug, Default)]
@@ -70,9 +75,9 @@ impl CodexState {
     ///
     /// The first round baselines a file at its current size and reads nothing,
     /// and a restart on a large rollout starts at the persisted watermark. Both
-    /// cases would otherwise leave every later `token_count` without a model, so
-    /// the caller replays just the `turn_context` lines from the skipped prefix:
-    /// only the last one matters, and the scan is bounded by `limit`.
+    /// cases would otherwise leave every later `token_count` without a model:
+    /// the baseline passes the skipped tail prefix here, and a restart falls
+    /// through to `recover_model_from_head`.
     pub fn seed_model(&mut self, path: &Path, bytes: &[u8]) {
         if let Some(model) = extract_latest_model(bytes) {
             self.models.insert(path.to_path_buf(), model);
@@ -81,22 +86,30 @@ impl CodexState {
         }
     }
 
-    /// Scan the initial 64 KB of `path` for a `turn_context` line.
+    /// Rebuild the tracked model after a restart by replaying the file prefix.
     ///
-    /// When a rollout file is larger than the 1 MB tail checked during baselining,
+    /// The scan takes the *latest* `turn_context` inside the window, not the
+    /// first: a session may switch models mid-file (`/model`), and events that
+    /// arrive after the restart sit behind every `turn_context` written before
+    /// the watermark, so the latest one is exactly what continuous tracking
+    /// would have held. The old 64 KB cap missed even the first hit in the
+    /// wild (measured rollouts carry it at ~85 KB); the window now reaches
+    /// `RECOVER_SCAN_LIMIT`, and a rollout with no `turn_context` at all pays
+    /// the bounded scan exactly once per process.
     fn recover_model_from_head(&mut self, path: &Path) {
         let size = match std::fs::metadata(path) {
             Ok(meta) => meta.len(),
             Err(_) => return,
         };
-        let to = size.min(64 * 1024);
+        let to = size.min(RECOVER_SCAN_LIMIT);
         if to == 0 {
             return;
         }
-        if let Ok(head_bytes) = crate::tail::read_range(path, 0, to) {
-            if let Some(model) = extract_latest_model(&head_bytes) {
-                self.models.insert(path.to_path_buf(), model);
-            }
+        let Ok(head_bytes) = crate::tail::read_range(path, 0, to) else {
+            return;
+        };
+        if let Some(model) = extract_latest_model(&head_bytes) {
+            self.models.insert(path.to_path_buf(), model);
         }
     }
     /// Parse one fresh line.

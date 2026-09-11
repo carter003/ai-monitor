@@ -91,6 +91,10 @@ pub fn read_appended(path: &Path, tail: &mut FileTail, size: u64) -> std::io::Re
 pub struct OffsetStore {
     tails: BTreeMap<String, FileTail>,
     baselined: std::collections::HashSet<String>,
+    /// `true` when the store was built from a persisted cursor: the collector
+    /// has run before, so an unseen-but-live file is a *new* log (collect it
+    /// from zero) rather than part of the historical corpus (baseline it).
+    resumed: bool,
 }
 
 impl OffsetStore {
@@ -120,7 +124,14 @@ impl OffsetStore {
         Self {
             tails,
             baselined: Default::default(),
+            resumed: cursor.is_some(),
         }
+    }
+
+    /// Whether this store was built from a persisted cursor (a prior round
+    /// already ran) as opposed to a cold start.
+    pub fn is_resumed(&self) -> bool {
+        self.resumed
     }
 
     pub fn tail(&mut self, path: &Path) -> &mut FileTail {
@@ -192,10 +203,18 @@ pub fn collect_files(root: &Path, predicate: impl Fn(&Path) -> bool) -> Vec<Path
     files
 }
 
-fn collect_files_recursive(dir: &Path, predicate: &impl Fn(&Path) -> bool, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return; };
+fn collect_files_recursive(
+    dir: &Path,
+    predicate: &impl Fn(&Path) -> bool,
+    files: &mut Vec<PathBuf>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
-        let Ok(file_type) = entry.file_type() else { continue; };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         let path = entry.path();
         if file_type.is_file() {
             if predicate(&path) {

@@ -82,6 +82,7 @@ const OMP_LINE: &str = r#"{"id":"681cad2e","timestamp":"2026-09-10T16:38:17.999Z
 
 const CODEX_TURN: &str = r#"{"timestamp":"2026-09-10T16:00:00.000Z","type":"turn_context","payload":{"turn_id":"t1","model":"gpt-5.6-luna"}}"#;
 
+const CODEX_TURN_ASTRA: &str = r#"{"timestamp":"2026-09-10T16:00:30.000Z","type":"turn_context","payload":{"turn_id":"t2","model":"gpt-6-astra"}}"#;
 const CODEX_COUNT: &str = r#"{"timestamp":"2026-09-10T16:00:01.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":29027,"cached_input_tokens":17152,"output_tokens":484,"reasoning_output_tokens":69,"total_tokens":29511},"last_token_usage":{"input_tokens":16067,"cached_input_tokens":12672,"output_tokens":157,"reasoning_output_tokens":0,"total_tokens":16224}}}}"#;
 
 const CODEX_NULL_INFO: &str = r#"{"timestamp":"2026-09-10T16:00:02.000Z","type":"event_msg","payload":{"type":"token_count","info":null}}"#;
@@ -119,6 +120,123 @@ fn the_first_round_records_the_baseline_and_backfills_nothing() {
     assert_eq!(count(&connection, "omp"), 1);
     assert_eq!(count(&connection, "codex"), 1);
     assert_eq!(count(&connection, "grok"), 1);
+}
+
+#[test]
+fn a_live_file_seen_for_the_first_time_is_read_from_zero() {
+    // Regression: omp buffers session writes, so a log can be created minutes
+    // after its session started and already hold inference records. The old
+    // code baselined any unseen file at its current size, which dropped those
+    // records permanently (measured: 11 events / ~318k tokens lost on
+    // 2026-09-11). A resumed round must instead read the file from zero.
+    let fixture = Fixture::new("live-omp");
+    let mut connection = fixture.connection();
+    let mut collector = sources::Collector::new(fixture.paths.clone());
+    // Round 1 over an empty corpus: cold start, records the baseline.
+    collector
+        .run_round(&mut connection, 1_000)
+        .expect("cold round");
+
+    // A brand-new omp file that was born with content (as if omp flushed a
+    // buffered session in one write).
+    let born = fixture.paths.omp.join("born-with-events.jsonl");
+    fs::write(&born, format!("{OMP_LINE}\n{OMP_LINE}\n")).expect("write born file");
+
+    // Resumed round: the file has no watermark, its mtime is fresh, and the
+    // collector has run before — the born events must be collected, not
+    // baselined away. The duplicate envelope id keeps the count at one.
+    let report = collector.run_round(&mut connection, 2_000).expect("round");
+    assert_eq!(report.inserted, 1, "born events are collected");
+    assert_eq!(count(&connection, "omp"), 1);
+
+    // Replays are still absorbed by the primary key.
+    let report = collector
+        .run_round(&mut connection, 3_000)
+        .expect("round 2");
+    assert_eq!(report.inserted, 0);
+    assert_eq!(count(&connection, "omp"), 1);
+}
+
+#[test]
+fn a_cold_start_still_baselines_a_fresh_file_instead_of_backfilling() {
+    // The complement of the fix: on the very first round (no persisted cursor)
+    // an existing corpus is history by definition, so even a file whose mtime
+    // is seconds old must be baselined, not backfilled.
+    let fixture = Fixture::new("cold-omp");
+    let fresh = fixture.paths.omp.join("fresh-history.jsonl");
+    fs::write(&fresh, format!("{OMP_LINE}\n")).expect("seed fresh file");
+
+    let mut connection = fixture.connection();
+    let mut collector = sources::Collector::new(fixture.paths.clone());
+    let report = collector.run_round(&mut connection, 1_000).expect("round");
+    assert_eq!(report.inserted, 0, "首轮只记录水位，不回填历史");
+    assert_eq!(count(&connection, "omp"), 0);
+
+    // Growth after the baseline is still collected normally.
+    fixture.append(&fresh, &format!("{OMP_LINE}\n"));
+    let report = collector
+        .run_round(&mut connection, 2_000)
+        .expect("round 2");
+    assert_eq!(report.inserted, 1);
+}
+#[test]
+fn a_resumed_codex_round_recovers_the_model_beyond_the_64k_head() {
+    // Regression: a service restart keeps the persisted watermarks but drops
+    // the in-memory `turn_context` model map. The old head-recovery scanned
+    // only the first 64 KB, while measured rollouts carry their first
+    // `turn_context` at ~85 KB — so every `token_count` between the watermark
+    // and the next `turn_context` was stored with a NULL model (measured: 240
+    // events / 35.2M tokens invisible in the per-model table on 2026-09-11).
+    let fixture = Fixture::new("codex-restart");
+    let file = fixture.paths.codex.join("rollout-restart.jsonl");
+
+    // History written before the collector ever ran: the turn_context sits at
+    // ~85 KB, past the old 64 KB recovery window, followed by filler that
+    // keeps it there.
+    let filler = "{\"type\":\"other\"}\n".repeat(2000);
+    let mut history = format!("{CODEX_TURN}\n{filler}");
+    // Pad the turn_context line region to just past 64 KB before the counts.
+    while history.len() < 70 * 1024 {
+        history.push_str("{\"type\":\"other\"}\n");
+    }
+    fs::write(&file, &history).expect("seed codex history");
+
+    let mut connection = fixture.connection();
+    let mut collector = sources::Collector::new(fixture.paths.clone());
+    collector
+        .run_round(&mut connection, 1_000)
+        .expect("baseline");
+
+    // Simulate a restart: a fresh collector resumes from the persisted
+    // watermark, while the file keeps a model switch in its history region.
+    let mut restarted = sources::Collector::new(fixture.paths.clone());
+
+    // The session switched models mid-file (e.g. `/model`), past the head of
+    // the file: a second turn_context deep in the history region selects
+    // gpt-6-astra, so the recovered model must be the latest one, not the
+    // file's initial gpt-5.6-luna.
+    fixture.append(&file, &format!("{CODEX_TURN_ASTRA}\n"));
+    restarted
+        .run_round(&mut connection, 1_500)
+        .expect("astra turn");
+
+    fixture.append(&file, &format!("{CODEX_COUNT}\n"));
+    let report = restarted
+        .run_round(&mut connection, 2_000)
+        .expect("resumed round");
+    assert_eq!(report.inserted, 1);
+    let model: Option<String> = connection
+        .query_row(
+            "SELECT model FROM usage_event WHERE source = 'codex'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("model");
+    assert_eq!(
+        model.as_deref(),
+        Some("gpt-6-astra"),
+        "the latest turn_context before the watermark must win"
+    );
 }
 
 #[test]

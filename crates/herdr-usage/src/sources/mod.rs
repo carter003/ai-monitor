@@ -297,12 +297,28 @@ fn price(prices: &PriceTable, event: &ParsedEvent) -> Priced {
 
 /// Fetch the file size, then read only the bytes appended since the watermark.
 ///
-/// A file with no watermark is baselined (adopted at its current size without
-/// reading) so that the first ever round never backfills history.
+/// Two kinds of files carry no watermark, and they must not be treated alike:
 ///
-/// A file untouched for longer than this is not seeded on baseline; it will be
-/// seeded normally if it starts growing again.
+/// * A file whose last write is older than `SEED_ACTIVE` is *baselined*: the
+///   store records its current size and reads nothing. That is the "不回填历史"
+///   rule (plan §7.2) — without it, pointing the collector at an existing corpus
+///   would import every byte of history on the first round.
+///
+/// * A file written within the last `SEED_ACTIVE` is a *live* file the collector
+///   has simply never seen. omp buffers session writes, so a log can be created
+///   minutes after its session started and already hold collected events;
+///   baselining such a file would silently drop those events forever. It is
+///   read from zero instead — harmless even if some bytes were somehow already
+///   consumed, because every insert is `INSERT OR IGNORE` over the primary key.
+///
+/// A file untouched for longer than `SEED_PREFIX_IDLE` is not seeded on
+/// baseline; it will be seeded normally if it starts growing again.
 const SEED_PREFIX_IDLE: Duration = Duration::from_secs(3600);
+
+/// How recent a write makes an unseen file "live". One collection round plus
+/// change: a file seen in an earlier round holds a watermark and never reaches
+/// the baseline branch at all.
+const SEED_ACTIVE: Duration = Duration::from_secs(120);
 
 /// Whether the file's mtime is recent enough to justify reading its prefix.
 fn is_recent(path: &Path, within: Duration) -> bool {
@@ -332,6 +348,18 @@ fn read_new_bytes(
     }
     let size = metadata.len();
     let size = if store.is_known(path) {
+        size
+    } else if store.is_resumed() && is_recent(path, SEED_ACTIVE) {
+        // A live file seen for the first time after a previous round: adopt it
+        // at offset zero so the events it was born with are collected. omp
+        // writes session logs lazily, so a newly listed file may already hold
+        // inference records — baselining at its current size used to drop them
+        // permanently. The codex `turn_context` seed still runs over the head
+        // chunk; nothing is skipped, so the model state the skipped prefix
+        // would have established is established by the read itself. A cold
+        // start (no cursor) keeps the baseline: its unseen corpus is history by
+        // definition, not a log that a running session is still filling.
+        store.baseline(path, 0);
         size
     } else {
         // Reading the whole prefix is exactly what baselining must avoid, so the
