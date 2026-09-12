@@ -7,12 +7,8 @@ use ratatui::{
     Frame,
     layout::Rect,
     style::{Color, Modifier, Style},
-    symbols::Marker,
     text::{Line, Span},
-    widgets::{
-        Paragraph,
-        canvas::{Canvas, Line as CanvasLine},
-    },
+    widgets::Paragraph,
 };
 
 #[cfg(test)]
@@ -299,9 +295,11 @@ struct Chart<'a> {
     span_seconds: u64,
     aggregate_daily: bool,
     first_tick: u32,
+    axis_units: usize,
+    buckets_per_unit: usize,
 }
 
-fn local_charts(usage: &UsageStats) -> [Chart<'_>; 3] {
+fn local_charts(usage: &UsageStats, month_days: usize) -> [Chart<'_>; 3] {
     [
         Chart {
             label: "今日 Token",
@@ -309,6 +307,8 @@ fn local_charts(usage: &UsageStats) -> [Chart<'_>; 3] {
             span_seconds: 15 * 60,
             aggregate_daily: false,
             first_tick: 0,
+            axis_units: 24,
+            buckets_per_unit: 4,
         },
         Chart {
             label: "本月 Token",
@@ -316,6 +316,8 @@ fn local_charts(usage: &UsageStats) -> [Chart<'_>; 3] {
             span_seconds: 6 * 3_600,
             aggregate_daily: false,
             first_tick: 1,
+            axis_units: month_days,
+            buckets_per_unit: 4,
         },
         Chart {
             label: "本月金额",
@@ -323,19 +325,41 @@ fn local_charts(usage: &UsageStats) -> [Chart<'_>; 3] {
             span_seconds: 86_400,
             aggregate_daily: true,
             first_tick: 1,
+            axis_units: month_days,
+            buckets_per_unit: 1,
         },
     ]
 }
 
 pub(super) fn draw_charts(frame: &mut Frame, areas: &[Rect], usage: &UsageStats, now: i64) {
-    let charts = local_charts(usage);
+    let month_days = days_in_month(now);
+    let charts = local_charts(usage, month_days);
     let through_day = chrono::DateTime::from_timestamp(now, 0)
         .map(|time| chrono::Datelike::day(&time.with_timezone(&chrono::Local)) as usize)
         .unwrap_or(0);
     for (chart, area) in charts.iter().zip(areas) {
         if area.height >= MIN_CHART_HEIGHT {
-            draw_line_chart(frame, *area, chart, through_day);
+            draw_stem_chart(frame, *area, chart, through_day);
         }
+    }
+}
+
+fn days_in_month(now: i64) -> usize {
+    let Some(time) = chrono::DateTime::from_timestamp(now, 0) else {
+        return 31;
+    };
+    let local = time.with_timezone(&chrono::Local);
+    let year = chrono::Datelike::year(&local);
+    let month = chrono::Datelike::month(&local);
+    let first = chrono::NaiveDate::from_ymd_opt(year, month, 1);
+    let next = if month == 12 {
+        chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1)
+    } else {
+        chrono::NaiveDate::from_ymd_opt(year, month + 1, 1)
+    };
+    match (first, next) {
+        (Some(first), Some(next)) => (next - first).num_days() as usize,
+        _ => 31,
     }
 }
 
@@ -409,38 +433,66 @@ fn chart_values(chart: &Chart<'_>, through_day: usize) -> Vec<f64> {
         .collect()
 }
 
-fn tick_indices(chart: &Chart<'_>, len: usize) -> Vec<(usize, String)> {
-    if len == 0 {
+fn slot_x(index: usize, slots: usize, plot_width: usize) -> usize {
+    if slots == 0 || plot_width == 0 {
+        return 0;
+    }
+    ((2 * index + 1) * plot_width / (2 * slots)).min(plot_width - 1)
+}
+
+fn unit_x(index: usize, units: usize, plot_width: usize) -> usize {
+    slot_x(index, units, plot_width)
+}
+
+fn tick_positions(chart: &Chart<'_>, plot_width: usize) -> Vec<(usize, String)> {
+    if chart.axis_units == 0 || plot_width == 0 {
         return vec![];
     }
-    if chart.label == "今日 Token" {
-        let mut ticks = vec![];
-        for hour in [0usize, 3, 6, 9, 12, 15, 18, 21, 23] {
-            let index = (hour * 4).min(len - 1);
-            ticks.push((index, hour.to_string()));
-        }
-        return ticks;
-    }
-    let days = if chart.aggregate_daily { len } else { len.div_ceil(4) };
-    let mut wanted = vec![1usize, 5, 10, 15, 20, 25, 30];
-    if days > 30 {
-        wanted.push(days);
-    }
-    wanted
+    let max_labels = (plot_width / 3).max(1).min(chart.axis_units);
+    let indices = if max_labels == 1 {
+        vec![chart.axis_units - 1]
+    } else if max_labels == chart.axis_units {
+        (0..chart.axis_units).collect()
+    } else {
+        (0..max_labels)
+            .map(|index| index * (chart.axis_units - 1) / (max_labels - 1))
+            .collect()
+    };
+    indices
         .into_iter()
-        .filter(|day| *day <= days)
-        .map(|day| {
-            let index = if chart.aggregate_daily {
-                day - 1
-            } else {
-                ((day - 1) * 4).min(len - 1)
-            };
-            (index, day.to_string())
+        .map(|index| {
+            (
+                unit_x(index, chart.axis_units, plot_width),
+                (chart.first_tick as usize + index).to_string(),
+            )
         })
         .collect()
 }
 
-fn draw_line_chart(frame: &mut Frame, area: Rect, chart: &Chart<'_>, through_day: usize) {
+fn stem_heights(
+    chart: &Chart<'_>,
+    values: &[f64],
+    max: f64,
+    plot_width: usize,
+    plot_rows: usize,
+) -> Vec<usize> {
+    let mut heights = vec![0; plot_width];
+    let slots = chart.axis_units.saturating_mul(chart.buckets_per_unit);
+    if slots == 0 || plot_width == 0 || plot_rows == 0 || max <= 0. {
+        return heights;
+    }
+    for (index, value) in values.iter().copied().take(slots).enumerate() {
+        if !value.is_finite() || value <= 0. {
+            continue;
+        }
+        let x = slot_x(index, slots, plot_width);
+        let height = ((value / max) * plot_rows as f64).ceil() as usize;
+        heights[x] = heights[x].max(height.clamp(1, plot_rows));
+    }
+    heights
+}
+
+fn draw_stem_chart(frame: &mut Frame, area: Rect, chart: &Chart<'_>, through_day: usize) {
     if area.width < MIN_CHART_WIDTH || area.height < MIN_CHART_HEIGHT {
         return;
     }
@@ -490,54 +542,46 @@ fn draw_line_chart(frame: &mut Frame, area: Rect, chart: &Chart<'_>, through_day
         );
     }
 
+    let plot_x = area.x + origin as u16;
     let baseline_y = area.y + 1 + plot_rows;
     frame.render_widget(
         Paragraph::new(Span::styled(
             "─".repeat(plot_width as usize),
             Style::default().fg(TRACK),
         )),
-        Rect::new(area.x + origin as u16, baseline_y, plot_width, 1),
+        Rect::new(plot_x, baseline_y, plot_width, 1),
     );
 
-    if values.len() >= 2 {
-        let canvas_area = Rect::new(
-            area.x + origin as u16,
-            area.y + 1,
-            plot_width,
-            plot_rows,
-        );
-        let x_max = (values.len() - 1) as f64;
-        let canvas = Canvas::default()
-            .background_color(Color::Reset)
-            .marker(Marker::Braille)
-            .x_bounds([0., x_max.max(1.)])
-            .y_bounds([0., max])
-            .paint(|ctx| {
-                for index in 1..values.len() {
-                    let a = values[index - 1];
-                    let b = values[index];
-                    if a.is_finite() && b.is_finite() {
-                        ctx.draw(&CanvasLine {
-                            x1: (index - 1) as f64,
-                            y1: a.max(0.),
-                            x2: index as f64,
-                            y2: b.max(0.),
-                            color: LINE_COLOR,
-                        });
-                    }
-                }
-            });
-        frame.render_widget(canvas, canvas_area);
+    let heights = stem_heights(
+        chart,
+        &values,
+        max,
+        plot_width as usize,
+        plot_rows as usize,
+    );
+    let stem_style = Style::default().fg(LINE_COLOR).bg(Color::Reset);
+    for (column, height) in heights.into_iter().enumerate() {
+        if height == 0 {
+            continue;
+        }
+        let x = plot_x + column as u16;
+        for offset in 0..height as u16 {
+            let y = baseline_y - 1 - offset;
+            frame.buffer_mut()[(x, y)]
+                .set_symbol("│")
+                .set_style(stem_style);
+        }
+        frame.buffer_mut()[(x, baseline_y)]
+            .set_symbol("┴")
+            .set_style(stem_style);
     }
 
     let mut labels = vec![' '; plot_width as usize];
-    for (index, text) in tick_indices(chart, values.len()) {
-        let x = if values.len() <= 1 {
-            0
-        } else {
-            index * (plot_width as usize - 1) / (values.len() - 1)
-        };
-        let start = x.saturating_sub(text.len() / 2);
+    for (x, text) in tick_positions(chart, plot_width as usize) {
+        let text_width = columns(&text);
+        let start = x
+            .saturating_sub(text_width / 2)
+            .min(labels.len().saturating_sub(text_width));
         for (offset, ch) in text.chars().enumerate() {
             if start + offset < labels.len() {
                 labels[start + offset] = ch;
@@ -549,6 +593,6 @@ fn draw_line_chart(frame: &mut Frame, area: Rect, chart: &Chart<'_>, through_day
             labels.into_iter().collect::<String>(),
             Style::default().fg(MUTED),
         )),
-        Rect::new(area.x + origin as u16, baseline_y + 1, plot_width, 1),
+        Rect::new(plot_x, baseline_y + 1, plot_width, 1),
     );
 }
