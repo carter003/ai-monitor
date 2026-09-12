@@ -35,10 +35,12 @@ impl Reader {
         let week_start = local_midnight(now, Period::Week);
         let month_start = local_midnight(now, Period::Month);
         let year_start = local_midnight(now, Period::Year);
+        let rolling_24h = now.timestamp_millis() - 24 * 3600 * 1000;
 
         let all_total = self.total(None)?;
         Ok(UsageStats {
-            models: self.models(month_start)?,
+            models: self.models(rolling_24h)?,
+            month_models: self.models_with_limit(month_start, 10)?,
             hours: self.buckets(Bucket::QuarterHour, day_start)?,
             month: self.buckets(Bucket::SixHour, month_start)?,
             day_total: self.total(Some(day_start))?,
@@ -83,12 +85,17 @@ impl Reader {
         })
     }
 
-    /// The model table: current-month totals, top ten, ignored models removed.
+    /// The existing model table: rolling 24-hour totals, top six.
+    fn models(&self, since_ms: i64) -> rusqlite::Result<Vec<ModelUsage>> {
+        self.models_with_limit(since_ms, 6)
+    }
+
+    /// Model ranking over an arbitrary interval and row limit.
     ///
     /// Grouping is by `COALESCE(alias.model_id, event.model)` so one model seen
     /// through two clients (an omp `vendor/model` and an opencode `provider/model`)
     /// collapses into a single row instead of two.
-    fn models(&self, since_ms: i64) -> rusqlite::Result<Vec<ModelUsage>> {
+    fn models_with_limit(&self, since_ms: i64, limit: i64) -> rusqlite::Result<Vec<ModelUsage>> {
         let mut statement = self.connection.prepare(
             "SELECT COALESCE(a.model_id, e.model)              AS model,
                     SUM(e.input_total)                         AS input_total,
@@ -106,9 +113,9 @@ impl Reader {
              -- under two client spellings would stay two rows.
              GROUP BY COALESCE(a.model_id, e.model)
              ORDER BY SUM(e.input_total + e.output_total) DESC, model ASC
-             LIMIT 10",
+             LIMIT ?2",
         )?;
-        let rows = statement.query_map([since_ms], |row| {
+        let rows = statement.query_map(rusqlite::params![since_ms, limit], |row| {
             let input_total: Option<i64> = row.get(1)?;
             let cache_read: Option<i64> = row.get(2)?;
             let output: Option<i64> = row.get(3)?;
@@ -461,6 +468,30 @@ mod tests {
         let names: Vec<&str> = models.iter().map(|m| m.model.as_str()).collect();
         assert_eq!(names, vec!["a", "b"], "ties break on the model name");
     }
+
+    #[test]
+    fn monthly_model_query_can_return_ten() {
+        let connection = seeded();
+        for index in 0..12 {
+            insert(
+                &connection,
+                "omp",
+                &format!("id-{index}"),
+                &format!("vendor/model-{index}"),
+                100 + index,
+                0,
+                10,
+                Some(1.0),
+                100,
+            );
+        }
+        let models = reader(connection)
+            .models_with_limit(0, 10)
+            .expect("monthly models");
+        assert_eq!(models.len(), 10);
+        assert_eq!(models[0].model, "vendor/model-11");
+    }
+
     #[test]
     fn events_older_than_rolling_window_are_excluded_from_models() {
         let connection = seeded();
