@@ -5,7 +5,7 @@ use super::{CYAN, GREEN, INK, MUTED, TRACK, columns, compact, truncate};
 use crate::model::{ModelUsage, UsageStats, UsageTotal};
 use ratatui::{
     Frame,
-    layout::Rect,
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
@@ -19,6 +19,9 @@ pub(super) const MIN_CHART_WIDTH: u16 = 16;
 const NAME_MIN: usize = 10;
 const GAP: usize = 2;
 const LINE_COLOR: Color = Color::Rgb(33, 150, 243);
+const MONTH_RANKING_MIN_WIDTH: u16 = 66;
+const MONTH_RANKING_GAP: u16 = 2;
+const MONTH_MODEL_MAX_BYTES: usize = 15;
 
 pub(super) fn lines(usage: &UsageStats, width: u16, height: usize) -> Vec<Line<'static>> {
     if width == 0 || height == 0 {
@@ -30,7 +33,7 @@ pub(super) fn lines(usage: &UsageStats, width: u16, height: usize) -> Vec<Line<'
         if limit > 0 {
             result.push(Line::raw(""));
             result.push(Line::styled(
-                truncate(" 模型用量 · 最近24小时", width as usize),
+                truncate(" 模型用量 · 本月", width as usize),
                 Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
             ));
             result.extend(model_table(&usage.models, width as usize, limit));
@@ -274,6 +277,94 @@ fn money(value: f64) -> String {
     }
 }
 
+fn model_basename(model: &str) -> &str {
+    model.rsplit('/').next().unwrap_or(model)
+}
+
+fn truncate_bytes(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
+}
+
+fn ranking_line(model: &ModelUsage, rank: usize, width: usize) -> Line<'static> {
+    if width == 0 {
+        return Line::raw("");
+    }
+    let token = compact(model.total_tokens());
+    let cost = model.cost.map(money).unwrap_or_else(|| "—".into());
+    let rank_text = format!("{rank:>2}. ");
+    let fixed = columns(&rank_text) + 1 + columns(&token) + 1 + columns(&cost);
+    let max_name_width = width.saturating_sub(fixed).min(MONTH_MODEL_MAX_BYTES);
+    let raw_name = truncate_bytes(model_basename(&model.model), MONTH_MODEL_MAX_BYTES);
+    let name = truncate(&raw_name, max_name_width);
+    let name_padding = max_name_width.saturating_sub(columns(&name));
+    let used = columns(&rank_text)
+        + columns(&name)
+        + name_padding
+        + 1
+        + columns(&token)
+        + 1
+        + columns(&cost);
+    let tail = width.saturating_sub(used);
+    Line::from(vec![
+        Span::styled(rank_text, Style::default().fg(MUTED)),
+        Span::styled(name, Style::default().fg(CYAN)),
+        Span::raw(" ".repeat(name_padding + 1)),
+        Span::styled(token, Style::default().fg(INK)),
+        Span::raw(" "),
+        Span::styled(cost, Style::default().fg(GREEN)),
+        Span::raw(" ".repeat(tail)),
+    ])
+}
+
+fn draw_monthly_ranking(frame: &mut Frame, area: Rect, models: &[ModelUsage]) {
+    if area.width < 20 || area.height < 2 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            truncate(" 本月模型 · Token TOP 10", area.width as usize),
+            Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+        )),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    let body = Rect::new(
+        area.x,
+        area.y.saturating_add(1),
+        area.width,
+        area.height.saturating_sub(1),
+    );
+    let columns = Layout::horizontal([
+        Constraint::Percentage(50),
+        Constraint::Length(MONTH_RANKING_GAP),
+        Constraint::Percentage(50),
+    ])
+    .split(body);
+    for (column, start) in [(columns[0], 0usize), (columns[2], 5usize)] {
+        if column.width == 0 {
+            continue;
+        }
+        let rows = column.height.min(5);
+        for row in 0..rows {
+            let index = start + row as usize;
+            let line = models
+                .get(index)
+                .map(|model| ranking_line(model, index + 1, column.width as usize))
+                .unwrap_or_else(|| Line::styled("—", Style::default().fg(MUTED)));
+            frame.render_widget(
+                Paragraph::new(line),
+                Rect::new(column.x, column.y + row, column.width, 1),
+            );
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Series<'a> {
     Tokens(&'a [u64]),
@@ -341,8 +432,20 @@ pub(super) fn draw_charts(frame: &mut Frame, areas: &[Rect], usage: &UsageStats,
     let through_day = chrono::DateTime::from_timestamp(now, 0)
         .map(|time| chrono::Datelike::day(&time.with_timezone(&chrono::Local)) as usize)
         .unwrap_or(0);
-    for (chart, area) in charts.iter().zip(areas) {
-        if area.height >= MIN_CHART_HEIGHT {
+    for (index, (chart, area)) in charts.iter().zip(areas).enumerate() {
+        if area.height < MIN_CHART_HEIGHT {
+            continue;
+        }
+        if index == 2 && area.width >= MONTH_RANKING_MIN_WIDTH {
+            let split = Layout::horizontal([
+                Constraint::Percentage(52),
+                Constraint::Length(MONTH_RANKING_GAP),
+                Constraint::Percentage(48),
+            ])
+            .split(*area);
+            draw_stem_chart(frame, split[0], chart, through_day);
+            draw_monthly_ranking(frame, split[2], &usage.models);
+        } else {
             draw_stem_chart(frame, *area, chart, through_day);
         }
     }
