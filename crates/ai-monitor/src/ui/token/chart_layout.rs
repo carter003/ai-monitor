@@ -58,8 +58,7 @@ impl TimeAxis {
         if self.width == 0 || buckets_per_unit == 0 {
             return 0;
         }
-        ((2 * index + 1) * self.pitch / (2 * buckets_per_unit * self.step))
-            .min(self.width - 1)
+        ((2 * index + 1) * self.pitch / (2 * buckets_per_unit * self.step)).min(self.width - 1)
     }
 }
 
@@ -145,8 +144,18 @@ fn ranking_table(models: &[ModelUsage], width: usize) -> Vec<Line<'static>> {
         .iter()
         .map(|model| compact(model.total_tokens()))
         .collect();
-    let cost_width = costs.iter().map(|text| columns(text)).max().unwrap_or(0).max(4);
-    let token_width = tokens.iter().map(|text| columns(text)).max().unwrap_or(0).max(5);
+    let cost_width = costs
+        .iter()
+        .map(|text| columns(text))
+        .max()
+        .unwrap_or(0)
+        .max(4);
+    let token_width = tokens
+        .iter()
+        .map(|text| columns(text))
+        .max()
+        .unwrap_or(0)
+        .max(5);
     // Two outer cells and at least one cell in each of the three gaps.
     let fixed = 3 + cost_width + token_width + 2 + 3;
     if width < fixed + columns("模型") {
@@ -155,10 +164,15 @@ fn ranking_table(models: &[ModelUsage], width: usize) -> Vec<Line<'static>> {
             Style::default().fg(MUTED),
         )];
     }
-    let widths = [3, (width - fixed).min(MONTH_MODEL_MAX_BYTES), cost_width, token_width];
+    let widths = [
+        3,
+        (width - fixed).min(MONTH_MODEL_MAX_BYTES),
+        cost_width,
+        token_width,
+    ];
     let free = width - 2 - widths.iter().sum::<usize>();
     let gaps = [
-        free / 3 + usize::from(free % 3 > 0),
+        free / 3 + usize::from(!free.is_multiple_of(3)),
         free / 3 + usize::from(free % 3 > 1),
         free / 3,
     ];
@@ -179,12 +193,17 @@ fn ranking_table(models: &[ModelUsage], width: usize) -> Vec<Line<'static>> {
         spans.push(Span::raw(" "));
         Line::from(spans)
     };
-    let mut result = vec![row(["#", "模型", "金额", "Token"].map(|s| (s.into(), MUTED)))];
+    let mut result = vec![row(
+        ["#", "模型", "金额", "Token"].map(|s| (s.into(), MUTED))
+    )];
     for (index, model) in taken.iter().enumerate() {
         result.push(row([
             (format!("{}.", index + 1), MUTED),
             (model_name(&model.model, widths[1]), CYAN),
-            (costs[index].clone(), if model.cost.is_some() { GREEN } else { MUTED }),
+            (
+                costs[index].clone(),
+                if model.cost.is_some() { GREEN } else { MUTED },
+            ),
             (tokens[index].clone(), INK),
         ]));
     }
