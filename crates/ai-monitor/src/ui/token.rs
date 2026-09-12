@@ -236,7 +236,11 @@ fn model_table(models: &[ModelUsage], width: usize, limit: usize) -> Vec<Line<'s
                 spans.push(Span::raw(" "));
             }
             spans.push(Span::styled(
-                format!("{}{}", " ".repeat(cell_width.saturating_sub(columns(&text))), text),
+                format!(
+                    "{}{}",
+                    " ".repeat(cell_width.saturating_sub(columns(&text))),
+                    text
+                ),
                 Style::default().fg(color),
             ));
         }
@@ -535,7 +539,11 @@ fn draw_stem_chart(frame: &mut Frame, area: Rect, chart: &Chart<'_>, through_day
     for (offset, label) in axis {
         let y = area.y + 1 + offset.min(plot_rows);
         let mark = if offset == plot_rows { '└' } else { '┤' };
-        let text = format!(" {:>width$} {mark}", label, width = origin.saturating_sub(3));
+        let text = format!(
+            " {:>width$} {mark}",
+            label,
+            width = origin.saturating_sub(3)
+        );
         frame.render_widget(
             Paragraph::new(Span::styled(text, Style::default().fg(TRACK))),
             Rect::new(area.x, y, origin as u16, 1),
@@ -552,13 +560,7 @@ fn draw_stem_chart(frame: &mut Frame, area: Rect, chart: &Chart<'_>, through_day
         Rect::new(plot_x, baseline_y, plot_width, 1),
     );
 
-    let heights = stem_heights(
-        chart,
-        &values,
-        max,
-        plot_width as usize,
-        plot_rows as usize,
-    );
+    let heights = stem_heights(chart, &values, max, plot_width as usize, plot_rows as usize);
     let stem_style = Style::default().fg(LINE_COLOR).bg(Color::Reset);
     for (column, height) in heights.into_iter().enumerate() {
         if height == 0 {
