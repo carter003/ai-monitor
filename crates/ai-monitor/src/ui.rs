@@ -1,6 +1,6 @@
 use crate::{
     model::{SourceState, UsageStats, countdown},
-    system::{SystemStats, gib},
+    system::SystemStats,
 };
 use ratatui::{
     Frame,
@@ -8,14 +8,16 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, Gauge, Paragraph, Scrollbar, ScrollbarOrientation,
-        ScrollbarState, Sparkline,
+        Block, BorderType, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
     },
 };
 
+mod resources;
 #[cfg(test)]
 mod tests;
 mod token;
+
+use resources::draw_system;
 
 const CYAN: Color = Color::Rgb(11, 93, 107);
 const MUTED: Color = Color::Rgb(74, 84, 95);
@@ -24,7 +26,6 @@ const AMBER: Color = Color::Rgb(124, 67, 0);
 const RED: Color = Color::Rgb(163, 22, 22);
 const TRACK: Color = Color::Rgb(156, 167, 179);
 const INK: Color = Color::Rgb(17, 24, 39);
-const LIGHT_INK: Color = Color::Rgb(245, 248, 250);
 
 #[derive(Default)]
 pub struct View {
@@ -95,17 +96,14 @@ pub fn draw(
     let parts = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
     let body = parts[0];
 
-    // The resource/quota sidebar is unchanged; only the local token panel gets
-    // a content-driven layout. Each list still shares the page's scroll offset.
+    // Keep sidebar widths and the local token layout independent of the
+    // resource panel's responsive core grid. Lists retain their shared scroll.
     let columns = Layout::horizontal([
         Constraint::Length(sidebar_width(area.width)),
         Constraint::Min(0),
     ])
     .split(body);
-    let desired_system_height = (system.cores.len() as u16)
-        .saturating_add(8)
-        .max(body.height / 3);
-    let system_height = desired_system_height.min(body.height.saturating_sub(8));
+    let system_height = resources::height(body.height, columns[0].width, system.cores.len());
     let sidebar =
         Layout::vertical([Constraint::Length(system_height), Constraint::Min(0)]).split(columns[0]);
     draw_system(frame, sidebar[0], system);
@@ -311,244 +309,6 @@ fn render_panel_lines(
             &mut bar,
         );
     }
-}
-
-fn draw_system(frame: &mut Frame, area: Rect, stats: &SystemStats) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(" 系统资源 · 已用 ")
-        .title_style(Style::default().fg(CYAN).add_modifier(Modifier::BOLD))
-        .border_style(Style::default().fg(MUTED));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.height == 0 {
-        return;
-    }
-    let rows = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(0),
-    ])
-    .split(inner);
-    metric(
-        frame,
-        rows[0],
-        "CPU",
-        stats.cpu.map(|n| n / 100.).unwrap_or(0.),
-        stats
-            .cpu
-            .map(|n| format!("{n:.1}%"))
-            .unwrap_or_else(|| "采样中".into()),
-        GREEN,
-    );
-    metric(
-        frame,
-        rows[1],
-        "MEM",
-        ratio(stats.memory_used, stats.memory_total),
-        format!(
-            "{:.1}/{:.1} GiB",
-            gib(stats.memory_used),
-            gib(stats.memory_total)
-        ),
-        CYAN,
-    );
-    metric(
-        frame,
-        rows[2],
-        "SWP",
-        ratio(stats.swap_used, stats.swap_total),
-        if stats.swap_total == 0 {
-            "未启用".into()
-        } else {
-            format!(
-                "{:.1}/{:.1} GiB",
-                gib(stats.swap_used),
-                gib(stats.swap_total)
-            )
-        },
-        AMBER,
-    );
-    io_metric(
-        frame,
-        rows[3],
-        "NET",
-        "↓",
-        stats.network_rx_per_sec,
-        "↑",
-        stats.network_tx_per_sec,
-        CYAN,
-    );
-    io_metric(
-        frame,
-        rows[4],
-        "DSK",
-        "R",
-        stats.disk_read_per_sec,
-        "W",
-        stats.disk_write_per_sec,
-        AMBER,
-    );
-    if rows[5].height > 0 {
-        let line = stats
-            .error
-            .clone()
-            .unwrap_or_else(|| format!(" Load {}", stats.load));
-        frame.render_widget(
-            Paragraph::new(line).style(Style::default().fg(if stats.error.is_some() {
-                AMBER
-            } else {
-                MUTED
-            })),
-            rows[5],
-        );
-    }
-    if rows[6].height > 0 {
-        draw_cpu_history(frame, rows[6], stats);
-    }
-}
-
-fn draw_cpu_history(frame: &mut Frame, area: Rect, stats: &SystemStats) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let show_axis = !stats.cores.is_empty() && area.width >= 20;
-    let (axis, graph) = if show_axis {
-        let axis_width = if area.width >= 34 { 12 } else { 9 };
-        let cols =
-            Layout::horizontal([Constraint::Length(axis_width), Constraint::Min(0)]).split(area);
-        (Some(cols[0]), cols[1])
-    } else {
-        (None, area)
-    };
-
-    if let Some(axis) = axis {
-        let symbols = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-        let lines = stats
-            .cores
-            .iter()
-            .take(axis.height as usize)
-            .enumerate()
-            .map(|(index, value)| {
-                let symbol = symbols[((value / 100. * 7.).round().clamp(0., 7.)) as usize];
-                let color = if *value > 85. { AMBER } else { GREEN };
-                let label = if axis.width >= 11 {
-                    format!("CPU{:02} {value:>3.0}% ", index + 1)
-                } else {
-                    format!("{:02} {value:>3.0}% ", index + 1)
-                };
-                Line::from(vec![
-                    Span::styled(label, Style::default().fg(MUTED)),
-                    Span::styled(symbol.to_string(), Style::default().fg(color)),
-                ])
-            })
-            .collect::<Vec<_>>();
-        frame.render_widget(Paragraph::new(lines), axis);
-    }
-
-    if graph.width > 0 {
-        let history: Vec<u64> = stats
-            .cpu_history
-            .iter()
-            .rev()
-            .take(graph.width as usize)
-            .rev()
-            .copied()
-            .collect();
-        frame.render_widget(
-            Sparkline::default()
-                .data(&history)
-                .max(100)
-                .style(Style::default().fg(CYAN)),
-            graph,
-        );
-    }
-}
-
-fn ratio(used: u64, total: u64) -> f64 {
-    if total == 0 {
-        0.
-    } else {
-        (used as f64 / total as f64).clamp(0., 1.)
-    }
-}
-
-fn metric(frame: &mut Frame, area: Rect, title: &str, ratio: f64, label: String, color: Color) {
-    if area.height == 0 {
-        return;
-    }
-    let cols = Layout::horizontal([Constraint::Length(5), Constraint::Min(0)]).split(area);
-    frame.render_widget(
-        Paragraph::new(format!(" {title}")).style(Style::default().fg(MUTED)),
-        cols[0],
-    );
-    let label = Span::styled(label, Style::default().add_modifier(Modifier::BOLD));
-    frame.render_widget(
-        Gauge::default()
-            .ratio(ratio.clamp(0., 1.))
-            .label(label)
-            .gauge_style(Style::default().fg(color).bg(TRACK)),
-        cols[1],
-    );
-    restyle_gauge_label(frame.buffer_mut(), cols[1], color);
-}
-
-fn restyle_gauge_label(buf: &mut ratatui::buffer::Buffer, area: Rect, fill: Color) {
-    if area.height == 0 {
-        return;
-    }
-    let row = area.top() + area.height / 2;
-    for x in area.left()..area.right() {
-        let cell = &mut buf[(x, row)];
-        if cell.symbol() == "█" || cell.symbol().trim().is_empty() {
-            continue;
-        }
-        let over_fill = cell.bg == fill;
-        cell.fg = if over_fill { LIGHT_INK } else { INK };
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn io_metric(
-    frame: &mut Frame,
-    area: Rect,
-    title: &str,
-    first_label: &str,
-    first: Option<f64>,
-    second_label: &str,
-    second: Option<f64>,
-    color: Color,
-) {
-    let value = format!(
-        " {first_label} {}  {second_label} {}",
-        first.map(throughput).unwrap_or_else(|| "---K/s".into()),
-        second.map(throughput).unwrap_or_else(|| "---K/s".into())
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(format!(" {title}"), Style::default().fg(MUTED)),
-            Span::styled(value, Style::default().fg(color)),
-        ])),
-        area,
-    );
-}
-
-fn throughput(bytes_per_sec: f64) -> String {
-    const KIB: f64 = 1024.0;
-    let mut value = bytes_per_sec.max(0.0) / KIB;
-    let units = ['K', 'M', 'G', 'T'];
-    let mut unit = 0;
-    while value > 999.0 && unit < units.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    let integer = value.round().clamp(0.0, 999.0) as u16;
-    format!("{integer:03}{}/s", units[unit])
 }
 
 fn quota_lines(states: &[SourceState], width: u16, now: i64, gaps: bool) -> Vec<Line<'static>> {
