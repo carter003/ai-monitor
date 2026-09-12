@@ -171,8 +171,10 @@ pub struct Bucketed {
 /// Everything the token page needs, refreshed on its own slow cadence.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UsageStats {
-    /// At most six models, already ordered by total tokens descending.
+    /// Rolling 24-hour top six, already ordered by total tokens descending.
     pub models: Vec<ModelUsage>,
+    /// Current-month top ten, already ordered by total tokens descending.
+    pub month_models: Vec<ModelUsage>,
     /// Today, cut into quarter hours: 96 buckets, index 0 is 00:00 local.
     pub hours: Bucketed,
     /// This month, cut into six-hour blocks: four buckets per day, index 0 is
