@@ -207,7 +207,7 @@ fn token_rects(inner: Rect, usage: &UsageStats) -> ([Rect; 4], bool) {
     let remaining = inner.height.saturating_sub(content_height);
     let chart_count = if usage.error.is_none()
         && (!usage.hours.buckets.is_empty() || !usage.month.buckets.is_empty())
-    && inner.width >= token::MIN_CHART_WIDTH
+        && inner.width >= token::MIN_CHART_WIDTH
     {
         (remaining / token::MIN_CHART_HEIGHT).min(3)
     } else {
