@@ -101,7 +101,8 @@ fn card(
         metric(&compact(total.tokens), "TOKENS", width, value_width, INK),
         metric(&money(total.cost), "COST", width, value_width, CYAN),
         blank,
-        Line::styled(format!("╰{}╯", "─".repeat(width - 2)), border),
+        // The grid combines spans, so edge styles must live on the span.
+        Line::from(Span::styled(format!("╰{}╯", "─".repeat(width - 2)), border)),
     ]
 }
 

@@ -185,8 +185,12 @@ fn terminal_cells_keep_the_rectangle_background_and_numeric_hierarchy() {
         let buffer = terminal.backend().buffer();
         for y in 0..height + 4 {
             for x in 0..width + 6 {
+                let cell = &buffer[(x, y)];
                 if x < area.x || x >= area.right() || y < area.y || y >= area.bottom() {
-                    assert_eq!(buffer[(x, y)].symbol(), "!");
+                    assert_eq!(cell.symbol(), "!");
+                } else if matches!(cell.symbol(), "╭" | "╮" | "╰" | "╯" | "─" | "│") {
+                    assert_eq!(cell.fg, BORDER, "edge at {x},{y}, width={width}");
+                    assert_eq!(cell.bg, BACKGROUND);
                 }
             }
         }
