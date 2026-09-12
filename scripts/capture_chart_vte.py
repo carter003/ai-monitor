@@ -5,7 +5,8 @@ Run under Xvfb, e.g.:
   xvfb-run -a /usr/bin/python3 scripts/capture_chart_vte.py /tmp/chart-previews
 Requires python3-gi, gir1.2-vte-2.91, xvfb and a CJK monospace font.
 Inputs come from export_real_chart_terminal_fixtures (CHART_PREVIEW_DIR) or
-export_real_model_table_terminal_fixtures (MODEL_PREVIEW_DIR).
+export_real_model_table_terminal_fixtures (MODEL_PREVIEW_DIR), plus
+export_real_summary_terminal_fixtures (SUMMARY_PREVIEW_DIR).
 The synthetic fixtures never read real account credentials.
 """
 from pathlib import Path
@@ -26,14 +27,14 @@ def rgba(value):
 
 
 def capture(source):
-    match = re.fullmatch(r"(?:charts|models)-(\d+)x(\d+)-(equal|varied|sample)\.ansi", source.name)
+    match = re.fullmatch(r"(?:charts|models|summary|overview)-(\d+)x(\d+)-(equal|varied|sample)\.ansi", source.name)
     if not match:
         raise ValueError(f"Unexpected fixture name: {source.name}")
     columns, rows = int(match[1]), int(match[2])
     window = Gtk.Window()
     window.set_decorated(False)
     terminal = Vte.Terminal()
-    font_size = 16 if source.name.startswith("models-") else 11
+    font_size = 16 if source.name.startswith(("models-", "summary-")) else 11
     terminal.set_font(Pango.FontDescription(f"Noto Sans Mono CJK SC {font_size}"))
     terminal.set_color_background(rgba("#FAFAFA"))
     terminal.set_color_foreground(rgba("#111827"))

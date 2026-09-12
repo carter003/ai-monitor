@@ -15,6 +15,7 @@ mod chart_layout;
 use chart_layout::{TimeAxis, draw_monthly_ranking, monthly_areas, tick_positions};
 mod model_table;
 use model_table::model_table;
+mod summary;
 
 #[cfg(test)]
 mod tests;
@@ -29,7 +30,14 @@ pub(super) fn lines(usage: &UsageStats, width: u16, height: usize) -> Vec<Line<'
     if width == 0 || height == 0 {
         return vec![];
     }
-    let summary = summary_lines(usage, width as usize);
+    let cards = summary::lines(usage, width as usize);
+    // Keep every period readable before giving space to optional model rows.
+    // Short panes drop card decoration rather than clipping the new grid.
+    let summary = if cards.len() <= height {
+        cards
+    } else {
+        summary_lines(usage, width as usize)
+    };
     for limit in (0..=usage.models.len().min(6)).rev() {
         let mut result = summary.clone();
         if limit > 0 {
@@ -39,7 +47,7 @@ pub(super) fn lines(usage: &UsageStats, width: u16, height: usize) -> Vec<Line<'
                 Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
             ));
             result.extend(model_table(&usage.models, width as usize, limit));
-        } else if usage.models.is_empty() {
+        } else if usage.models.is_empty() && result.len() < height {
             result.push(Line::styled(
                 truncate(" 暂无用量记录", width as usize),
                 Style::default().fg(MUTED),
@@ -56,6 +64,7 @@ pub(super) fn lines(usage: &UsageStats, width: u16, height: usize) -> Vec<Line<'
         format!(" {}", money(total.cost)),
     ]
     .into_iter()
+    .take(height)
     .map(|text| {
         Line::styled(
             truncate(&text, width as usize),
@@ -65,6 +74,7 @@ pub(super) fn lines(usage: &UsageStats, width: u16, height: usize) -> Vec<Line<'
     .collect()
 }
 
+/// Borderless fallback for exceptionally short or narrow panes.
 fn summary_lines(usage: &UsageStats, width: usize) -> Vec<Line<'static>> {
     if width == 0 {
         return vec![];
