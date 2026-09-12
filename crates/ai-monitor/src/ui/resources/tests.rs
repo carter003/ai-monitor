@@ -216,7 +216,8 @@ fn history_peak_and_count_describe_the_visible_samples_only() {
     assert!(text.contains("峰值 3%"));
     assert!(!text.contains("99%"));
     assert!(text.contains("最近 88 次采样"));
-    assert_eq!(buffer[(45, 17)].symbol(), "▄");
+    assert!(text.contains("0–10%"));
+    assert_eq!(buffer[(45, 17)].symbol(), "█");
 }
 
 #[test]
@@ -229,7 +230,7 @@ fn startup_history_is_right_aligned() {
     assert_eq!(buffer[(2, 17)].symbol(), " ");
     assert_eq!(buffer[(43, 17)].symbol(), " ");
     for x in 44..46 {
-        assert_eq!(buffer[(x, 17)].symbol(), "▄");
+        assert_eq!(buffer[(x, 17)].symbol(), "█");
     }
 }
 
@@ -288,8 +289,16 @@ fn panel_height_is_bounded_and_reserves_quota_space() {
 
 #[test]
 fn history_dynamic_scale_adapts_to_peak() {
-    for (peak, expected_scale) in [(15, "0–25%"), (35, "0–50%"), (70, "0–80%"), (95, "0–100%")]
-    {
+    for (peak, expected_scale) in [
+        (5, "0–10%"),
+        (12, "0–20%"),
+        (22, "0–30%"),
+        (30, "0–40%"),
+        (42, "0–50%"),
+        (55, "0–65%"),
+        (70, "0–80%"),
+        (90, "0–100%"),
+    ] {
         let stats = SystemStats {
             cpu_history: std::iter::repeat_n(peak, 20).collect(),
             ..fixture()

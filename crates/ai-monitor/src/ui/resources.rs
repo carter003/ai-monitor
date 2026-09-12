@@ -321,9 +321,13 @@ fn history(frame: &mut Frame, area: Rect, stats: &SystemStats) {
     section(frame, row(area, 0), "CPU 趋势", &peak);
     let graph = slice(area, 0, 1, area.width, area.height - 2);
     let scale_max = match peak_val {
-        0..=20 => 25,
-        21..=45 => 50,
-        46..=75 => 80,
+        0..=8 => 10,
+        9..=16 => 20,
+        17..=25 => 30,
+        26..=35 => 40,
+        36..=45 => 50,
+        46..=60 => 65,
+        61..=75 => 80,
         _ => 100,
     };
     if samples.is_empty() {
