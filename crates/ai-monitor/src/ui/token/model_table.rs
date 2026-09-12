@@ -88,6 +88,11 @@ pub(super) fn model_table(models: &[ModelUsage], width: usize, limit: usize) -> 
     let taken = &models[..models.len().min(limit)];
     let padding = usize::from(width >= 6);
     let inner = width - 2 * padding;
+    // The ordinal is a separate slot, not part of the 25-character name.
+    // Only hide it in unusably tiny panes where no name would fit beside it.
+    let digits = taken.len().to_string().len();
+    let rank_width = if inner >= digits + 3 { digits } else { 0 };
+    let inner = inner - rank_width - usize::from(rank_width > 0);
     let mut slots: Vec<_> = [
         Column::Cost,
         Column::Total,
@@ -123,7 +128,9 @@ pub(super) fn model_table(models: &[ModelUsage], width: usize, limit: usize) -> 
     }
     // At extreme widths hide whole remaining numeric columns, never part of
     // an amount. Keep one header and one line per model at every nonzero width.
-    let name_min = columns("模型").min(inner);
+    // Even a tiny pane keeps a name fragment beside COST and total when they
+    // fit; the ordinal must never replace the model's only identifying text.
+    let name_min = 2.min(inner);
     while !slots.is_empty() && name_min + required(&slots) > inner {
         slots.pop();
     }
@@ -133,14 +140,26 @@ pub(super) fn model_table(models: &[ModelUsage], width: usize, limit: usize) -> 
     let remainder = free.checked_rem(slots.len()).unwrap_or(0);
     let header_style = Style::default().fg(MUTED).add_modifier(Modifier::BOLD);
 
-    let row = |model: Option<&ModelUsage>| {
+    let row = |entry: Option<(usize, &ModelUsage)>| {
+        let model = entry.map(|(_, model)| model);
         let name = model.map_or_else(
             || truncate("模型", name_width),
             |model| model_name(&model.model, name_width),
         );
         let used = columns(&name);
-        let mut spans = vec![
-            Span::raw(" ".repeat(padding)),
+        let mut spans = vec![Span::raw(" ".repeat(padding))];
+        if rank_width > 0 {
+            let rank = entry.map_or_else(|| "#".to_owned(), |(index, _)| (index + 1).to_string());
+            spans.push(Span::styled(
+                format!("{rank:>rank_width$} "),
+                if model.is_some() {
+                    Style::default().fg(MUTED)
+                } else {
+                    header_style
+                },
+            ));
+        }
+        spans.extend([
             Span::styled(
                 name,
                 if model.is_some() {
@@ -150,7 +169,7 @@ pub(super) fn model_table(models: &[ModelUsage], width: usize, limit: usize) -> 
                 },
             ),
             Span::raw(" ".repeat(name_width.saturating_sub(used))),
-        ];
+        ]);
         for (index, (column, cell_width)) in slots.iter().enumerate() {
             let (value, color) = model.map_or_else(
                 || (column.label().to_owned(), MUTED),
@@ -188,6 +207,6 @@ pub(super) fn model_table(models: &[ModelUsage], width: usize, limit: usize) -> 
     };
     let mut result = Vec::with_capacity(taken.len() + 1);
     result.push(row(None));
-    result.extend(taken.iter().map(|model| row(Some(model))));
+    result.extend(taken.iter().enumerate().map(|entry| row(Some(entry))));
     result
 }

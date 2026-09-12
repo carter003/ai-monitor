@@ -112,7 +112,7 @@ fn columns_follow_the_requested_order_and_input_keeps_exact_hit_semantics() {
     let models = sample_models();
     let rows = model_table(&models, 100, 6);
     let header = rows[0].to_string();
-    let positions: Vec<_> = ["模型", "COST", "合计", "IN(缓存)", "OUT", "THINK"]
+    let positions: Vec<_> = ["#", "模型", "COST", "合计", "IN(缓存)", "OUT", "THINK"]
         .into_iter()
         .map(|label| header.find(label).unwrap())
         .collect();
@@ -146,6 +146,54 @@ fn columns_follow_the_requested_order_and_input_keeps_exact_hit_semantics() {
 }
 
 #[test]
+fn ordinals_are_separate_aligned_and_do_not_consume_the_name_limit() {
+    let models = sample_models();
+    let rows = model_table(&models, 100, 6);
+    assert_eq!(rows.len(), 7);
+    assert!(rows[0].to_string().starts_with(" # 模型"));
+    for (index, (row, model)) in rows[1..].iter().zip(&models).enumerate() {
+        let name = model_name(&model.model, NAME_MAX);
+        assert!(row.to_string().starts_with(&format!(" {} {name}", index + 1)));
+    }
+    let longest = model_name(&models[4].model, NAME_MAX);
+    assert_eq!(longest.chars().count(), 25);
+    assert!(rows[5].spans.iter().any(|span| span.content == longest));
+    for width in 25..=240 {
+        let rows = model_table(&models, width, 6);
+        assert_eq!(rows.len(), 7);
+        for (index, row) in rows[1..].iter().enumerate() {
+            let rendered = row.to_string();
+            assert_eq!(
+                rendered.split_whitespace().next(),
+                Some((index + 1).to_string().as_str())
+            );
+            assert!(row.width() <= width);
+        }
+    }
+}
+
+#[test]
+fn multi_digit_ordinals_align_without_reordering_or_numbering_hidden_models() {
+    let models: Vec<_> = (1..=12)
+        .map(|index| ModelUsage {
+            model: format!("provider/model-{index:02}"),
+            input_total: 1_000,
+            ..ModelUsage::default()
+        })
+        .collect();
+    let before = models.clone();
+    let rows = model_table(&models, 100, 10);
+    assert_eq!(rows.len(), 11);
+    assert!(rows[0].to_string().starts_with("  # 模型"));
+    for (index, row) in rows[1..].iter().enumerate() {
+        let rank = index + 1;
+        assert!(row.to_string().starts_with(&format!(" {rank:>2} model-{rank:02}")));
+    }
+    assert!(!text(&rows).contains("model-11"));
+    assert_eq!(models, before);
+}
+
+#[test]
 fn zero_unknown_and_unpriced_values_do_not_turn_into_fake_zero_costs_or_rates() {
     let mut models = vec![ModelUsage {
         model: "vendor/zero".into(),
@@ -164,7 +212,7 @@ fn narrowing_hides_details_before_squeezing_names_and_never_changes_row_count() 
     let models = sample_models();
     let full = model_table(&models, 100, 6);
     assert!(full[0].to_string().contains("THINK"));
-    let compact = model_table(&models, 64, 6);
+    let compact = model_table(&models, 66, 6);
     let header = compact[0].to_string();
     assert!(!header.contains("THINK") && !header.contains("缓存"));
     assert!(header.contains("IN") && header.contains("OUT"));
@@ -282,7 +330,7 @@ fn export_real_model_table_terminal_fixtures() {
     fs::create_dir_all(&output).unwrap();
     // Synthetic fixtures resembling the requested screenshot, not account data.
     let models = sample_models();
-    for width in [100u16, 81, 64, 46] {
+    for width in [100u16, 83, 66, 46] {
         let height = 8;
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal

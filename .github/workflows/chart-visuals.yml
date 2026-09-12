@@ -36,6 +36,10 @@ jobs:
         env:
           CHART_PREVIEW_DIR: /tmp/chart-previews
         run: cargo test -p ai-monitor --locked export_real_chart_terminal_fixtures -- --nocapture
+      - name: Export real model table fixtures
+        env:
+          MODEL_PREVIEW_DIR: /tmp/chart-previews
+        run: cargo test -p ai-monitor --locked export_real_model_table_terminal_fixtures -- --nocapture
       - name: Install terminal renderer
         run: |
           sudo apt-get update -qq
