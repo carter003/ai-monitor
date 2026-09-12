@@ -154,6 +154,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let config = Config::load()?;
     install_signal_handlers();
+    // The listener and workers live in this process, so even watchdog exit or
+    // SIGKILL cannot leave a web child behind. Bind before changing the terminal
+    // so a port conflict is reported plainly and does not start a partial UI.
+    let web_server = herdr_usage::web::server::Server::start(
+        config.usage_db.clone(),
+        config.web_port,
+    )
+    .map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "无法启动本地网页（127.0.0.1:{}）：{error}；请关闭占用端口的服务，或配置 web_port",
+                config.web_port
+            ),
+        )
+    })?;
+    println!("本地网页：http://{}", web_server.address());
     // Must start after the terminal is known-good; it runs for the whole
     // session and exits the UI when the pty hangs up (see `watch_terminal`).
     let hangup_watch = watch_terminal();
@@ -186,7 +203,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut sampler = SystemSampler::new();
     sampler.sample();
     let mut usage = UsageStats::default();
-    let mut view = View::default();
+    let mut view = View {
+        web_address: Some(web_server.address()),
+        ..View::default()
+    };
     let mut tick = Instant::now();
     let mut dirty = true;
     while !SHUTDOWN.load(Ordering::Relaxed) {

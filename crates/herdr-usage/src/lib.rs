@@ -5,6 +5,7 @@ pub mod db;
 pub mod event;
 pub mod sources;
 pub mod tail;
+pub mod web;
 
 use std::path::PathBuf;
 

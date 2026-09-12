@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>每日查询 · Token 用量统计</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body>
+<header><div><span class="eyebrow">AI MONITOR / LOCAL</span><h1>每日用量查询</h1><p>按日期和模型查询 Token 消耗与费用。</p></div><div class="status"><span class="dot"></span>本地数据 <button id="refresh" type="button">刷新</button><small id="updated">正在连接…</small></div></header>
+<nav aria-label="页面"><a href="/">总览</a><a href="/query" aria-current="page">每日查询</a></nav>
+<main>
+<div id="error" role="alert" hidden></div>
+<p id="context" class="muted"></p>
+<section class="panel filters" aria-label="查询条件">
+<form id="query"><label>开始日期<input type="date" id="start" required></label><label>结束日期<input type="date" id="end" required></label><label class="model-filter">模型<select id="model"><option value="all">全部模型</option></select></label><button class="primary" type="submit">查询</button></form>
+<div class="quick"><span>快捷范围</span><button data-range="today">今天</button><button data-range="7">近 7 天</button><button data-range="30">近 30 天</button><button data-range="month">本月</button><button data-range="all">全部历史</button></div>
+</section>
+<section aria-label="查询结果"><div class="section-title"><h2 id="range-title">所选范围</h2><span id="range-label" class="muted"></span></div><div id="range-cards" class="cards"></div></section>
+<section class="panel"><div class="section-title"><div><h2>每日趋势</h2><p class="muted">点击某一天，查看当天的模型明细</p></div><label>统计指标<select id="metric"><option value="tokens">Token 数</option><option value="cost_usd">金额（USD）</option></select></label></div><div id="chart" class="chart"></div></section>
+<section id="daily-panel" class="panel"><div class="section-title"><h2>每日用量</h2><label>展示方式<select id="group"><option value="day">每天合计</option><option value="model">每天按模型</option></select></label></div><div id="daily-table" class="table-wrap"></div><div class="pager"><button id="prev">上一页</button><span id="page-info"></span><button id="next">下一页</button></div></section>
+<footer>1 B = 10 亿 Token，1 M = 100 万 Token。Token = 输入 + 输出；缓存命中包含在输入中，推理包含在输出中，不重复累加。金额为已记录的美元估算费用，未计价记录单独标注。模型别名合并展示，未识别及忽略计价的模型仍计入用量。</footer>
+</main></body></html>

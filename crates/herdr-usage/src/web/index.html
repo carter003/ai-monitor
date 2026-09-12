@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Token 用量统计</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body>
+<header><div><span class="eyebrow">AI MONITOR / LOCAL</span><h1>Token 用量总览</h1><p>查看全部模型的总体用量、费用与消耗趋势。</p></div><div class="status"><span class="dot"></span>本地数据 <button id="refresh" type="button">刷新</button><small id="updated">正在连接…</small></div></header>
+<nav aria-label="页面"><a href="/" aria-current="page">总览</a><a href="/query">每日查询</a></nav>
+<main>
+<div id="error" role="alert" hidden></div>
+<p id="context" class="muted"></p>
+<section id="overview" aria-label="总览">
+<div id="overview-cards" class="cards"></div>
+</section>
+<section class="panel"><div class="section-title"><div><h2>近 30 天趋势</h2><p class="muted">点击某一天，查看当天的模型明细</p></div><label>统计指标<select id="metric"><option value="tokens">Token 数</option><option value="cost_usd">金额（USD）</option></select></label></div><div id="chart" class="chart"></div></section>
+<section id="ranking-panel" class="panel"><div class="section-title"><h2>模型用量排行</h2><span class="muted">全部历史 · 按 Token 排序 · 点击模型查询</span></div><div id="ranking" class="table-wrap"></div></section>
+<footer>1 B = 10 亿 Token，1 M = 100 万 Token。Token = 输入 + 输出；缓存命中包含在输入中，推理包含在输出中，不重复累加。金额为已记录的美元估算费用，未计价记录单独标注。模型别名合并展示，未识别及忽略计价的模型仍计入用量。</footer>
+</main></body></html>

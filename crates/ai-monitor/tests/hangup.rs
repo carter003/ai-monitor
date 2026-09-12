@@ -15,6 +15,8 @@
 
 use std::{
     fs,
+    io::{Read, Write},
+    net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::Command,
     thread,
@@ -75,10 +77,15 @@ fn wait_gone(pid: i32, binary: &Path) -> Result<Duration, ()> {
 /// An isolated config so no test reads real credentials or reaches the network.
 fn isolated_config(dir: &Path) -> PathBuf {
     let config = dir.join("config.toml");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    fs::write(dir.join("web-port"), port.to_string()).unwrap();
+    drop(listener);
     fs::write(
         &config,
         format!(
-            "codex_home = \"{}\"\n\
+            "web_port = {port}\n\
+             codex_home = \"{}\"\n\
              agy_home = \"{}\"\n\
              agy2_home = \"{}\"\n\
              opencode_home = \"{}\"\n\
@@ -95,6 +102,8 @@ fn isolated_config(dir: &Path) -> PathBuf {
         ),
     )
     .expect("write isolated config");
+    let database = herdr_usage::db::open(&dir.join("usage.db")).unwrap();
+    database.execute("INSERT INTO usage_event VALUES ('codex','test','test-model','event',100,0,0,20,0,1.25,0)", []).unwrap();
     config
 }
 
@@ -137,6 +146,26 @@ fn start_ui(socket: &str, config: &Path, home: &Path, binary: &Path) -> i32 {
     assert!(
         ui_alive(pid, binary),
         "the UI was not running as {binary:?} when the test was ready"
+    );
+    let address = web_address(home);
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    stream
+        .write_all(b"GET /api/usage HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "web not ready: {response}"
+    );
+    let (_, body) = response.split_once("\r\n\r\n").unwrap();
+    let report: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(
+        report["overview"]["all"]["tokens"], 120,
+        "web must use the TUI config database"
     );
     pid
 }
@@ -189,6 +218,7 @@ fn killing_the_terminal_ends_the_ui() {
             panic!("the UI survived the pty hangup and is still running as pid {pid}");
         }
     }
+    assert_web_closed(dir.path());
     teardown(socket);
 }
 
@@ -215,5 +245,69 @@ fn pressing_q_ends_the_ui() {
             panic!("the UI ignored `q` and is still running as pid {pid}");
         }
     }
+    assert_web_closed(dir.path());
     teardown(socket);
+}
+
+fn web_address(dir: &Path) -> SocketAddr {
+    format!(
+        "127.0.0.1:{}",
+        fs::read_to_string(dir.join("web-port")).unwrap()
+    )
+    .parse()
+    .unwrap()
+}
+
+fn assert_web_closed(dir: &Path) {
+    let address = web_address(dir);
+    // SIGKILL can remove /proc/<pid>/exe before the last worker has completed
+    // kernel socket teardown. Check the resource itself within a bounded wait.
+    let started = Instant::now();
+    while TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() {
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "web survived UI exit"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    let _rebound = TcpListener::bind(address).expect("web listener must release its port");
+}
+
+#[test]
+fn signals_and_quit_keys_close_the_web_even_with_an_unfinished_request() {
+    if !tmux_or_skip() {
+        return;
+    }
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_ai-monitor"));
+    for action in ["C-c", "Escape", "SIGTERM", "SIGHUP", "SIGKILL"] {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = format!("ai-monitor-test-web-{action}");
+        let pid = start_ui(&socket, &isolated_config(dir.path()), dir.path(), &binary);
+        let mut unfinished = TcpStream::connect(web_address(dir.path())).unwrap();
+        unfinished.write_all(b"GET / HTTP/1.1\r\nHost:").unwrap();
+        match action {
+            "C-c" | "Escape" => {
+                tmux(&socket, &["send-keys", "-t", "ui", action]);
+            }
+            signal => {
+                let number = match signal {
+                    "SIGTERM" => libc::SIGTERM,
+                    "SIGHUP" => libc::SIGHUP,
+                    _ => libc::SIGKILL,
+                };
+                // SAFETY: pid is the test's live UI process, verified by start_ui.
+                unsafe {
+                    libc::kill(pid, number);
+                }
+            }
+        }
+        if wait_gone(pid, &binary).is_err() {
+            kill_ui(pid);
+            teardown(&socket);
+            panic!("UI survived {action}");
+        }
+        assert_web_closed(dir.path());
+        println!("{action}: UI exited and web port released");
+        teardown(&socket);
+    }
 }

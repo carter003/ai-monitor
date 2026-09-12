@@ -5,7 +5,7 @@ use std::{
 };
 /// 配置文件里出现的键。声明为常量而不是结构体字段：解析器是手写的平面
 /// reader（见 `parse_config`），这个表既驱动解析也充当未知键守卫。
-const KEYS: [&str; 9] = [
+const KEYS: [&str; 10] = [
     "refresh_seconds",
     "codex_home",
     "agy_home",
@@ -15,11 +15,13 @@ const KEYS: [&str; 9] = [
     "openrouter_key_file",
     "go2_key_file",
     "usage_db",
+    "web_port",
 ];
 
 #[derive(Default)]
 struct FileConfig {
     refresh_seconds: Option<u64>,
+    web_port: Option<u16>,
     codex_home: Option<String>,
     agy_home: Option<String>,
     agy2_home: Option<String>,
@@ -53,6 +55,13 @@ fn parse_config(text: &str) -> Result<FileConfig, String> {
             .unwrap_or(value);
         let is_quoted = unquoted.len() != value.len();
         match key {
+            "web_port" => {
+                config.web_port = Some(
+                    unquoted
+                        .parse()
+                        .map_err(|_| "web_port 必须在 0 到 65535 之间")?,
+                );
+            }
             "refresh_seconds" => {
                 config.refresh_seconds =
                     Some(unquoted.parse().map_err(|_| {
@@ -90,6 +99,8 @@ pub struct Config {
     pub go2_key: PathBuf,
     /// sqlite database written by the herdr-usage collector. Read-only here.
     pub usage_db: PathBuf,
+    /// Loopback HTTP port; zero asks the OS to choose a free port.
+    pub web_port: u16,
 }
 
 impl Config {
@@ -118,6 +129,7 @@ impl Config {
         }
         Ok(Self {
             refresh: Duration::from_secs(seconds),
+            web_port: file.web_port.unwrap_or(19999),
             codex: expand(
                 file.codex_home,
                 env::var_os("CODEX_HOME")
@@ -178,6 +190,7 @@ mod tests {
     fn every_documented_key_parses_together() {
         let text = r#"
 refresh_seconds = 120
+web_port = 8788
 codex_home = "/tmp/codex"
 agy_home = "/tmp/agy"
 agy2_home = "/tmp/agy2"
@@ -189,6 +202,7 @@ usage_db = "/tmp/usage.db"
 "#;
         let parsed = parse_config(text).expect("all keys declared");
         assert_eq!(parsed.refresh_seconds, Some(120));
+        assert_eq!(parsed.web_port, Some(8788));
         assert_eq!(parsed.usage_db.as_deref(), Some("/tmp/usage.db"));
     }
 
@@ -221,5 +235,9 @@ usage_db = "/tmp/usage.db"
     #[test]
     fn bad_integer_is_rejected() {
         assert!(parse_config("refresh_seconds = \"fast\"").is_err());
+        for port in ["-1", "65536", "abc"] {
+            assert!(parse_config(&format!("web_port = {port}")).is_err());
+        }
+        assert_eq!(parse_config("web_port = 0").unwrap().web_port, Some(0));
     }
 }

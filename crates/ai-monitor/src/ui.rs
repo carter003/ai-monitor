@@ -28,6 +28,8 @@ const LIGHT_INK: Color = Color::Rgb(245, 248, 250);
 
 #[derive(Default)]
 pub struct View {
+    /// Actual address of the web listener owned by this process.
+    pub web_address: Option<std::net::SocketAddr>,
     pub scroll: usize,
     pub max_scroll: usize,
     pub page_size: usize,
@@ -131,7 +133,12 @@ pub fn draw(
         token::draw_charts(frame, &token_parts[1..], usage, now);
     }
 
-    let room = (area.width as usize).saturating_sub(version.len() + 1);
+    let web_url = view.web_address.map(|address| format!("http://{address}"));
+    // Preserve usable quit/refresh hints on narrow terminals; never truncate
+    // the URL into a misleading address.
+    let web_url = web_url.filter(|url| area.width as usize >= url.len() + version.len() + 16);
+    let web_width = web_url.as_ref().map_or(0, |url| url.len() + 2);
+    let room = (area.width as usize).saturating_sub(version.len() + web_width + 1);
     let hints = FooterAction::row(room, view.max_scroll > 0);
     let mut footer = String::from(" ");
     let mut hint_spans: Vec<Span<'static>> = vec![Span::raw(" ")];
@@ -160,8 +167,12 @@ pub fn draw(
     footer.push_str("q 退出");
     hint_spans.push(Span::styled("q", key));
     hint_spans.push(Span::styled(" 退出", muted));
-    let bar = Layout::horizontal([Constraint::Min(0), Constraint::Length(version.len() as u16)])
-        .split(parts[1]);
+    let bar = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(web_width as u16),
+        Constraint::Length(version.len() as u16),
+    ])
+    .split(parts[1]);
     view.footer_row = Some(parts[1].y);
     view.body = Some(Rect {
         x: area.x,
@@ -170,11 +181,14 @@ pub fn draw(
         height: parts[1].y.saturating_sub(area.y),
     });
     frame.render_widget(Paragraph::new(Line::from(hint_spans)), bar[0]);
+    if let Some(url) = web_url {
+        frame.render_widget(Paragraph::new(url).style(Style::default().fg(CYAN)), bar[1]);
+    }
     frame.render_widget(
         Paragraph::new(version)
             .style(Style::default().fg(MUTED))
             .right_aligned(),
-        bar[1],
+        bar[2],
     );
 }
 

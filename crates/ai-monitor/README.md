@@ -40,6 +40,12 @@ ai-monitor
 `97.47%`）。两栏的列表共用同一个滚动位置，窗格不够高时上下键同时翻动额度列表和 token 列表；
 三张柱状图固定在面板底部，不参与滚动。
 
+## 本地网页与退出
+
+运行 `ai-monitor` 时同步启动 http://127.0.0.1:19999 ，提供 Token 总览和独立每日查询页。网页使用终端的 `usage_db` 配置，在同一进程的工作线程内运行。界面底部版本号左侧显示实际网页地址（窄窗格空间不足时隐藏地址，保留操作提示）。
+
+按 `q` / Esc / Ctrl+C 或结束进程、关闭终端时，网页同步关闭；即使 `SIGKILL` 强制结束也不会留下网页孤儿进程。正常退出会关闭活动连接并回收线程。端口占用会在进入终端界面前明确报错，可配置 `web_port` 更换端口。
+
 ## 安装
 
 发行包或已经完成本机编译的项目中运行一次：
@@ -237,6 +243,8 @@ OpenRouter 专用 Key 可保存在 `~/.config/ai-monitor/openrouter.key`，文�
 
 ```toml
 refresh_seconds = 60
+web_port = 19999 # 本地网页端口；0 自动分配
+usage_db = "~/.local/share/herdr/usage.db"
 codex_home = "~/.codex"
 agy_home = "~/.gemini"
 agy2_home = "~/.gemini2"
@@ -256,7 +264,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-测试覆盖双账户隔离、自动续期及内存复用、令牌轮换、401 有界重试、登录撤销、Spark 多窗口、额度缺失／过期、Go 用量方向、余额计算、Grok protobuf 错误帧、Linux CPU／内存／网络／磁盘指标、重试退避和小窗格渲染。`tests/hangup.rs` 另外验证终端挂断与 `q` 都能让进程退出：它用 tmux 起一个独立会话再关掉，未安装 tmux 的环境会跳过并打印跳过原因。
+测试覆盖双账户隔离、自动续期及内存复用、令牌轮换、401 有界重试、登录撤销、Spark 多窗口、额度缺失／过期、Go 用量方向、余额计算、Grok protobuf 错误帧、Linux CPU／内存／网络／磁盘指标、重试退避和小窗格渲染。`tests/hangup.rs` 另外验证终端挂断、`q` / Esc / Ctrl+C、SIGTERM / SIGHUP / SIGKILL 都能让进程退出并释放网页端口，包括存在未完成 HTTP 请求的情况：它用 tmux 起一个独立会话再关掉，未安装 tmux 的环境会跳过并打印跳过原因。
 
 ## 协议参考
 
