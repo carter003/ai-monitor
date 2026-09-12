@@ -191,8 +191,8 @@ fn stems_are_straight_and_connect_directly_to_the_x_axis() {
             continue;
         }
         stem_columns += 1;
-        let top = **rows.first().unwrap();
-        let bottom = **rows.last().unwrap();
+        let top = *rows.first().unwrap();
+        let bottom = *rows.last().unwrap();
         assert_eq!(bottom, baseline_y - 1, "stem at x={x} floats above axis");
         for y in top..=bottom {
             assert_eq!(buffer[(x, y)].symbol(), "│", "broken stem at x={x}, y={y}");
