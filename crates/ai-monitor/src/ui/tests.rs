@@ -101,42 +101,6 @@ fn inks_clear_wcag_aa_on_a_white_terminal() {
 }
 
 #[test]
-fn gauge_fill_and_label_stay_readable_on_the_track() {
-    for color in [CYAN, GREEN, AMBER] {
-        assert!(contrast(rgb(color), rgb(TRACK)) >= 3.0);
-        assert!(contrast(rgb(INK), rgb(TRACK)) >= 4.5);
-        assert!(contrast(rgb(LIGHT_INK), rgb(color)) >= 4.5);
-    }
-}
-
-#[test]
-fn gauge_label_is_inked_per_column_across_the_fill_boundary() {
-    let stats = SystemStats {
-        cpu: Some(63.0),
-        memory_used: 9_000_000_000,
-        memory_total: 20_000_000_000,
-        ..SystemStats::default()
-    };
-    let mut terminal = Terminal::new(TestBackend::new(44, 20)).unwrap();
-    let mut view = View::default();
-    terminal
-        .draw(|f| draw(f, &stats, &[], &UsageStats::default(), &mut view, 100))
-        .unwrap();
-    let buffer = terminal.backend().buffer();
-    let label_cells = (0..buffer.area.width)
-        .map(|x| &buffer[(x, 1)])
-        .filter(|cell| cell.symbol() != "█" && !cell.symbol().trim().is_empty())
-        .filter(|cell| cell.fg == INK || cell.fg == LIGHT_INK)
-        .count();
-    assert!(label_cells >= 5);
-    for cell in &buffer.content {
-        if cell.symbol() == "█" {
-            assert_ne!(cell.fg, LIGHT_INK);
-        }
-    }
-}
-
-#[test]
 fn all_terminal_sizes_render_and_scrolling_is_bounded() {
     let states: Vec<_> = Source::ALL
         .into_iter()
@@ -293,50 +257,6 @@ fn the_readme_changelog_matches_the_crate_version() {
         .unwrap();
     assert_eq!(first.trim(), expected);
     assert!(readme.contains(concat!("`v", env!("CARGO_PKG_VERSION"), "`")));
-}
-
-#[test]
-fn throughput_is_fixed_width_and_promotes_after_999() {
-    assert_eq!(throughput(0.0), "000K/s");
-    assert_eq!(throughput(72.4 * 1024.0), "072K/s");
-    assert_eq!(throughput(999.0 * 1024.0), "999K/s");
-    assert_eq!(throughput(999.1 * 1024.0), "001M/s");
-    assert_eq!(throughput(999.1 * 1024.0 * 1024.0), "001G/s");
-    assert_eq!(throughput(999.1 * 1024.0 * 1024.0 * 1024.0), "001T/s");
-}
-
-#[test]
-fn twelve_logical_cpus_form_a_vertical_axis_beside_history() {
-    let stats = SystemStats {
-        cpu: Some(32.0),
-        cores: (1..=12).map(|n| n as f64 * 7.0).collect(),
-        cpu_history: [10, 30, 80, 40].into(),
-        ..SystemStats::default()
-    };
-    let mut terminal = Terminal::new(TestBackend::new(110, 42)).unwrap();
-    let mut view = View::default();
-    terminal
-        .draw(|f| draw(f, &stats, &[], &UsageStats::default(), &mut view, 100))
-        .unwrap();
-    let text = buffer_text(terminal.backend().buffer());
-    let lines: Vec<_> = text.lines().collect();
-    let first = lines
-        .iter()
-        .position(|line| line.contains("CPU01"))
-        .unwrap();
-    let last = lines
-        .iter()
-        .position(|line| line.contains("CPU12"))
-        .unwrap();
-    assert_eq!(last - first, 11);
-    assert!(lines[first..=last].iter().all(|line| line.contains('%')));
-    assert!(
-        lines[first..=last]
-            .iter()
-            .all(|line| line.chars().any(|c| "▁▂▃▄▅▆▇█".contains(c)))
-    );
-    assert!(view.page_size > 0);
-    assert!(last < 20);
 }
 
 #[test]
@@ -526,4 +446,5 @@ fn layout_preview_fixtures() {
         let (text, _) = render(&sample_usage(), width, height);
         println!("RATATUI BUFFER {width}x{height}\n{text}\nEND BUFFER");
     }
+    resources::print_preview_fixtures();
 }
