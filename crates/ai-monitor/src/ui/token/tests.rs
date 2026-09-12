@@ -149,7 +149,9 @@ fn month_length_tracks_the_calendar_instead_of_elapsed_data() {
         ("2026-09-12T12:00:00+00:00", 30),
         ("2026-10-12T12:00:00+00:00", 31),
     ] {
-        let now = chrono::DateTime::parse_from_rfc3339(date).unwrap().timestamp();
+        let now = chrono::DateTime::parse_from_rfc3339(date)
+            .unwrap()
+            .timestamp();
         assert_eq!(days_in_month(now), expected);
     }
 }
@@ -160,7 +162,11 @@ fn monthly_money_is_aggregated_to_one_point_per_elapsed_day() {
     let charts = local_charts(&usage, 30);
     let values = chart_values(&charts[2], 12);
     assert_eq!(values.len(), 12);
-    assert!(values.iter().all(|value| (*value - 0.4).abs() < f64::EPSILON));
+    assert!(
+        values
+            .iter()
+            .all(|value| (*value - 0.4).abs() < f64::EPSILON)
+    );
     assert_eq!(charts[2].axis_units, 30);
 }
 
@@ -197,7 +203,11 @@ fn stems_are_straight_and_connect_directly_to_the_x_axis() {
         for y in top..=bottom {
             assert_eq!(buffer[(x, y)].symbol(), "│", "broken stem at x={x}, y={y}");
         }
-        assert_eq!(buffer[(x, baseline_y)].symbol(), "┴", "stem at x={x} is not joined");
+        assert_eq!(
+            buffer[(x, baseline_y)].symbol(),
+            "┴",
+            "stem at x={x} is not joined"
+        );
     }
 
     assert!(stem_columns >= 3);
@@ -206,11 +216,10 @@ fn stems_are_straight_and_connect_directly_to_the_x_axis() {
             .chars()
             .any(|ch| ('\u{2801}'..='\u{28ff}').contains(&ch))
     }));
-    assert!(!buffer.content.iter().any(|cell| {
-        cell.symbol()
-            .chars()
-            .any(|ch| "█▌▐▁▂▃▄▅▆▇".contains(ch))
-    }));
+    assert!(!buffer
+        .content
+        .iter()
+        .any(|cell| cell.symbol().chars().any(|ch| "█▌▐▁▂▃▄▅▆▇".contains(ch))));
 }
 
 #[test]
