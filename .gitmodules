@@ -1,4 +1,0 @@
-[submodule "sol-pi"]
-	path = sol-pi
-	url = https://github.com/carter003/SoL-Pi
-	branch = main
