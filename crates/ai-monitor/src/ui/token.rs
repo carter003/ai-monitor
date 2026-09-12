@@ -13,13 +13,14 @@ use ratatui::{
 
 mod chart_layout;
 use chart_layout::{TimeAxis, draw_monthly_ranking, monthly_areas, tick_positions};
+mod model_table;
+use model_table::model_table;
 
 #[cfg(test)]
 mod tests;
 
 pub(super) const MIN_CHART_HEIGHT: u16 = 5;
 pub(super) const MIN_CHART_WIDTH: u16 = 16;
-const NAME_MIN: usize = 10;
 const GAP: usize = 2;
 const LINE_COLOR: Color = Color::Rgb(33, 150, 243);
 const MONTH_MODEL_MAX_BYTES: usize = 15;
@@ -131,139 +132,6 @@ fn summary_card(label: &str, total: &UsageTotal, width: usize) -> Vec<Line<'stat
     } else {
         result.push(Line::styled(truncate(&amount, width), amount_style));
         result.push(Line::styled(truncate(&cost, width), cost_style));
-    }
-    result
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Column {
-    Input,
-    Output,
-    Think,
-    Hit,
-    Total,
-    Cost,
-}
-
-impl Column {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Input => "IN",
-            Self::Output => "OUT",
-            Self::Think => "THINK",
-            Self::Hit => "缓存命中",
-            Self::Total => "合计",
-            Self::Cost => "COST",
-        }
-    }
-
-    fn cell(self, model: &ModelUsage) -> (String, Color) {
-        match self {
-            Self::Input => (compact(model.input_total), INK),
-            Self::Output => (compact(model.output), INK),
-            Self::Think => (compact(model.reasoning), MUTED),
-            Self::Hit => (model.hit_display().unwrap_or_else(|| "—".into()), MUTED),
-            Self::Total => (compact(model.total_tokens()), INK),
-            Self::Cost => match model.cost {
-                Some(value) => (money(value), GREEN),
-                None => ("—".into(), MUTED),
-            },
-        }
-    }
-}
-
-fn model_table(models: &[ModelUsage], width: usize, limit: usize) -> Vec<Line<'static>> {
-    if width == 0 {
-        return vec![];
-    }
-    if models.is_empty() || limit == 0 {
-        return vec![Line::styled(
-            truncate(" 暂无用量记录", width),
-            Style::default().fg(MUTED),
-        )];
-    }
-    let taken = &models[..models.len().min(limit)];
-    let mut slots: Vec<_> = [
-        Column::Input,
-        Column::Output,
-        Column::Think,
-        Column::Hit,
-        Column::Total,
-        Column::Cost,
-    ]
-    .into_iter()
-    .map(|column| {
-        let cell_width = taken
-            .iter()
-            .map(|model| columns(&column.cell(model).0))
-            .max()
-            .unwrap_or(0)
-            .max(columns(column.label()));
-        (column, cell_width)
-    })
-    .collect();
-    let numeric_width = |slots: &[(Column, usize)]| {
-        slots.iter().map(|(_, width)| width).sum::<usize>() + slots.len().saturating_sub(1)
-    };
-    for expendable in [Column::Think, Column::Hit, Column::Output, Column::Input] {
-        if NAME_MIN + 1 + numeric_width(&slots) <= width {
-            break;
-        }
-        slots.retain(|(column, _)| *column != expendable);
-    }
-    let name_width = width.saturating_sub(numeric_width(&slots) + 1);
-    if name_width < columns("模型") {
-        let mut result = vec![];
-        for model in taken {
-            result.push(Line::styled(
-                truncate(&model.model, width),
-                Style::default().fg(CYAN),
-            ));
-            for column in [Column::Total, Column::Cost] {
-                let (value, color) = column.cell(model);
-                result.push(Line::styled(
-                    truncate(&value, width),
-                    Style::default().fg(color),
-                ));
-            }
-        }
-        return result;
-    }
-    let row = |name: &str, color: Color, cells: Vec<(String, Color)>| {
-        let name = truncate(name, name_width);
-        let mut spans = vec![
-            Span::styled(name.clone(), Style::default().fg(color)),
-            Span::raw(" ".repeat(name_width + 1 - columns(&name))),
-        ];
-        for (index, ((_, cell_width), (text, color))) in slots.iter().zip(cells).enumerate() {
-            if index > 0 {
-                spans.push(Span::raw(" "));
-            }
-            spans.push(Span::styled(
-                format!(
-                    "{}{}",
-                    " ".repeat(cell_width.saturating_sub(columns(&text))),
-                    text
-                ),
-                Style::default().fg(color),
-            ));
-        }
-        Line::from(spans)
-    };
-    let mut result = vec![row(
-        "模型",
-        MUTED,
-        slots
-            .iter()
-            .map(|(column, _)| (column.label().into(), MUTED))
-            .collect(),
-    )];
-    for model in taken {
-        result.push(row(
-            &model.model,
-            CYAN,
-            slots.iter().map(|(column, _)| column.cell(model)).collect(),
-        ));
     }
     result
 }
