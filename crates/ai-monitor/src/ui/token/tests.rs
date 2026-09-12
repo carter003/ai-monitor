@@ -99,47 +99,109 @@ fn axis_labels_remain_compact_and_readable() {
     assert_eq!(span_label(86400), "1天");
 }
 
-#[test]
-fn today_uses_sparse_clock_ticks_instead_of_every_bucket() {
-    let usage = usage();
-    let charts = local_charts(&usage);
-    let ticks = tick_indices(&charts[0], 96);
-    let labels: Vec<_> = ticks.iter().map(|(_, label)| label.as_str()).collect();
-    assert_eq!(labels, ["0", "3", "6", "9", "12", "15", "18", "21", "23"]);
-    assert_eq!(ticks[0].0, 0);
-    assert_eq!(ticks.last().unwrap().0, 92);
+fn assert_even_tick_spacing(ticks: &[(usize, String)]) {
+    let gaps: Vec<_> = ticks
+        .windows(2)
+        .map(|pair| pair[1].0.saturating_sub(pair[0].0))
+        .collect();
+    let min = *gaps.iter().min().unwrap();
+    let max = *gaps.iter().max().unwrap();
+    assert!(max - min <= 1, "uneven tick gaps: {gaps:?}");
 }
 
 #[test]
-fn month_uses_sparse_date_ticks() {
+fn today_ticks_cover_every_hour_on_an_even_axis() {
     let usage = usage();
-    let charts = local_charts(&usage);
-    let ticks = tick_indices(&charts[1], 120);
+    let charts = local_charts(&usage, 30);
+    let ticks = tick_positions(&charts[0], 120);
     let labels: Vec<_> = ticks.iter().map(|(_, label)| label.as_str()).collect();
-    assert_eq!(labels, ["1", "5", "10", "15", "20", "25", "30"]);
-    assert_eq!(ticks[0].0, 0);
-    assert_eq!(ticks.last().unwrap().0, 116);
+    let expected: Vec<_> = (0..24).map(|hour| hour.to_string()).collect();
+    assert_eq!(
+        labels,
+        expected.iter().map(String::as_str).collect::<Vec<_>>()
+    );
+    assert_even_tick_spacing(&ticks);
 }
 
 #[test]
-fn monthly_money_is_aggregated_to_one_point_per_day() {
+fn september_month_axes_are_even_and_end_at_day_30() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-12T12:00:00+00:00")
+        .unwrap()
+        .timestamp();
+    assert_eq!(days_in_month(now), 30);
+
     let usage = usage();
-    let charts = local_charts(&usage);
+    let charts = local_charts(&usage, days_in_month(now));
+    for chart in [&charts[1], &charts[2]] {
+        let ticks = tick_positions(chart, 120);
+        assert_eq!(ticks.len(), 30);
+        assert_eq!(ticks.first().unwrap().1, "1");
+        assert_eq!(ticks.last().unwrap().1, "30");
+        assert_even_tick_spacing(&ticks);
+    }
+}
+
+#[test]
+fn month_length_tracks_the_calendar_instead_of_elapsed_data() {
+    for (date, expected) in [
+        ("2026-02-12T12:00:00+00:00", 28),
+        ("2028-02-12T12:00:00+00:00", 29),
+        ("2026-09-12T12:00:00+00:00", 30),
+        ("2026-10-12T12:00:00+00:00", 31),
+    ] {
+        let now = chrono::DateTime::parse_from_rfc3339(date).unwrap().timestamp();
+        assert_eq!(days_in_month(now), expected);
+    }
+}
+
+#[test]
+fn monthly_money_is_aggregated_to_one_point_per_elapsed_day() {
+    let usage = usage();
+    let charts = local_charts(&usage, 30);
     let values = chart_values(&charts[2], 12);
     assert_eq!(values.len(), 12);
     assert!(values.iter().all(|value| (*value - 0.4).abs() < f64::EPSILON));
+    assert_eq!(charts[2].axis_units, 30);
 }
 
 #[test]
-fn charts_render_as_braille_lines_without_histogram_glyphs() {
-    let usage = usage();
-    let charts = local_charts(&usage);
-    let mut terminal = Terminal::new(TestBackend::new(140, 15)).unwrap();
+fn stems_are_straight_and_connect_directly_to_the_x_axis() {
+    let mut usage = usage();
+    usage.hours.buckets.fill(0);
+    usage.hours.buckets[0] = 25_000_000;
+    usage.hours.buckets[4] = 50_000_000;
+    usage.hours.buckets[8] = 100_000_000;
+    let charts = local_charts(&usage, 30);
+
+    let width = 140u16;
+    let height = 15u16;
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal
-        .draw(|frame| draw_line_chart(frame, frame.area(), &charts[0], 12))
+        .draw(|frame| draw_stem_chart(frame, frame.area(), &charts[0], 12))
         .unwrap();
     let buffer = terminal.backend().buffer();
-    assert!(buffer.content.iter().any(|cell| {
+    let baseline_y = height - 2;
+    let mut stem_columns = 0;
+
+    for x in 0..width {
+        let rows: Vec<_> = (1..baseline_y)
+            .filter(|y| buffer[(x, *y)].symbol() == "│")
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        stem_columns += 1;
+        let top = **rows.first().unwrap();
+        let bottom = **rows.last().unwrap();
+        assert_eq!(bottom, baseline_y - 1, "stem at x={x} floats above axis");
+        for y in top..=bottom {
+            assert_eq!(buffer[(x, y)].symbol(), "│", "broken stem at x={x}, y={y}");
+        }
+        assert_eq!(buffer[(x, baseline_y)].symbol(), "┴", "stem at x={x} is not joined");
+    }
+
+    assert!(stem_columns >= 3);
+    assert!(!buffer.content.iter().any(|cell| {
         cell.symbol()
             .chars()
             .any(|ch| ('\u{2801}'..='\u{28ff}').contains(&ch))
@@ -154,11 +216,11 @@ fn charts_render_as_braille_lines_without_histogram_glyphs() {
 #[test]
 fn chart_rows_fit_across_common_terminal_widths() {
     let usage = usage();
-    let charts = local_charts(&usage);
+    let charts = local_charts(&usage, 30);
     for width in [40u16, 60, 80, 100, 140, 180] {
         let mut terminal = Terminal::new(TestBackend::new(width, 15)).unwrap();
         terminal
-            .draw(|frame| draw_line_chart(frame, frame.area(), &charts[0], 12))
+            .draw(|frame| draw_stem_chart(frame, frame.area(), &charts[0], 12))
             .unwrap();
     }
 }
