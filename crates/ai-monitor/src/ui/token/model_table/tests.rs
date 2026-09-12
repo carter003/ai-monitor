@@ -153,7 +153,10 @@ fn ordinals_are_separate_aligned_and_do_not_consume_the_name_limit() {
     assert!(rows[0].to_string().starts_with(" # 模型"));
     for (index, (row, model)) in rows[1..].iter().zip(&models).enumerate() {
         let name = model_name(&model.model, NAME_MAX);
-        assert!(row.to_string().starts_with(&format!(" {} {name}", index + 1)));
+        assert!(
+            row.to_string()
+                .starts_with(&format!(" {} {name}", index + 1))
+        );
     }
     let longest = model_name(&models[4].model, NAME_MAX);
     assert_eq!(longest.chars().count(), 25);
@@ -187,7 +190,10 @@ fn multi_digit_ordinals_align_without_reordering_or_numbering_hidden_models() {
     assert!(rows[0].to_string().starts_with("  # 模型"));
     for (index, row) in rows[1..].iter().enumerate() {
         let rank = index + 1;
-        assert!(row.to_string().starts_with(&format!(" {rank:>2} model-{rank:02}")));
+        assert!(
+            row.to_string()
+                .starts_with(&format!(" {rank:>2} model-{rank:02}"))
+        );
     }
     assert!(!text(&rows).contains("model-11"));
     assert_eq!(models, before);
