@@ -37,9 +37,8 @@ impl Reader {
         let year_start = local_midnight(now, Period::Year);
 
         let all_total = self.total(None)?;
-        let rolling_24h = now.timestamp_millis() - 24 * 3600 * 1000;
         Ok(UsageStats {
-            models: self.models(rolling_24h)?,
+            models: self.models(month_start)?,
             hours: self.buckets(Bucket::QuarterHour, day_start)?,
             month: self.buckets(Bucket::SixHour, month_start)?,
             day_total: self.total(Some(day_start))?,
@@ -84,7 +83,7 @@ impl Reader {
         })
     }
 
-    /// The model table: rolling 24-hour totals, top six, ignored models removed.
+    /// The model table: current-month totals, top ten, ignored models removed.
     ///
     /// Grouping is by `COALESCE(alias.model_id, event.model)` so one model seen
     /// through two clients (an omp `vendor/model` and an opencode `provider/model`)
@@ -107,7 +106,7 @@ impl Reader {
              -- under two client spellings would stay two rows.
              GROUP BY COALESCE(a.model_id, e.model)
              ORDER BY SUM(e.input_total + e.output_total) DESC, model ASC
-             LIMIT 6",
+             LIMIT 10",
         )?;
         let rows = statement.query_map([since_ms], |row| {
             let input_total: Option<i64> = row.get(1)?;
@@ -314,40 +313,9 @@ mod tests {
     #[test]
     fn totals_count_every_event_ignored_models_included() {
         let connection = seeded();
-        // Two unpriced events of a model the ranking ignores, one priced event.
-        insert(
-            &connection,
-            "opencode",
-            "1",
-            "opencode/free",
-            10,
-            0,
-            1,
-            None,
-            100,
-        );
-        insert(
-            &connection,
-            "opencode",
-            "2",
-            "opencode/free",
-            10,
-            0,
-            1,
-            None,
-            100,
-        );
-        insert(
-            &connection,
-            "omp",
-            "3",
-            "vendor/paid",
-            10,
-            0,
-            1,
-            Some(0.5),
-            100,
-        );
+        insert(&connection, "opencode", "1", "opencode/free", 10, 0, 1, None, 100);
+        insert(&connection, "opencode", "2", "opencode/free", 10, 0, 1, None, 100);
+        insert(&connection, "omp", "3", "vendor/paid", 10, 0, 1, Some(0.5), 100);
         connection
             .execute(
                 "INSERT INTO model_alias VALUES ('opencode/free', NULL, 1, 'ignore', NULL)",
@@ -355,8 +323,6 @@ mod tests {
             )
             .expect("alias");
         let total = reader(connection).total(None).expect("total");
-        // The alias is the ranking's filter, not the totals': every event counts
-        // toward the interval figures, and unpriced events add no money.
         assert_eq!(total.tokens, 33);
         assert_eq!(total.cost, 0.5);
     }
@@ -371,28 +337,8 @@ mod tests {
     #[test]
     fn ignored_models_leave_the_model_table_entirely() {
         let connection = seeded();
-        insert(
-            &connection,
-            "omp",
-            "1",
-            "vendor/paid",
-            100,
-            0,
-            10,
-            Some(1.0),
-            100,
-        );
-        insert(
-            &connection,
-            "opencode",
-            "2",
-            "opencode/free",
-            900,
-            0,
-            90,
-            None,
-            100,
-        );
+        insert(&connection, "omp", "1", "vendor/paid", 100, 0, 10, Some(1.0), 100);
+        insert(&connection, "opencode", "2", "opencode/free", 900, 0, 90, None, 100);
         connection
             .execute(
                 "INSERT INTO model_alias VALUES ('opencode/free', NULL, 1, 'ignore', NULL)",
@@ -407,30 +353,8 @@ mod tests {
     #[test]
     fn one_model_seen_through_two_clients_is_a_single_row() {
         let connection = seeded();
-        // The alias maps the client's name onto the price-table id, which is what
-        // merges the two spellings.
-        insert(
-            &connection,
-            "opencode",
-            "1",
-            "opencode-go/deepseek-v4-flash",
-            100,
-            0,
-            10,
-            Some(1.0),
-            100,
-        );
-        insert(
-            &connection,
-            "omp",
-            "2",
-            "deepseek-v4-flash",
-            200,
-            0,
-            20,
-            Some(1.0),
-            100,
-        );
+        insert(&connection, "opencode", "1", "opencode-go/deepseek-v4-flash", 100, 0, 10, Some(1.0), 100);
+        insert(&connection, "omp", "2", "deepseek-v4-flash", 200, 0, 20, Some(1.0), 100);
         connection
             .execute(
                 "INSERT INTO model_alias VALUES ('opencode-go/deepseek-v4-flash', 'deepseek/deepseek-v4-flash', 0, 'bare', NULL)",
@@ -444,11 +368,7 @@ mod tests {
             )
             .expect("alias 2");
         let models = reader(connection).models(0).expect("models");
-        assert_eq!(
-            models.len(),
-            1,
-            "the same model must not split into two rows"
-        );
+        assert_eq!(models.len(), 1, "the same model must not split into two rows");
         assert_eq!(models[0].model, "deepseek/deepseek-v4-flash");
         assert_eq!(models[0].total_tokens(), 330);
     }
@@ -462,34 +382,33 @@ mod tests {
         let names: Vec<&str> = models.iter().map(|m| m.model.as_str()).collect();
         assert_eq!(names, vec!["a", "b"], "ties break on the model name");
     }
-    #[test]
-    fn events_older_than_rolling_window_are_excluded_from_models() {
-        let connection = seeded();
-        // Event 1: occurred 25 hours ago (older than rolling 24H)
-        insert(
-            &connection,
-            "omp",
-            "1",
-            "old-model",
-            1000,
-            0,
-            100,
-            Some(1.0),
-            1000,
-        );
-        // Event 2: occurred 1 hour ago
-        insert(
-            &connection,
-            "omp",
-            "2",
-            "recent-model",
-            500,
-            0,
-            50,
-            Some(0.5),
-            100_000,
-        );
 
+    #[test]
+    fn models_query_returns_top_ten() {
+        let connection = seeded();
+        for index in 0..12 {
+            insert(
+                &connection,
+                "omp",
+                &format!("id-{index}"),
+                &format!("vendor/model-{index}"),
+                100 + index,
+                0,
+                10,
+                Some(1.0),
+                100,
+            );
+        }
+        let models = reader(connection).models(0).expect("models");
+        assert_eq!(models.len(), 10);
+        assert_eq!(models[0].model, "vendor/model-11");
+    }
+
+    #[test]
+    fn events_older_than_interval_are_excluded_from_models() {
+        let connection = seeded();
+        insert(&connection, "omp", "1", "old-model", 1000, 0, 100, Some(1.0), 1000);
+        insert(&connection, "omp", "2", "recent-model", 500, 0, 50, Some(0.5), 100_000);
         let models = reader(connection).models(50_000).expect("models");
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].model, "recent-model");
@@ -500,42 +419,23 @@ mod tests {
         let connection = seeded();
         let now = Local::now();
         let day_start = local_midnight(now, Period::Day);
-        // Exactly one event, inside the current quarter hour, and priced.
-        insert(
-            &connection,
-            "omp",
-            "1",
-            "m",
-            10,
-            0,
-            1,
-            Some(1.0),
-            now.timestamp_millis(),
-        );
+        insert(&connection, "omp", "1", "m", 10, 0, 1, Some(1.0), now.timestamp_millis());
         let buckets = reader(connection)
             .buckets(Bucket::QuarterHour, day_start)
             .expect("buckets");
         assert_eq!(buckets.buckets.len(), 96, "every quarter hour needs a slot");
         assert_eq!(buckets.costs.len(), 96, "money shares the token slots");
         let filled = buckets.buckets.iter().filter(|value| **value > 0).count();
-        assert_eq!(
-            filled, 1,
-            "an absent quarter hour must stay a zero, not shift the row"
-        );
+        assert_eq!(filled, 1, "an absent quarter hour must stay a zero, not shift the row");
         let slot = now.hour() as usize * 4 + now.minute() as usize / 15;
         assert_eq!(buckets.buckets[slot], 11);
-        assert_eq!(
-            buckets.costs[slot], 1.0,
-            "the cost lands in the same bucket"
-        );
+        assert_eq!(buckets.costs[slot], 1.0, "the cost lands in the same bucket");
     }
 
     #[test]
     fn the_month_histogram_follows_the_real_month_length() {
         let connection = seeded();
-        let buckets = reader(connection)
-            .buckets(Bucket::SixHour, 0)
-            .expect("buckets");
+        let buckets = reader(connection).buckets(Bucket::SixHour, 0).expect("buckets");
         let days = days_in_month(Local::now().year(), Local::now().month()) as usize;
         assert_eq!(buckets.buckets.len(), days * 4, "four blocks per day");
         assert_eq!(buckets.costs.len(), days * 4);
@@ -552,15 +452,12 @@ mod tests {
 
     #[test]
     fn days_in_month_pure_calendar() {
-        // Leap years
         assert_eq!(days_in_month(2000, 2), 29);
         assert_eq!(days_in_month(1900, 2), 28);
         assert_eq!(days_in_month(2024, 2), 29);
         assert_eq!(days_in_month(2025, 2), 28);
-        // Year wrap-around: December -> January
         assert_eq!(days_in_month(2026, 12), 31);
         assert_eq!(days_in_month(2027, 1), 31);
-        // All 12 months in a common year
         let expected = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
         for (month, &days) in (1..=12).zip(&expected) {
             assert_eq!(days_in_month(2023, month), days);
@@ -569,8 +466,6 @@ mod tests {
 
     #[test]
     fn the_day_boundary_is_local_midnight_not_utc() {
-        // `occurred_at` is UTC ms, but "today" is the operator's local day. At
-        // UTC+8 the local midnight is 16:00 UTC on the previous date.
         let now = Local
             .with_ymd_and_hms(2026, 9, 11, 13, 30, 0)
             .single()
@@ -579,10 +474,7 @@ mod tests {
         let start_local = Local.timestamp_millis_opt(start).single().expect("valid");
         assert_eq!(start_local.hour(), 0);
         assert_eq!(start_local.day(), 11);
-        assert_eq!(
-            start_local.offset().local_minus_utc(),
-            now.offset().local_minus_utc()
-        );
+        assert_eq!(start_local.offset().local_minus_utc(), now.offset().local_minus_utc());
     }
 
     #[test]
@@ -627,29 +519,8 @@ mod tests {
                 .expect("valid local time")
                 .timestamp_millis()
         };
-        // Day 2 at 00:30 and at 07:00: different six-hour blocks of the same day.
-        insert(
-            &connection,
-            "omp",
-            "a",
-            "m",
-            100,
-            0,
-            50,
-            Some(1.5),
-            at(0, 30),
-        );
-        insert(
-            &connection,
-            "omp",
-            "b",
-            "m",
-            200,
-            0,
-            50,
-            Some(2.5),
-            at(7, 0),
-        );
+        insert(&connection, "omp", "a", "m", 100, 0, 50, Some(1.5), at(0, 30));
+        insert(&connection, "omp", "b", "m", 200, 0, 50, Some(2.5), at(7, 0));
         let buckets = reader(connection)
             .buckets(Bucket::SixHour, local_midnight(now, Period::Month))
             .expect("buckets");
@@ -657,10 +528,7 @@ mod tests {
         assert_eq!(buckets.buckets[5], 250, "day 2, second block");
         assert_eq!(buckets.costs[4], 1.5, "money rides the same block");
         assert_eq!(buckets.costs[5], 2.5);
-        assert!(
-            buckets.buckets[..4].iter().all(|value| *value == 0),
-            "day 1 must stay empty rather than shift the row"
-        );
+        assert!(buckets.buckets[..4].iter().all(|value| *value == 0));
     }
 
     #[test]
@@ -668,58 +536,9 @@ mod tests {
         let connection = seeded();
         let now = Local::now();
         let day_start = local_midnight(now, Period::Day);
-        insert(
-            &connection,
-            "omp",
-            "inside",
-            "m",
-            10,
-            0,
-            1,
-            Some(1.0),
-            day_start + 1,
-        );
-        insert(
-            &connection,
-            "omp",
-            "before",
-            "m",
-            999,
-            0,
-            99,
-            Some(1.0),
-            day_start - 1,
-        );
+        insert(&connection, "omp", "inside", "m", 10, 0, 1, Some(1.0), day_start + 1);
+        insert(&connection, "omp", "before", "m", 999, 0, 99, Some(1.0), day_start - 1);
         let total = reader(connection).total(Some(day_start)).expect("total");
         assert_eq!(total.tokens, 11, "the pre-midnight event is outside today");
-    }
-    #[test]
-    fn production_db_rolling_24h_excludes_hy3() {
-        let db_path = std::path::Path::new("/home/carter003/.local/share/herdr/usage.db");
-        if !db_path.exists() {
-            return;
-        }
-        let reader = Reader::open(db_path).expect("open production db");
-        let stats = reader.load().expect("load stats");
-        assert!(!stats.models.is_empty(), "models should not be empty");
-        for m in &stats.models {
-            assert!(
-                !m.model.contains("hy3"),
-                "hy3 should not be in 24H models: {}",
-                m.model
-            );
-            assert!(
-                !m.model.contains("ox-alpha-free"),
-                "ox-alpha-free should not be in 24H models: {}",
-                m.model
-            );
-            println!(
-                "24H Model: {:<35} IN(HIT): {:<14} OUT: {:<8} COST: {:?}",
-                m.model,
-                m.input_display(),
-                m.output,
-                m.cost
-            );
-        }
     }
 }
