@@ -7,7 +7,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Paragraph, Sparkline},
+    widgets::{Block, BorderType, Borders, Paragraph},
 };
 
 #[cfg(test)]
@@ -303,11 +303,12 @@ fn history(frame: &mut Frame, area: Rect, stats: &SystemStats) {
     if area.height < HISTORY_HEIGHT as u16 || area.width == 0 {
         return;
     }
+    let capacity = area.width as usize * 2;
     let samples: Vec<_> = stats
         .cpu_history
         .iter()
         .rev()
-        .take(area.width as usize)
+        .take(capacity)
         .rev()
         .map(|n| (*n).min(100))
         .collect();
@@ -320,26 +321,63 @@ fn history(frame: &mut Frame, area: Rect, stats: &SystemStats) {
     if samples.is_empty() {
         text(frame, row(graph, 0), "采样中", MUTED, false);
     } else {
-        // New samples always end at the right edge, including during startup.
-        let graph = slice(
-            graph,
-            graph.width - samples.len() as u16,
-            0,
-            samples.len() as u16,
-            graph.height,
-        );
-        // Quantize upwards so a nonzero sample remains visible in a two-row
-        // plot, while keeping the scale fixed at 0–100%, never auto-scaled.
-        let resolution = u64::from(graph.height) * 8;
-        let bars: Vec<_> = samples
+        let resolution = u64::from(graph.height) * 4;
+        let dots: Vec<u64> = samples
             .iter()
-            .map(|n| (n * resolution).div_ceil(100))
+            .map(|n| {
+                if *n == 0 {
+                    0
+                } else {
+                    ((*n * resolution).div_ceil(100)).min(resolution)
+                }
+            })
             .collect();
+        let active_cols = samples.len().div_ceil(2) as u16;
+        let start_col = graph.width.saturating_sub(active_cols);
+        let is_odd = samples.len() % 2 != 0;
+
+        const LEFT_DOTS: [u8; 4] = [0x40, 0x04, 0x02, 0x01];
+        const RIGHT_DOTS: [u8; 4] = [0x80, 0x20, 0x10, 0x08];
+
+        let mut lines = Vec::with_capacity(graph.height as usize);
+        for y in 0..graph.height {
+            let row_from_bottom = graph.height - 1 - y;
+            let base_level = u64::from(row_from_bottom) * 4;
+            let mut line = String::with_capacity(graph.width as usize);
+            line.push_str(&" ".repeat(start_col as usize));
+
+            for c in 0..active_cols as usize {
+                let (left_h, right_h) = if is_odd {
+                    if c == 0 {
+                        (0, dots[0])
+                    } else {
+                        (dots[2 * c - 1], dots[2 * c])
+                    }
+                } else {
+                    (dots[2 * c], dots[2 * c + 1])
+                };
+
+                let left_cell = left_h.saturating_sub(base_level).min(4) as usize;
+                let right_cell = right_h.saturating_sub(base_level).min(4) as usize;
+
+                if left_cell == 0 && right_cell == 0 {
+                    line.push(' ');
+                } else {
+                    let mut bits = 0u8;
+                    for dot in LEFT_DOTS.iter().take(left_cell) {
+                        bits |= *dot;
+                    }
+                    for dot in RIGHT_DOTS.iter().take(right_cell) {
+                        bits |= *dot;
+                    }
+                    let ch = char::from_u32(0x2800 | u32::from(bits)).unwrap_or(' ');
+                    line.push(ch);
+                }
+            }
+            lines.push(Line::from(line));
+        }
         frame.render_widget(
-            Sparkline::default()
-                .data(&bars)
-                .max(resolution)
-                .style(Style::default().fg(CYAN)),
+            Paragraph::new(lines).style(Style::default().fg(CYAN)),
             graph,
         );
     }

@@ -78,7 +78,7 @@ impl SystemSampler {
         self.stats.cores = values.into_iter().skip(1).collect();
         if let Some(cpu) = self.stats.cpu {
             self.stats.cpu_history.push_back(cpu.round() as u64);
-            if self.stats.cpu_history.len() > 120 {
+            if self.stats.cpu_history.len() > 240 {
                 self.stats.cpu_history.pop_front();
             }
         }

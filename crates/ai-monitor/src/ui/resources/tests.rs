@@ -202,7 +202,7 @@ fn odd_core_count_is_column_major_without_repeating_the_last_core() {
 fn history_peak_and_count_describe_the_visible_samples_only() {
     let stats = SystemStats {
         cpu_history: std::iter::once(99)
-            .chain(std::iter::repeat_n(3, 44))
+            .chain(std::iter::repeat_n(3, 88))
             .collect(),
         ..fixture()
     };
@@ -210,8 +210,8 @@ fn history_peak_and_count_describe_the_visible_samples_only() {
     let text = text_of(&buffer);
     assert!(text.contains("峰值 3%"));
     assert!(!text.contains("99%"));
-    assert!(text.contains("最近 44 次采样"));
-    assert_eq!(buffer[(45, 17)].symbol(), "▁");
+    assert!(text.contains("最近 88 次采样"));
+    assert_eq!(buffer[(45, 17)].symbol(), "⣀");
 }
 
 #[test]
@@ -222,8 +222,9 @@ fn startup_history_is_right_aligned() {
     };
     let buffer = render(&stats, 48, 20);
     assert_eq!(buffer[(2, 17)].symbol(), " ");
-    for x in 42..46 {
-        assert_eq!(buffer[(x, 17)].symbol(), "▁");
+    assert_eq!(buffer[(43, 17)].symbol(), " ");
+    for x in 44..46 {
+        assert_eq!(buffer[(x, 17)].symbol(), "⣀");
     }
 }
 
