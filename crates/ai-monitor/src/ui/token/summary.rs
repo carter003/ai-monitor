@@ -89,7 +89,10 @@ fn card(
                 .bg(BACKGROUND)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!(" {}╮", "─".repeat(width - 5 - columns(&title))), border),
+        Span::styled(
+            format!(" {}╮", "─".repeat(width - 5 - columns(&title))),
+            border,
+        ),
     ]);
     let blank = body_row(Vec::new(), width);
     [

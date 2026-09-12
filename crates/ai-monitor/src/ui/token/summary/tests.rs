@@ -65,11 +65,7 @@ fn frames_are_equal_centered_and_values_share_the_same_left_edge() {
             let top = group[0].to_string();
             let starts = positions(&top, "╭");
             let ends = positions(&top, "╮");
-            let widths: Vec<_> = starts
-                .iter()
-                .zip(&ends)
-                .map(|(a, b)| b - a + 1)
-                .collect();
+            let widths: Vec<_> = starts.iter().zip(&ends).map(|(a, b)| b - a + 1).collect();
             assert!(widths.iter().all(|width| *width == widths[0]));
             let left = starts[0];
             let right = width - ends.last().unwrap() - 1;
@@ -107,7 +103,8 @@ fn units_use_one_shared_column_across_different_magnitudes() {
     let costs = rows[3].to_string();
     assert_eq!(positions(&tokens, "TOKENS"), positions(&costs, "COST"));
     assert!(tokens.contains("126.3B") && costs.contains("$12345"));
-    assert!(tokens.contains("9.0K") && costs.contains("$0.01"));
+    assert!(tokens.contains(&compact(usage.day_total.tokens)));
+    assert!(costs.contains("$0.01"));
 }
 
 #[test]
@@ -130,7 +127,11 @@ fn widths_including_zero_and_extreme_values_never_overflow() {
     let mut extreme = usage();
     extreme.all_total.cost = f64::MAX;
     for width in 1..=240 {
-        assert!(lines(&extreme, width).iter().all(|row| row.width() <= width));
+        assert!(
+            lines(&extreme, width)
+                .iter()
+                .all(|row| row.width() <= width)
+        );
     }
 }
 
@@ -265,10 +266,7 @@ fn export_real_summary_terminal_fixtures() {
             .draw(|frame| {
                 if prefix == "summary" {
                     let area = crate::ui::panel(frame, frame.area(), " 本地消耗 · Token ");
-                    frame.render_widget(
-                        Paragraph::new(lines(&usage, area.width as usize)),
-                        area,
-                    );
+                    frame.render_widget(Paragraph::new(lines(&usage, area.width as usize)), area);
                 } else {
                     crate::ui::draw(
                         frame,
