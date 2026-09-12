@@ -102,8 +102,8 @@ fn axis_labels_remain_compact_and_readable() {
 #[test]
 fn today_uses_sparse_clock_ticks_instead_of_every_bucket() {
     let usage = usage();
-    let chart = &local_charts(&usage)[0];
-    let ticks = tick_indices(chart, 96);
+    let charts = local_charts(&usage);
+    let ticks = tick_indices(&charts[0], 96);
     let labels: Vec<_> = ticks.iter().map(|(_, label)| label.as_str()).collect();
     assert_eq!(labels, ["0", "3", "6", "9", "12", "15", "18", "21", "23"]);
     assert_eq!(ticks[0].0, 0);
@@ -113,8 +113,8 @@ fn today_uses_sparse_clock_ticks_instead_of_every_bucket() {
 #[test]
 fn month_uses_sparse_date_ticks() {
     let usage = usage();
-    let chart = &local_charts(&usage)[1];
-    let ticks = tick_indices(chart, 120);
+    let charts = local_charts(&usage);
+    let ticks = tick_indices(&charts[1], 120);
     let labels: Vec<_> = ticks.iter().map(|(_, label)| label.as_str()).collect();
     assert_eq!(labels, ["1", "5", "10", "15", "20", "25", "30"]);
     assert_eq!(ticks[0].0, 0);
@@ -124,8 +124,8 @@ fn month_uses_sparse_date_ticks() {
 #[test]
 fn monthly_money_is_aggregated_to_one_point_per_day() {
     let usage = usage();
-    let chart = &local_charts(&usage)[2];
-    let values = chart_values(chart, 12);
+    let charts = local_charts(&usage);
+    let values = chart_values(&charts[2], 12);
     assert_eq!(values.len(), 12);
     assert!(values.iter().all(|value| (*value - 0.4).abs() < f64::EPSILON));
 }
@@ -133,9 +133,10 @@ fn monthly_money_is_aggregated_to_one_point_per_day() {
 #[test]
 fn charts_render_as_braille_lines_without_histogram_glyphs() {
     let usage = usage();
+    let charts = local_charts(&usage);
     let mut terminal = Terminal::new(TestBackend::new(140, 15)).unwrap();
     terminal
-        .draw(|frame| draw_line_chart(frame, frame.area(), &local_charts(&usage)[0], 12))
+        .draw(|frame| draw_line_chart(frame, frame.area(), &charts[0], 12))
         .unwrap();
     let buffer = terminal.backend().buffer();
     assert!(buffer.content.iter().any(|cell| {
@@ -153,10 +154,11 @@ fn charts_render_as_braille_lines_without_histogram_glyphs() {
 #[test]
 fn chart_rows_fit_across_common_terminal_widths() {
     let usage = usage();
+    let charts = local_charts(&usage);
     for width in [40u16, 60, 80, 100, 140, 180] {
         let mut terminal = Terminal::new(TestBackend::new(width, 15)).unwrap();
         terminal
-            .draw(|frame| draw_line_chart(frame, frame.area(), &local_charts(&usage)[0], 12))
+            .draw(|frame| draw_line_chart(frame, frame.area(), &charts[0], 12))
             .unwrap();
     }
 }
