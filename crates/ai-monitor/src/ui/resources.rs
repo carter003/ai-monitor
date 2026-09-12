@@ -27,7 +27,9 @@ fn core_columns(width: u16) -> usize {
 
 /// Keep eight rows for quotas; count core rows, not individual CPUs.
 pub(super) fn height(body_height: u16, width: u16, core_count: usize) -> u16 {
-    let rows = core_count.max(1).div_ceil(core_columns(content_width(width)));
+    let rows = core_count
+        .max(1)
+        .div_ceil(core_columns(content_width(width)));
     (rows.min(u16::MAX as usize) as u16)
         .saturating_add(14)
         .max(body_height / 3)
@@ -71,7 +73,9 @@ fn right(frame: &mut Frame, area: Rect, value: &str, color: Color, bold: bool) {
 }
 
 fn percentage(value: Option<f64>) -> Option<f64> {
-    value.filter(|n| n.is_finite() && *n >= 0.).map(|n| n.min(100.))
+    value
+        .filter(|n| n.is_finite() && *n >= 0.)
+        .map(|n| n.min(100.))
 }
 
 fn used_percent(used: u64, total: u64) -> Option<f64> {
@@ -117,7 +121,12 @@ fn metric(
     let reserved = 4 + 2 + detail_width + 1 + 6;
     if area.width >= 40 && area.width as usize >= reserved + 4 {
         let bar_width = area.width - reserved as u16;
-        thin_bar(frame, slice(area, 4, 0, bar_width, 1), value, usage_color(value, color));
+        thin_bar(
+            frame,
+            slice(area, 4, 0, bar_width, 1),
+            value,
+            usage_color(value, color),
+        );
         right(
             frame,
             slice(area, 4 + bar_width + 2, 0, detail_width as u16, 1),
@@ -125,11 +134,20 @@ fn metric(
             INK,
             false,
         );
-        right(frame, slice(area, area.width - 6, 0, 6, 1), &percent, INK, true);
+        right(
+            frame,
+            slice(area, area.width - 6, 0, 6, 1),
+            &percent,
+            INK,
+            true,
+        );
     } else {
         let values = slice(area, 4, 0, area.width, 1);
         let full = format!("{detail}  {percent}");
-        let compact = format!("{} {percent}", detail.replace(" GiB", "G").replace(" 逻辑核", "核"));
+        let compact = format!(
+            "{} {percent}",
+            detail.replace(" GiB", "G").replace(" 逻辑核", "核")
+        );
         let selected = if value.is_none() {
             detail
         } else if columns(&full) <= values.width as usize {
@@ -151,7 +169,9 @@ fn throughput(bytes: Option<f64>, compact: bool) -> String {
     let units = if compact {
         ["B/s", "K/s", "M/s", "G/s", "T/s", "P/s", "E/s"]
     } else {
-        [" B/s", " KiB/s", " MiB/s", " GiB/s", " TiB/s", " PiB/s", " EiB/s"]
+        [
+            " B/s", " KiB/s", " MiB/s", " GiB/s", " TiB/s", " PiB/s", " EiB/s",
+        ]
     };
     let mut unit = 0;
     while value >= 1024. && unit < units.len() - 1 {
@@ -170,7 +190,13 @@ fn throughput(bytes: Option<f64>, compact: bool) -> String {
     }
 }
 
-fn io_row(frame: &mut Frame, area: Rect, name: &str, rates: [(&str, Option<f64>); 2], color: Color) {
+fn io_row(
+    frame: &mut Frame,
+    area: Rect,
+    name: &str,
+    rates: [(&str, Option<f64>); 2],
+    color: Color,
+) {
     text(frame, slice(area, 0, 0, 4, 1), name, MUTED, false);
     let values = slice(area, 4, 0, area.width, 1);
     let gap = if values.width >= 24 { 2 } else { 1 };
@@ -179,12 +205,9 @@ fn io_row(frame: &mut Frame, area: Rect, name: &str, rates: [(&str, Option<f64>)
         let cell = slice(values, index as u16 * (width + gap), 0, width, 1);
         text(frame, slice(cell, 0, 0, 1, 1), tag, color, true);
         let value_area = slice(cell, 2, 0, cell.width, 1);
-        let full = throughput(rate, false);
-        let value = if columns(&full) <= value_area.width as usize {
-            full
-        } else {
-            throughput(rate, true)
-        };
+        // Select units by column width so both directions change together,
+        // rather than oscillating between KiB/s and K/s with each sample.
+        let value = throughput(rate, width < 12);
         right(frame, value_area, &value, color, false);
     }
 }
@@ -197,14 +220,21 @@ fn load_row(frame: &mut Frame, area: Rect, load: &str) {
     let labels = ["1m", "5m", "15m"];
     let cell_width = details.width / 3;
     if area.width >= 38
-        && labels.iter().zip(&values).all(|(label, value)| {
-            columns(label) + columns(value) + 1 < cell_width as usize
-        })
+        && labels
+            .iter()
+            .zip(&values)
+            .all(|(label, value)| columns(label) + columns(value) + 1 < cell_width as usize)
     {
         for (index, (label, value)) in labels.iter().zip(&values).enumerate() {
             let cell = slice(details, index as u16 * cell_width, 0, cell_width, 1);
             text(frame, cell, label, MUTED, false);
-            text(frame, slice(cell, label.len() as u16 + 1, 0, cell.width, 1), value, INK, true);
+            text(
+                frame,
+                slice(cell, label.len() as u16 + 1, 0, cell.width, 1),
+                value,
+                INK,
+                true,
+            );
         }
     } else {
         let all = values.join(" · ");
@@ -222,8 +252,20 @@ fn section(frame: &mut Frame, area: Rect, title: &str, suffix: &str) {
     text(frame, area, &"─".repeat(area.width as usize), TRACK, false);
     let suffix_width = columns(&suffix).min(area.width as usize) as u16;
     let title_width = area.width.saturating_sub(suffix_width + 2);
-    text(frame, slice(area, 0, 0, title_width, 1), &truncate(&title, title_width as usize), CYAN, true);
-    right(frame, slice(area, area.width - suffix_width, 0, suffix_width, 1), &suffix, MUTED, false);
+    text(
+        frame,
+        slice(area, 0, 0, title_width, 1),
+        &truncate(&title, title_width as usize),
+        CYAN,
+        true,
+    );
+    right(
+        frame,
+        slice(area, area.width - suffix_width, 0, suffix_width, 1),
+        &suffix,
+        MUTED,
+        false,
+    );
 }
 
 fn core(frame: &mut Frame, area: Rect, index: usize, count: usize, value: f64) {
@@ -231,40 +273,93 @@ fn core(frame: &mut Frame, area: Rect, index: usize, count: usize, value: f64) {
     let label = format!("{:0digits$}", index + 1);
     let value = percentage(Some(value));
     let percent = value.map_or_else(|| "—".into(), |n| format!("{n:.0}%"));
-    text(frame, slice(area, 0, 0, digits as u16, 1), &label, MUTED, false);
+    text(
+        frame,
+        slice(area, 0, 0, digits as u16, 1),
+        &label,
+        MUTED,
+        false,
+    );
     let value_width = 4.min(area.width.saturating_sub(digits as u16 + 1));
     let value_x = area.width.saturating_sub(value_width);
-    right(frame, slice(area, value_x, 0, value_width, 1), &percent, INK, true);
+    right(
+        frame,
+        slice(area, value_x, 0, value_width, 1),
+        &percent,
+        INK,
+        true,
+    );
     let bar_x = digits as u16 + 1;
     let bar_width = value_x.saturating_sub(bar_x + 1);
-    thin_bar(frame, slice(area, bar_x, 0, bar_width, 1), value, usage_color(value, GREEN));
+    thin_bar(
+        frame,
+        slice(area, bar_x, 0, bar_width, 1),
+        value,
+        usage_color(value, GREEN),
+    );
 }
 
 fn history(frame: &mut Frame, area: Rect, stats: &SystemStats) {
     if area.height < HISTORY_HEIGHT as u16 || area.width == 0 {
         return;
     }
-    let samples: Vec<_> = stats.cpu_history.iter().rev().take(area.width as usize)
-        .rev().map(|n| (*n).min(100)).collect();
-    let peak = samples.iter().max().map_or_else(|| "峰值 —".into(), |n| format!("峰值 {n}%"));
+    let samples: Vec<_> = stats
+        .cpu_history
+        .iter()
+        .rev()
+        .take(area.width as usize)
+        .rev()
+        .map(|n| (*n).min(100))
+        .collect();
+    let peak = samples
+        .iter()
+        .max()
+        .map_or_else(|| "峰值 —".into(), |n| format!("峰值 {n}%"));
     section(frame, row(area, 0), "CPU 趋势", &peak);
     let graph = slice(area, 0, 1, area.width, area.height - 2);
     if samples.is_empty() {
         text(frame, row(graph, 0), "采样中", MUTED, false);
     } else {
         // New samples always end at the right edge, including during startup.
-        let graph = slice(graph, graph.width - samples.len() as u16, 0, samples.len() as u16, graph.height);
+        let graph = slice(
+            graph,
+            graph.width - samples.len() as u16,
+            0,
+            samples.len() as u16,
+            graph.height,
+        );
         // Quantize upwards so a nonzero sample remains visible in a two-row
         // plot, while keeping the scale fixed at 0–100%, never auto-scaled.
         let resolution = u64::from(graph.height) * 8;
-        let bars: Vec<_> = samples.iter().map(|n| (n * resolution).div_ceil(100)).collect();
-        frame.render_widget(Sparkline::default().data(&bars).max(resolution).style(Style::default().fg(CYAN)), graph);
+        let bars: Vec<_> = samples
+            .iter()
+            .map(|n| (n * resolution).div_ceil(100))
+            .collect();
+        frame.render_widget(
+            Sparkline::default()
+                .data(&bars)
+                .max(resolution)
+                .style(Style::default().fg(CYAN)),
+            graph,
+        );
     }
     let footer = row(area, area.height - 1);
     let count = format!("最近 {} 次采样", samples.len());
     let scale = "0–100%";
-    text(frame, slice(footer, 0, 0, footer.width.saturating_sub(7), 1), &count, MUTED, false);
-    right(frame, slice(footer, footer.width.saturating_sub(6), 0, 6, 1), scale, MUTED, false);
+    text(
+        frame,
+        slice(footer, 0, 0, footer.width.saturating_sub(7), 1),
+        &count,
+        MUTED,
+        false,
+    );
+    right(
+        frame,
+        slice(footer, footer.width.saturating_sub(6), 0, 6, 1),
+        scale,
+        MUTED,
+        false,
+    );
 }
 
 fn cores_and_history(frame: &mut Frame, area: Rect, stats: &SystemStats) {
@@ -291,10 +386,20 @@ fn cores_and_history(frame: &mut Frame, area: Rect, stats: &SystemStats) {
     for (index, value) in stats.cores.iter().take(shown).enumerate() {
         let x = (index / column_rows) as u16 * (cell_width + gap);
         let y = (index % column_rows) as u16 + 1;
-        core(frame, slice(area, x, y, cell_width, 1), index, stats.cores.len(), *value);
+        core(
+            frame,
+            slice(area, x, y, cell_width, 1),
+            index,
+            stats.cores.len(),
+            *value,
+        );
     }
     if show_history {
-        history(frame, slice(area, 0, rows as u16 + 1, area.width, area.height), stats);
+        history(
+            frame,
+            slice(area, 0, rows as u16 + 1, area.width, area.height),
+            stats,
+        );
     }
 }
 
@@ -306,39 +411,108 @@ pub(super) fn draw_system(frame: &mut Frame, area: Rect, stats: &SystemStats) {
     } else {
         " 系统资源 "
     };
-    let block = Block::default().borders(Borders::ALL).border_type(BorderType::Rounded)
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .title(title)
-        .title_style(Style::default().fg(if stats.error.is_some() { AMBER } else { CYAN }).add_modifier(Modifier::BOLD))
+        .title_style(
+            Style::default()
+                .fg(if stats.error.is_some() { AMBER } else { CYAN })
+                .add_modifier(Modifier::BOLD),
+        )
         .border_style(Style::default().fg(MUTED));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let pad = if inner.width >= 26 { 1 } else { 0 };
-    let inner = slice(inner, pad, 0, inner.width.saturating_sub(pad * 2), inner.height);
+    let inner = slice(
+        inner,
+        pad,
+        0,
+        inner.width.saturating_sub(pad * 2),
+        inner.height,
+    );
     if inner.height == 0 || inner.width == 0 {
         return;
     }
-    let cpu_detail = if percentage(stats.cpu).is_none() { "采样中".into() } else if stats.cores.is_empty() { "逻辑核未知".into() } else { format!("{} 逻辑核", stats.cores.len()) };
+    let cpu_detail = if percentage(stats.cpu).is_none() {
+        "采样中".into()
+    } else if stats.cores.is_empty() {
+        "逻辑核未知".into()
+    } else {
+        format!("{} 逻辑核", stats.cores.len())
+    };
     metric(frame, row(inner, 0), "CPU", stats.cpu, &cpu_detail, GREEN);
-    let memory = if stats.memory_total == 0 { "采样中".into() } else {
-        format!("{:.1}/{:.1} GiB", gib(stats.memory_used), gib(stats.memory_total))
+    let memory = if stats.memory_total == 0 {
+        "采样中".into()
+    } else {
+        format!(
+            "{:.1}/{:.1} GiB",
+            gib(stats.memory_used),
+            gib(stats.memory_total)
+        )
     };
-    metric(frame, row(inner, 1), "MEM", used_percent(stats.memory_used, stats.memory_total), &memory, CYAN);
-    let swap = if stats.swap_total == 0 { "未启用".into() } else {
-        format!("{:.1}/{:.1} GiB", gib(stats.swap_used), gib(stats.swap_total))
+    metric(
+        frame,
+        row(inner, 1),
+        "MEM",
+        used_percent(stats.memory_used, stats.memory_total),
+        &memory,
+        CYAN,
+    );
+    let swap = if stats.swap_total == 0 {
+        "未启用".into()
+    } else {
+        format!(
+            "{:.1}/{:.1} GiB",
+            gib(stats.swap_used),
+            gib(stats.swap_total)
+        )
     };
-    metric(frame, row(inner, 2), "SWP", used_percent(stats.swap_used, stats.swap_total), &swap, AMBER);
+    metric(
+        frame,
+        row(inner, 2),
+        "SWP",
+        used_percent(stats.swap_used, stats.swap_total),
+        &swap,
+        AMBER,
+    );
     // Spend space on separation only when the normal-size layout can afford it.
     let core_rows = stats.cores.len().max(1).div_ceil(core_columns(inner.width));
-    let spacer = inner.height >= 18 && inner.height as usize >= 8 + core_rows;
+    let detail_rows = 8 + core_rows + usize::from(stats.error.is_some());
+    let spacer = inner.height >= 18 && inner.height as usize >= detail_rows;
     let mut y = 3 + u16::from(spacer);
-    io_row(frame, row(inner, y), "NET", [("↓", stats.network_rx_per_sec), ("↑", stats.network_tx_per_sec)], CYAN);
+    io_row(
+        frame,
+        row(inner, y),
+        "NET",
+        [
+            ("↓", stats.network_rx_per_sec),
+            ("↑", stats.network_tx_per_sec),
+        ],
+        CYAN,
+    );
     y += 1;
-    io_row(frame, row(inner, y), "DSK", [("R", stats.disk_read_per_sec), ("W", stats.disk_write_per_sec)], AMBER);
+    io_row(
+        frame,
+        row(inner, y),
+        "DSK",
+        [
+            ("R", stats.disk_read_per_sec),
+            ("W", stats.disk_write_per_sec),
+        ],
+        AMBER,
+    );
     y += 1;
     load_row(frame, row(inner, y), &stats.load);
     y += 1;
     if let Some(error) = &stats.error {
-        text(frame, row(inner, y), &truncate(error, inner.width as usize), AMBER, false);
+        text(
+            frame,
+            row(inner, y),
+            &truncate(error, inner.width as usize),
+            AMBER,
+            false,
+        );
         y += 1;
     }
     cores_and_history(frame, slice(inner, 0, y, inner.width, inner.height), stats);

@@ -14,15 +14,20 @@ fn fixture() -> SystemStats {
         disk_read_per_sec: Some(0.),
         disk_write_per_sec: Some(187. * 1024.),
         load: "0.87  1.14  1.14".into(),
-        cpu_history: [3, 4, 3, 3, 6, 9, 42, 15, 9, 6, 4, 3, 2, 3, 4, 5, 8, 11, 9, 6, 5, 8,
-            6, 4, 3, 5, 4, 3, 4, 11, 4, 3, 10, 13, 16, 5, 4, 3, 5, 6, 3, 4, 3, 3].into(),
+        cpu_history: [
+            3, 4, 3, 3, 6, 9, 42, 15, 9, 6, 4, 3, 2, 3, 4, 5, 8, 11, 9, 6, 5, 8, 6, 4, 3, 5, 4, 3,
+            4, 11, 4, 3, 10, 13, 16, 5, 4, 3, 5, 6, 3, 4, 3, 3,
+        ]
+        .into(),
         ..SystemStats::default()
     }
 }
 
 fn render(stats: &SystemStats, width: u16, height: u16) -> Buffer {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-    terminal.draw(|frame| draw_system(frame, frame.area(), stats)).unwrap();
+    terminal
+        .draw(|frame| draw_system(frame, frame.area(), stats))
+        .unwrap();
     terminal.backend().buffer().clone()
 }
 
@@ -38,16 +43,36 @@ fn line(buffer: &Buffer, y: u16) -> String {
 }
 
 fn text_of(buffer: &Buffer) -> String {
-    (0..buffer.area.height).map(|y| line(buffer, y)).collect::<Vec<_>>().join("\n")
+    (0..buffer.area.height)
+        .map(|y| line(buffer, y))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
 fn normal_panel_matches_the_approved_groups_and_column_order() {
     let buffer = render(&fixture(), 48, 20);
     let text = text_of(&buffer);
-    for value in ["12 逻辑核", "6.7/19.5 GiB", "34.4%", "0.4/8.0 GiB", "5.0%",
-        "22.0 KiB/s", "7.0 KiB/s", "187 KiB/s", "0 B/s", "1m 0.87", "5m 1.14",
-        "15m 1.14", "CPU 核心", "逐核占用", "CPU 趋势", "峰值 42%", "最近 44 次采样", "0–100%"] {
+    for value in [
+        "12 逻辑核",
+        "6.7/19.5 GiB",
+        "34.4%",
+        "0.4/8.0 GiB",
+        "5.0%",
+        "22.0 KiB/s",
+        "7.0 KiB/s",
+        "187 KiB/s",
+        "0 B/s",
+        "1m 0.87",
+        "5m 1.14",
+        "15m 1.14",
+        "CPU 核心",
+        "逐核占用",
+        "CPU 趋势",
+        "峰值 42%",
+        "最近 44 次采样",
+        "0–100%",
+    ] {
         assert!(text.contains(value), "missing {value}:\n{text}");
     }
     for y in 1..=3 {
@@ -69,6 +94,9 @@ fn compact_panel_hides_history_before_dropping_cores() {
     let text = text_of(&buffer);
     assert!(!text.contains("CPU 趋势"));
     assert!(text.contains("22.0K/s"));
+    assert!(text.contains("7.0K/s"));
+    assert!(text.contains("187K/s"));
+    assert!(!text.contains("KiB/s"));
     assert!(text.contains("0.87 · 1.14 · 1.14"));
     for y in 1..=3 {
         assert!(!line(&buffer, y).contains('━'));
@@ -115,7 +143,10 @@ fn unknown_metrics_and_disabled_swap_are_not_reported_as_zero_usage() {
 
 #[test]
 fn errors_are_visible_even_when_there_is_no_room_for_the_core_list() {
-    let stats = SystemStats { error: Some("系统指标读取失败".into()), ..fixture() };
+    let stats = SystemStats {
+        error: Some("系统指标读取失败".into()),
+        ..fixture()
+    };
     let buffer = render(&stats, 48, 5);
     assert!(line(&buffer, 0).contains("读取失败"));
     let text = text_of(&render(&stats, 48, 20));
@@ -123,8 +154,27 @@ fn errors_are_visible_even_when_there_is_no_room_for_the_core_list() {
 }
 
 #[test]
+fn error_rows_take_priority_over_blank_separation_without_dropping_cores() {
+    let stats = SystemStats {
+        cores: vec![4.; 20],
+        error: Some("系统指标读取失败".into()),
+        ..fixture()
+    };
+    let buffer = render(&stats, 48, 20);
+    let text = text_of(&buffer);
+    assert!(text.contains("系统指标读取失败"));
+    assert!(!text.contains("18/20"));
+    assert!(line(&buffer, 18).contains("10"));
+    assert!(line(&buffer, 18).contains("20"));
+    assert!(!text.contains("CPU 趋势"));
+}
+
+#[test]
 fn many_cores_have_an_explicit_visible_total_and_do_not_keep_a_decorative_plot() {
-    let stats = SystemStats { cores: vec![4.; 192], ..fixture() };
+    let stats = SystemStats {
+        cores: vec![4.; 192],
+        ..fixture()
+    };
     let buffer = render(&stats, 48, 15);
     let text = text_of(&buffer);
     assert!(text.contains("12/192"), "{text}");
@@ -135,7 +185,10 @@ fn many_cores_have_an_explicit_visible_total_and_do_not_keep_a_decorative_plot()
 
 #[test]
 fn odd_core_count_is_column_major_without_repeating_the_last_core() {
-    let stats = SystemStats { cores: vec![11., 22., 33., 44., 55.], ..fixture() };
+    let stats = SystemStats {
+        cores: vec![11., 22., 33., 44., 55.],
+        ..fixture()
+    };
     let buffer = render(&stats, 48, 20);
     assert!(line(&buffer, 9).contains("01"));
     assert!(line(&buffer, 9).contains("04"));
@@ -148,7 +201,9 @@ fn odd_core_count_is_column_major_without_repeating_the_last_core() {
 #[test]
 fn history_peak_and_count_describe_the_visible_samples_only() {
     let stats = SystemStats {
-        cpu_history: std::iter::once(99).chain(std::iter::repeat_n(3, 44)).collect(),
+        cpu_history: std::iter::once(99)
+            .chain(std::iter::repeat_n(3, 44))
+            .collect(),
         ..fixture()
     };
     let buffer = render(&stats, 48, 20);
@@ -161,7 +216,10 @@ fn history_peak_and_count_describe_the_visible_samples_only() {
 
 #[test]
 fn startup_history_is_right_aligned() {
-    let stats = SystemStats { cpu_history: [3, 3, 3, 3].into(), ..fixture() };
+    let stats = SystemStats {
+        cpu_history: [3, 3, 3, 3].into(),
+        ..fixture()
+    };
     let buffer = render(&stats, 48, 20);
     assert_eq!(buffer[(2, 17)].symbol(), " ");
     for x in 42..46 {
@@ -175,9 +233,12 @@ fn extreme_sizes_counts_and_invalid_values_do_not_panic_or_overwrite_the_border(
         for height in [1, 2, 4, 8, 15, 20, 40] {
             for count in [0, 1, 5, 12, 192, 4096] {
                 let stats = SystemStats {
-                    cpu: Some(f64::NAN), cores: vec![f64::INFINITY; count],
-                    memory_used: u64::MAX, memory_total: 1,
-                    network_rx_per_sec: Some(f64::MAX), ..fixture()
+                    cpu: Some(f64::NAN),
+                    cores: vec![f64::INFINITY; count],
+                    memory_used: u64::MAX,
+                    memory_total: 1,
+                    network_rx_per_sec: Some(f64::MAX),
+                    ..fixture()
                 };
                 let buffer = render(&stats, width, height);
                 if width >= 2 && height >= 2 {
@@ -195,7 +256,9 @@ fn extreme_sizes_counts_and_invalid_values_do_not_panic_or_overwrite_the_border(
 fn rendering_stays_inside_an_offset_panel() {
     let mut terminal = Terminal::new(TestBackend::new(64, 30)).unwrap();
     let area = Rect::new(3, 4, 32, 16);
-    terminal.draw(|frame| draw_system(frame, area, &fixture())).unwrap();
+    terminal
+        .draw(|frame| draw_system(frame, area, &fixture()))
+        .unwrap();
     let buffer = terminal.backend().buffer();
     for y in 0..30 {
         for x in 0..64 {
@@ -219,6 +282,9 @@ fn panel_height_is_bounded_and_reserves_quota_space() {
 
 pub(super) fn print_previews() {
     for (width, height) in [(48, 20), (32, 16), (24, 12)] {
-        println!("SYSTEM RATATUI BUFFER {width}x{height}\n{}\nEND SYSTEM BUFFER", text_of(&render(&fixture(), width, height)));
+        println!(
+            "SYSTEM RATATUI BUFFER {width}x{height}\n{}\nEND SYSTEM BUFFER",
+            text_of(&render(&fixture(), width, height))
+        );
     }
 }
