@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Render Rust-exported ANSI fixtures in GTK/VTE; this does not draw any charts.
+"""Render Rust-exported ANSI fixtures in GTK/VTE; no UI is drawn in Python.
 
 Run under Xvfb, e.g.:
   xvfb-run -a /usr/bin/python3 scripts/capture_chart_vte.py /tmp/chart-previews
 Requires python3-gi, gir1.2-vte-2.91, xvfb and a CJK monospace font.
-Input files are produced by export_real_chart_terminal_fixtures with
-CHART_PREVIEW_DIR set. The synthetic data never reads real account credentials.
+Inputs come from export_real_chart_terminal_fixtures (CHART_PREVIEW_DIR) or
+export_real_model_table_terminal_fixtures (MODEL_PREVIEW_DIR).
+The synthetic fixtures never read real account credentials.
 """
 from pathlib import Path
 import re
@@ -25,14 +26,15 @@ def rgba(value):
 
 
 def capture(source):
-    match = re.fullmatch(r"charts-(\d+)x(\d+)-(equal|varied)\.ansi", source.name)
+    match = re.fullmatch(r"(?:charts|models)-(\d+)x(\d+)-(equal|varied|sample)\.ansi", source.name)
     if not match:
         raise ValueError(f"Unexpected fixture name: {source.name}")
     columns, rows = int(match[1]), int(match[2])
     window = Gtk.Window()
     window.set_decorated(False)
     terminal = Vte.Terminal()
-    terminal.set_font(Pango.FontDescription("Noto Sans Mono CJK SC 11"))
+    font_size = 16 if source.name.startswith("models-") else 11
+    terminal.set_font(Pango.FontDescription(f"Noto Sans Mono CJK SC {font_size}"))
     terminal.set_color_background(rgba("#FAFAFA"))
     terminal.set_color_foreground(rgba("#111827"))
     terminal.set_scrollback_lines(0)
@@ -76,8 +78,8 @@ def capture(source):
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         raise SystemExit("Usage: capture_chart_vte.py PREVIEW_DIRECTORY")
-    sources = sorted(Path(sys.argv[1]).glob("charts-*.ansi"))
+    sources = sorted(Path(sys.argv[1]).glob("*.ansi"))
     if not sources:
-        raise SystemExit("No Rust-generated ANSI chart fixtures found")
+        raise SystemExit("No Rust-generated ANSI fixtures found")
     for source in sources:
         capture(source)

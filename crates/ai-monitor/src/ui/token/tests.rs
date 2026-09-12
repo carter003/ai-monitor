@@ -59,7 +59,8 @@ fn summaries_are_peers_above_a_full_width_model_table() {
         assert_eq!(text.matches(label).count(), 1);
     }
     assert!(text.contains("126.3B") && text.contains("$318.6"));
-    assert!(text.contains("deepseek/deepseek-v4-flash"));
+    assert!(text.contains("deepseek-v4-flash"));
+    assert!(!text.contains("deepseek/"));
 }
 
 #[test]
