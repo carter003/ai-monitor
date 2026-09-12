@@ -143,7 +143,7 @@ fn all_terminal_sizes_render_and_scrolling_is_bounded() {
 }
 
 fn quota_text(state: &SourceState, now: i64) -> String {
-    quota_lines(std::slice::from_ref(state), 80, now, false)
+    quota::lines(std::slice::from_ref(state), 80, now)
         .iter()
         .map(Line::to_string)
         .collect::<Vec<_>>()
@@ -447,4 +447,5 @@ fn layout_preview_fixtures() {
         println!("RATATUI BUFFER {width}x{height}\n{text}\nEND BUFFER");
     }
     resources::print_preview_fixtures();
+    quota::print_preview_fixtures();
 }

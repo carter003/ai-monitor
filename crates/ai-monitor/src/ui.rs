@@ -1,5 +1,5 @@
 use crate::{
-    model::{SourceState, UsageStats, countdown},
+    model::{SourceState, UsageStats},
     system::SystemStats,
 };
 use ratatui::{
@@ -12,6 +12,7 @@ use ratatui::{
     },
 };
 
+mod quota;
 mod resources;
 #[cfg(test)]
 mod tests;
@@ -110,7 +111,7 @@ pub fn draw(
 
     let quota_area = sidebar[1];
     let token_area = columns[1];
-    let quota_inner = panel(frame, quota_area, " AI 额度 · 剩余 ");
+    let quota_inner = quota::panel(frame, quota_area, states, now);
     // Only the model ranking is rolling 24H. The charts and summary identify
     // their own calendar periods instead of inheriting a misleading 24H title.
     let token_inner = panel(frame, token_area, " 本地消耗 · Token ");
@@ -206,7 +207,7 @@ fn token_rects(inner: Rect, usage: &UsageStats) -> ([Rect; 4], bool) {
     let remaining = inner.height.saturating_sub(content_height);
     let chart_count = if usage.error.is_none()
         && (!usage.hours.buckets.is_empty() || !usage.month.buckets.is_empty())
-        && inner.width >= token::MIN_CHART_WIDTH
+    && inner.width >= token::MIN_CHART_WIDTH
     {
         (remaining / token::MIN_CHART_HEIGHT).min(3)
     } else {
@@ -260,11 +261,8 @@ fn quota_panel_lines(states: &[SourceState], inner: Rect, now: i64) -> Vec<Line<
     if inner.width == 0 || inner.height == 0 {
         return vec![];
     }
-    let mut lines = quota_lines(states, inner.width, now, true);
-    if lines.len() > inner.height as usize {
-        lines = quota_lines(states, inner.width, now, false);
-    }
-    lines
+    // Group backgrounds separate accounts without spending extra screen rows.
+    quota::lines(states, inner.width, now)
 }
 
 fn token_panel_lines(usage: &UsageStats, inner: Rect) -> Vec<Line<'static>> {
@@ -309,127 +307,6 @@ fn render_panel_lines(
             &mut bar,
         );
     }
-}
-
-fn quota_lines(states: &[SourceState], width: u16, now: i64, gaps: bool) -> Vec<Line<'static>> {
-    let mut lines = vec![];
-    for state in states {
-        // 周额度用尽后停轮询等重置：数据不是旧的，不标旧。
-        let held = state.hold_until.is_some_and(|t| t > now);
-        let stale = state.error.is_some()
-            || (!held
-                && state.fetched_at.is_some_and(|t| {
-                    now.saturating_sub(t).max(0) as u64
-                        > state.refresh_interval.saturating_mul(2).as_secs()
-                }));
-        for card in &state.cards {
-            let status = if state.refreshing {
-                "刷新中".into()
-            } else if let Some(until) = state.hold_until.filter(|t| *t > now) {
-                format!("等{}", countdown(until - now))
-            } else if let Some(at) = state.fetched_at {
-                format!("{}{}", if stale { "旧 " } else { "" }, age(now - at))
-            } else {
-                "未连接".into()
-            };
-            let title = format!(" {}", card.title);
-            let used = Line::raw(title.clone()).width() + Line::raw(status.clone()).width();
-            let padding = (width as usize).saturating_sub(used).max(1);
-            lines.push(Line::from(vec![
-                Span::styled(
-                    title,
-                    Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" ".repeat(padding)),
-                Span::styled(
-                    status,
-                    Style::default().fg(if stale { AMBER } else { MUTED }),
-                ),
-            ]));
-            if let Some(error) = &state.error {
-                lines.push(Line::styled(
-                    format!("  {error}"),
-                    Style::default().fg(AMBER),
-                ));
-            } else if card.meters.is_empty() && card.balance.is_none() && card.note.is_none() {
-                lines.push(Line::styled(
-                    if state.refreshing {
-                        "  正在读取额度…"
-                    } else {
-                        "  暂无可用额度"
-                    },
-                    Style::default().fg(MUTED),
-                ));
-            }
-            for meter in &card.meters {
-                let expired = meter.expired(now);
-                let suffix = if expired {
-                    "待刷新".into()
-                } else if let Some(at) = meter.resets_at {
-                    countdown(at - now)
-                } else if meter.available {
-                    "可用".into()
-                } else {
-                    "—".into()
-                };
-                let value = meter
-                    .remaining
-                    .map(|v| percent(v, meter.decimals))
-                    .unwrap_or_else(|| "—".into());
-                let color = if stale || expired {
-                    MUTED
-                } else {
-                    quota_color(meter.remaining)
-                };
-                let label = format!("  {} ", meter.label);
-                let tail = format!(" {value:>6}  {suffix}");
-                let reserved = Line::raw(label.clone()).width() + Line::raw(tail.clone()).width();
-                let bar_width = (width as usize).saturating_sub(reserved).min(16);
-                let mut spans = vec![Span::styled(label, Style::default().fg(MUTED))];
-                if bar_width >= 3 {
-                    let filled = meter
-                        .remaining
-                        .map(|v| (v * bar_width as f64 / 100.).floor() as usize)
-                        .unwrap_or(0)
-                        .min(bar_width);
-                    spans.push(Span::styled("━".repeat(filled), Style::default().fg(color)));
-                    spans.push(Span::styled(
-                        "━".repeat(bar_width - filled),
-                        Style::default().fg(TRACK),
-                    ));
-                }
-                spans.push(Span::styled(tail, Style::default().fg(color)));
-                lines.push(Line::from(spans));
-            }
-            if let Some(balance) = card.balance {
-                lines.push(Line::from(vec![
-                    Span::styled("  余额  ", Style::default().fg(MUTED)),
-                    Span::styled(
-                        format!("${balance:.2}"),
-                        Style::default()
-                            .fg(if stale {
-                                MUTED
-                            } else if balance < 1. {
-                                AMBER
-                            } else {
-                                GREEN
-                            })
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]));
-            }
-            if let Some(note) = &card.note {
-                lines.push(Line::styled(
-                    format!("  {note}"),
-                    Style::default().fg(MUTED),
-                ));
-            }
-            if gaps {
-                lines.push(Line::raw(""));
-            }
-        }
-    }
-    lines
 }
 
 fn age(seconds: i64) -> String {
