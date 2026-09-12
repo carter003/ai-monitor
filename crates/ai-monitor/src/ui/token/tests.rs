@@ -133,13 +133,17 @@ fn september_month_axes_are_even_and_end_at_day_30() {
 
     let usage = usage();
     let charts = local_charts(&usage, days_in_month(now));
-    for chart in [&charts[1], &charts[2]] {
-        let ticks = tick_positions(chart, 120);
-        assert_eq!(ticks.len(), 30);
-        assert_eq!(ticks.first().unwrap().1, "1");
-        assert_eq!(ticks.last().unwrap().1, "30");
-        assert_even_tick_spacing(&ticks);
-    }
+    let token_ticks = tick_positions(&charts[1], 120);
+    assert_eq!(token_ticks.len(), 30);
+    assert_eq!(token_ticks.first().unwrap().1, "1");
+    assert_eq!(token_ticks.last().unwrap().1, "30");
+    assert_even_tick_spacing(&token_ticks);
+
+    let money_ticks = tick_positions(&charts[2], 120);
+    assert_eq!(money_ticks.len(), 6);
+    assert_eq!(money_ticks.first().unwrap().1, "5");
+    assert_eq!(money_ticks.last().unwrap().1, "30");
+    assert_even_tick_spacing(&money_ticks);
 }
 
 #[test]
@@ -234,5 +238,46 @@ fn chart_rows_fit_across_common_terminal_widths() {
         terminal
             .draw(|frame| draw_stem_chart(frame, frame.area(), &charts[0], 12))
             .unwrap();
+    }
+}
+
+#[test]
+fn consecutive_daily_money_bars_have_no_gaps_across_all_month_lengths() {
+    for days in [28usize, 29, 30, 31] {
+        let mut usage = usage();
+        usage.month.costs = vec![0.0; days * 4];
+        // Simulate continuous usage on days 10, 11, 12 (4 blocks per day)
+        usage.month.costs[9 * 4] = 45.0;
+        usage.month.costs[10 * 4] = 400.0;
+        usage.month.costs[11 * 4] = 600.0;
+        let charts = local_charts(&usage, days);
+        let chart = &charts[2];
+
+        for width in [days as u16 + 10, 50, 80, 120] {
+            let axis = TimeAxis::new(chart, width as usize);
+            assert_eq!(axis.width, days, "plot width must be exactly month days");
+            for index in 0..days - 1 {
+                let x0 = axis.slot_x(index, 1);
+                let x1 = axis.slot_x(index + 1, 1);
+                assert_eq!(
+                    x1 - x0,
+                    1,
+                    "day {index} and {next} must be adjacent",
+                    next = index + 1
+                );
+            }
+
+            let mut terminal = Terminal::new(TestBackend::new(width, 10)).unwrap();
+            terminal
+                .draw(|frame| draw_stem_chart(frame, frame.area(), chart, 12))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            // The baseline is at area.bottom() - 2
+            let baseline_row: String = (0..width).map(|x| buffer[(x, 8)].symbol()).collect();
+            assert!(
+                baseline_row.contains("┴┴┴"),
+                "baseline should have 3 adjacent connected stems without gaps at width {width}: {baseline_row}"
+            );
+        }
     }
 }

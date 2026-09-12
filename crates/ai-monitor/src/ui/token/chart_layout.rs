@@ -39,6 +39,11 @@ impl TimeAxis {
                 width: 0,
             };
         }
+        let available = if chart.aggregate_daily && available >= units {
+            units
+        } else {
+            available
+        };
         let label_width = (chart.first_tick as usize + units - 1).to_string().len();
         // Pick an arithmetic progression, not rounded samples of an arbitrary
         // label count. Leave two cells between the widest adjacent labels.

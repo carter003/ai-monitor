@@ -179,9 +179,9 @@ struct Chart<'a> {
     label: &'static str,
     series: Series<'a>,
     span_seconds: u64,
-    aggregate_daily: bool,
+    pub(super) aggregate_daily: bool,
     first_tick: u32,
-    axis_units: usize,
+    pub(super) axis_units: usize,
     buckets_per_unit: usize,
 }
 
