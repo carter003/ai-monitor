@@ -5,11 +5,14 @@ use super::{CYAN, GREEN, INK, MUTED, TRACK, columns, compact, truncate};
 use crate::model::{ModelUsage, UsageStats, UsageTotal};
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
 };
+
+mod chart_layout;
+use chart_layout::{TimeAxis, draw_monthly_ranking, monthly_areas, tick_positions};
 
 #[cfg(test)]
 mod tests;
@@ -19,7 +22,6 @@ pub(super) const MIN_CHART_WIDTH: u16 = 16;
 const NAME_MIN: usize = 10;
 const GAP: usize = 2;
 const LINE_COLOR: Color = Color::Rgb(33, 150, 243);
-const MONTH_RANKING_MIN_WIDTH: u16 = 66;
 const MONTH_MODEL_MAX_BYTES: usize = 15;
 
 pub(super) fn lines(usage: &UsageStats, width: u16, height: usize) -> Vec<Line<'static>> {
@@ -276,90 +278,6 @@ fn money(value: f64) -> String {
     }
 }
 
-fn model_basename(model: &str) -> &str {
-    model.rsplit('/').next().unwrap_or(model)
-}
-
-fn truncate_bytes(value: &str, max_bytes: usize) -> String {
-    if value.len() <= max_bytes {
-        return value.to_owned();
-    }
-    let mut end = max_bytes.min(value.len());
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].to_owned()
-}
-
-fn ranking_line(model: &ModelUsage, rank: usize, width: usize) -> Line<'static> {
-    if width == 0 {
-        return Line::raw("");
-    }
-    let token = compact(model.total_tokens());
-    let cost = model.cost.map(money).unwrap_or_else(|| "—".into());
-    let rank_text = format!("{rank:>2}. ");
-    let fixed = columns(&rank_text) + 1 + columns(&token) + 1 + columns(&cost);
-    let max_name_width = width.saturating_sub(fixed).min(MONTH_MODEL_MAX_BYTES);
-    let raw_name = truncate_bytes(model_basename(&model.model), MONTH_MODEL_MAX_BYTES);
-    let name = truncate(&raw_name, max_name_width);
-    let name_padding = max_name_width.saturating_sub(columns(&name));
-    let used = columns(&rank_text)
-        + columns(&name)
-        + name_padding
-        + 1
-        + columns(&token)
-        + 1
-        + columns(&cost);
-    let tail = width.saturating_sub(used);
-    Line::from(vec![
-        Span::styled(rank_text, Style::default().fg(MUTED)),
-        Span::styled(name, Style::default().fg(CYAN)),
-        Span::raw(" ".repeat(name_padding + 1)),
-        Span::styled(token, Style::default().fg(INK)),
-        Span::raw(" "),
-        Span::styled(cost, Style::default().fg(GREEN)),
-        Span::raw(" ".repeat(tail)),
-    ])
-}
-
-fn draw_monthly_ranking(frame: &mut Frame, area: Rect, models: &[ModelUsage]) {
-    if area.width < 20 || area.height < 2 {
-        return;
-    }
-    frame.render_widget(
-        Paragraph::new(Line::styled(
-            truncate(" 本月模型 · Token TOP 10", area.width as usize),
-            Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-        )),
-        Rect::new(area.x, area.y, area.width, 1),
-    );
-    let body = Rect::new(
-        area.x,
-        area.y.saturating_add(1),
-        area.width,
-        area.height.saturating_sub(1),
-    );
-    let columns =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(body);
-    for (column, start) in [(columns[0], 0usize), (columns[1], 5usize)] {
-        if column.width == 0 {
-            continue;
-        }
-        let rows = column.height.min(5);
-        for row in 0..rows {
-            let index = start + row as usize;
-            let line = models
-                .get(index)
-                .map(|model| ranking_line(model, index + 1, column.width as usize))
-                .unwrap_or_else(|| Line::styled("—", Style::default().fg(MUTED)));
-            frame.render_widget(
-                Paragraph::new(line),
-                Rect::new(column.x, column.y + row, column.width, 1),
-            );
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 enum Series<'a> {
     Tokens(&'a [u64]),
@@ -427,19 +345,16 @@ pub(super) fn draw_charts(frame: &mut Frame, areas: &[Rect], usage: &UsageStats,
     let through_day = chrono::DateTime::from_timestamp(now, 0)
         .map(|time| chrono::Datelike::day(&time.with_timezone(&chrono::Local)) as usize)
         .unwrap_or(0);
+    let monthly = monthly_areas(areas);
     for (index, (chart, area)) in charts.iter().zip(areas).enumerate() {
-        if area.height < MIN_CHART_HEIGHT {
-            continue;
-        }
-        if index == 2 && area.width >= MONTH_RANKING_MIN_WIDTH {
-            let split =
-                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .split(*area);
-            draw_stem_chart(frame, split[0], chart, through_day);
-            draw_monthly_ranking(frame, split[1], &usage.month_models);
-        } else {
-            draw_stem_chart(frame, *area, chart, through_day);
-        }
+        let area = match monthly {
+            Some((left, _)) if index > 0 => left[index - 1],
+            _ => *area,
+        };
+        draw_stem_chart(frame, area, chart, through_day);
+    }
+    if let Some((_, ranking)) = monthly {
+        draw_monthly_ranking(frame, ranking, &usage.month_models);
     }
 }
 
@@ -532,42 +447,6 @@ fn chart_values(chart: &Chart<'_>, through_day: usize) -> Vec<f64> {
         .collect()
 }
 
-fn slot_x(index: usize, slots: usize, plot_width: usize) -> usize {
-    if slots == 0 || plot_width == 0 {
-        return 0;
-    }
-    ((2 * index + 1) * plot_width / (2 * slots)).min(plot_width - 1)
-}
-
-fn unit_x(index: usize, units: usize, plot_width: usize) -> usize {
-    slot_x(index, units, plot_width)
-}
-
-fn tick_positions(chart: &Chart<'_>, plot_width: usize) -> Vec<(usize, String)> {
-    if chart.axis_units == 0 || plot_width == 0 {
-        return vec![];
-    }
-    let max_labels = (plot_width / 3).max(1).min(chart.axis_units);
-    let indices = if max_labels == 1 {
-        vec![chart.axis_units - 1]
-    } else if max_labels == chart.axis_units {
-        (0..chart.axis_units).collect()
-    } else {
-        (0..max_labels)
-            .map(|index| index * (chart.axis_units - 1) / (max_labels - 1))
-            .collect()
-    };
-    indices
-        .into_iter()
-        .map(|index| {
-            (
-                unit_x(index, chart.axis_units, plot_width),
-                (chart.first_tick as usize + index).to_string(),
-            )
-        })
-        .collect()
-}
-
 fn stem_heights(
     chart: &Chart<'_>,
     values: &[f64],
@@ -580,11 +459,12 @@ fn stem_heights(
     if slots == 0 || plot_width == 0 || plot_rows == 0 || max <= 0. {
         return heights;
     }
+    let axis = TimeAxis::new(chart, plot_width);
     for (index, value) in values.iter().copied().take(slots).enumerate() {
         if !value.is_finite() || value <= 0. {
             continue;
         }
-        let x = slot_x(index, slots, plot_width);
+        let x = axis.slot_x(index, chart.buckets_per_unit);
         let height = ((value / max) * plot_rows as f64).ceil() as usize;
         heights[x] = heights[x].max(height.clamp(1, plot_rows));
     }
@@ -608,7 +488,7 @@ fn draw_stem_chart(frame: &mut Frame, area: Rect, chart: &Chart<'_>, through_day
     );
     let top_label = value_label(max, max, chart.series.money());
     let mid_label = value_label(max / 2., max, chart.series.money());
-    let origin = columns(&top_label).max(columns(&mid_label)).max(3) + 2;
+    let origin = columns(&top_label).max(columns(&mid_label)).max(4) + 2;
     if area.width as usize <= origin + 4 {
         return;
     }
@@ -622,7 +502,8 @@ fn draw_stem_chart(frame: &mut Frame, area: Rect, chart: &Chart<'_>, through_day
     );
 
     let plot_rows = area.height.saturating_sub(3);
-    let plot_width = area.width.saturating_sub(origin as u16);
+    let available_width = area.width.saturating_sub(origin as u16);
+    let plot_width = TimeAxis::new(chart, available_width as usize).width as u16;
     if plot_rows < 2 || plot_width < 2 {
         return;
     }
@@ -634,11 +515,7 @@ fn draw_stem_chart(frame: &mut Frame, area: Rect, chart: &Chart<'_>, through_day
     for (offset, label) in axis {
         let y = area.y + 1 + offset.min(plot_rows);
         let mark = if offset == plot_rows { '└' } else { '┤' };
-        let text = format!(
-            " {:>width$} {mark}",
-            label,
-            width = origin.saturating_sub(3)
-        );
+        let text = format!(" {:>width$} {mark}", label, width = origin.saturating_sub(3));
         frame.render_widget(
             Paragraph::new(Span::styled(text, Style::default().fg(TRACK))),
             Rect::new(area.x, y, origin as u16, 1),
@@ -675,14 +552,11 @@ fn draw_stem_chart(frame: &mut Frame, area: Rect, chart: &Chart<'_>, through_day
 
     let mut labels = vec![' '; plot_width as usize];
     for (x, text) in tick_positions(chart, plot_width as usize) {
-        let text_width = columns(&text);
-        let start = x
-            .saturating_sub(text_width / 2)
-            .min(labels.len().saturating_sub(text_width));
+        // Right-align every numeric label to its tick. Never shift/clamp an
+        // individual label, which would break the shared calendar geometry.
+        let start = x + 1 - columns(&text);
         for (offset, ch) in text.chars().enumerate() {
-            if start + offset < labels.len() {
-                labels[start + offset] = ch;
-            }
+            labels[start + offset] = ch;
         }
     }
     frame.render_widget(
