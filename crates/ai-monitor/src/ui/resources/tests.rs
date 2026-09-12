@@ -211,7 +211,7 @@ fn history_peak_and_count_describe_the_visible_samples_only() {
     assert!(text.contains("峰值 3%"));
     assert!(!text.contains("99%"));
     assert!(text.contains("最近 88 次采样"));
-    assert_eq!(buffer[(45, 17)].symbol(), "⣀");
+    assert_eq!(buffer[(45, 17)].symbol(), "▄");
 }
 
 #[test]
@@ -224,7 +224,7 @@ fn startup_history_is_right_aligned() {
     assert_eq!(buffer[(2, 17)].symbol(), " ");
     assert_eq!(buffer[(43, 17)].symbol(), " ");
     for x in 44..46 {
-        assert_eq!(buffer[(x, 17)].symbol(), "⣀");
+        assert_eq!(buffer[(x, 17)].symbol(), "▄");
     }
 }
 
