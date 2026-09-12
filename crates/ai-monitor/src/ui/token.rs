@@ -339,8 +339,8 @@ fn draw_monthly_ranking(frame: &mut Frame, area: Rect, models: &[ModelUsage]) {
         area.width,
         area.height.saturating_sub(1),
     );
-    let columns = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(body);
+    let columns =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(body);
     for (column, start) in [(columns[0], 0usize), (columns[1], 5usize)] {
         if column.width == 0 {
             continue;
@@ -432,8 +432,9 @@ pub(super) fn draw_charts(frame: &mut Frame, areas: &[Rect], usage: &UsageStats,
             continue;
         }
         if index == 2 && area.width >= MONTH_RANKING_MIN_WIDTH {
-            let split = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(*area);
+            let split =
+                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(*area);
             draw_stem_chart(frame, split[0], chart, through_day);
             draw_monthly_ranking(frame, split[1], &usage.month_models);
         } else {
