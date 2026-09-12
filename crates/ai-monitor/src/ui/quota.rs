@@ -1,6 +1,6 @@
 //! Compact quota groups. All meters share column widths; narrow panes drop
 //! decoration before data. This module only renders existing source state.
-use super::{AMBER, CYAN, GREEN, INK, MUTED, age, columns, percent, quota_color, truncate};
+use super::{AMBER, CYAN, GREEN, INK, MUTED, columns, percent, quota_color, truncate};
 use crate::model::{Card, Meter, SourceState, countdown};
 use ratatui::{
     Frame,
@@ -184,14 +184,12 @@ fn heading(
         "刷新中".into()
     } else if let Some(until) = state.hold_until.filter(|t| *t > now) {
         format!("等{}", countdown(until.saturating_sub(now)))
-    } else if let Some(at) = state.fetched_at {
-        format!(
-            "{}{}前",
-            if is_stale { "旧 " } else { "" },
-            age(now.saturating_sub(at))
-        )
-    } else {
+    } else if state.fetched_at.is_none() {
         "未连接".into()
+    } else if is_stale {
+        "旧".into()
+    } else {
+        String::new()
     };
     if columns(&status) + 5 > cols.width {
         status = if is_stale {

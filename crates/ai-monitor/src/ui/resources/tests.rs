@@ -71,7 +71,7 @@ fn normal_panel_matches_the_approved_groups_and_column_order() {
         "CPU 趋势",
         "峰值 42%",
         "最近 44 次采样",
-        "0–100%",
+        "0–50%",
     ] {
         assert!(text.contains(value), "missing {value}:\n{text}");
     }
@@ -81,11 +81,16 @@ fn normal_panel_matches_the_approved_groups_and_column_order() {
     }
     // Labels never overlay a colored gauge background.
     assert!(buffer.content.iter().all(|cell| cell.bg == Color::Reset));
-    assert!(line(&buffer, 9).contains("01"));
-    assert!(line(&buffer, 9).contains("07"));
-    assert!(line(&buffer, 14).contains("06"));
-    assert!(line(&buffer, 14).contains("12"));
-    assert!(line(&buffer, 15).contains("CPU 趋势"));
+    assert!(line(&buffer, 3).contains("SWP"));
+    assert!(line(&buffer, 4).contains("NET"));
+    assert!(line(&buffer, 8).contains("01"));
+    assert!(line(&buffer, 8).contains("07"));
+    assert!(line(&buffer, 13).contains("06"));
+    assert!(line(&buffer, 13).contains("12"));
+    assert!(line(&buffer, 14).contains("CPU 趋势"));
+    assert!(line(&buffer, 15).contains('▖'));
+    assert!(line(&buffer, 16).contains('▌'));
+    assert!(line(&buffer, 18).contains("最近 44 次采样"));
 }
 
 #[test]
@@ -154,7 +159,7 @@ fn errors_are_visible_even_when_there_is_no_room_for_the_core_list() {
 }
 
 #[test]
-fn error_rows_take_priority_over_blank_separation_without_dropping_cores() {
+fn error_rows_do_not_drop_cores() {
     let stats = SystemStats {
         cores: vec![4.; 20],
         error: Some("系统指标读取失败".into()),
@@ -190,12 +195,12 @@ fn odd_core_count_is_column_major_without_repeating_the_last_core() {
         ..fixture()
     };
     let buffer = render(&stats, 48, 20);
-    assert!(line(&buffer, 9).contains("01"));
-    assert!(line(&buffer, 9).contains("04"));
-    assert!(line(&buffer, 10).contains("02"));
-    assert!(line(&buffer, 10).contains("05"));
-    assert!(line(&buffer, 11).contains("03"));
-    assert!(!line(&buffer, 11).contains("05"));
+    assert!(line(&buffer, 8).contains("01"));
+    assert!(line(&buffer, 8).contains("04"));
+    assert!(line(&buffer, 9).contains("02"));
+    assert!(line(&buffer, 9).contains("05"));
+    assert!(line(&buffer, 10).contains("03"));
+    assert!(!line(&buffer, 10).contains("05"));
 }
 
 #[test]
@@ -278,6 +283,22 @@ fn panel_height_is_bounded_and_reserves_quota_space() {
         for count in [0, 1, 12, 192, usize::MAX] {
             assert!(height(body, 48, count) <= body.saturating_sub(8));
         }
+    }
+}
+
+#[test]
+fn history_dynamic_scale_adapts_to_peak() {
+    for (peak, expected_scale) in [(15, "0–25%"), (35, "0–50%"), (70, "0–80%"), (95, "0–100%")]
+    {
+        let stats = SystemStats {
+            cpu_history: std::iter::repeat_n(peak, 20).collect(),
+            ..fixture()
+        };
+        let buffer = render(&stats, 48, 20);
+        assert!(
+            text_of(&buffer).contains(expected_scale),
+            "peak {peak} expected {expected_scale}"
+        );
     }
 }
 

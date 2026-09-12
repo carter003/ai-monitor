@@ -241,15 +241,16 @@ fn tiny_panes_stack_complete_values_and_reset_times() {
 
 #[test]
 fn account_names_are_muted_and_truncated_before_status() {
-    let states = vec![state(
+    let mut state = state(
         Source::Agy2,
         vec![card("AGY2 (很长的名字 Bluefish Carter e\u{301})", vec![])],
-    )];
-    let rows = lines(&states, 30, NOW);
+    );
+    state.refreshing = true;
+    let rows = lines(&[state], 30, NOW);
     let row = &rows[0];
     assert!(row.to_string().contains("AGY2 · "));
     assert!(row.to_string().contains('…'));
-    assert!(row.to_string().trim_end().ends_with("31s前"));
+    assert!(row.to_string().trim_end().ends_with("刷新中"));
     let name = row
         .spans
         .iter()

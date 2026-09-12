@@ -312,12 +312,20 @@ fn history(frame: &mut Frame, area: Rect, stats: &SystemStats) {
         .rev()
         .map(|n| (*n).min(100))
         .collect();
-    let peak = samples
-        .iter()
-        .max()
-        .map_or_else(|| "峰值 —".into(), |n| format!("峰值 {n}%"));
+    let peak_val = samples.iter().copied().max().unwrap_or(0);
+    let peak = if samples.is_empty() {
+        "峰值 —".into()
+    } else {
+        format!("峰值 {peak_val}%")
+    };
     section(frame, row(area, 0), "CPU 趋势", &peak);
     let graph = slice(area, 0, 1, area.width, area.height - 2);
+    let scale_max = match peak_val {
+        0..=20 => 25,
+        21..=45 => 50,
+        46..=75 => 80,
+        _ => 100,
+    };
     if samples.is_empty() {
         text(frame, row(graph, 0), "采样中", MUTED, false);
     } else {
@@ -328,7 +336,8 @@ fn history(frame: &mut Frame, area: Rect, stats: &SystemStats) {
                 if *n == 0 {
                     0
                 } else {
-                    ((*n * resolution).div_ceil(100)).min(resolution)
+                    let lvl = (*n * resolution + scale_max / 2) / scale_max;
+                    lvl.clamp(1, resolution)
                 }
             })
             .collect();
@@ -370,18 +379,26 @@ fn history(frame: &mut Frame, area: Rect, stats: &SystemStats) {
     }
     let footer = row(area, area.height - 1);
     let count = format!("最近 {} 次采样", samples.len());
-    let scale = "0–100%";
+    let scale = format!("0–{scale_max}%");
+    let scale_len = columns(&scale) as u16;
+    let count_width = footer.width.saturating_sub(scale_len + 1);
     text(
         frame,
-        slice(footer, 0, 0, footer.width.saturating_sub(7), 1),
+        slice(footer, 0, 0, count_width, 1),
         &count,
         MUTED,
         false,
     );
     right(
         frame,
-        slice(footer, footer.width.saturating_sub(6), 0, 6, 1),
-        scale,
+        slice(
+            footer,
+            footer.width.saturating_sub(scale_len),
+            0,
+            scale_len,
+            1,
+        ),
+        &scale,
         MUTED,
         false,
     );
@@ -501,11 +518,7 @@ pub(super) fn draw_system(frame: &mut Frame, area: Rect, stats: &SystemStats) {
         &swap,
         AMBER,
     );
-    // Spend space on separation only when the normal-size layout can afford it.
-    let core_rows = stats.cores.len().max(1).div_ceil(core_columns(inner.width));
-    let detail_rows = 8 + core_rows + usize::from(stats.error.is_some());
-    let spacer = inner.height >= 18 && inner.height as usize >= detail_rows;
-    let mut y = 3 + u16::from(spacer);
+    let mut y = 3;
     io_row(
         frame,
         row(inner, y),

@@ -309,16 +309,6 @@ fn render_panel_lines(
     }
 }
 
-fn age(seconds: i64) -> String {
-    if seconds < 60 {
-        format!("{}s", seconds.max(0))
-    } else if seconds < 3600 {
-        format!("{}m", seconds / 60)
-    } else {
-        format!("{}h", seconds / 3600)
-    }
-}
-
 pub use crate::model::compact;
 
 /// Use the same terminal-width implementation as Ratatui's renderer.
