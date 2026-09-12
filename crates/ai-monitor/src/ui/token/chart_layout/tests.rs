@@ -286,7 +286,8 @@ fn small_monthly_panes_keep_full_width_charts() {
 #[test]
 fn ranking_drops_columns_before_clipping_names_or_numbers() {
     let usage = sample_usage();
-    for (width, show_cost, show_token) in [(40, true, true), (24, false, true), (19, false, false)] {
+    for (width, show_cost, show_token) in [(40, true, true), (24, false, true), (19, false, false)]
+    {
         let rows = ranking_table(&usage.month_models, width);
         let header = rows[0].to_string();
         assert_eq!(header.contains("金额"), show_cost);
@@ -309,7 +310,11 @@ fn ranking_drops_columns_before_clipping_names_or_numbers() {
     extreme.month_models[0].input_total = u64::MAX;
     extreme.month_models[0].cost = Some(f64::MAX);
     for width in 0..=120 {
-        assert!(ranking_table(&extreme.month_models, width).iter().all(|row| row.width() <= width));
+        assert!(
+            ranking_table(&extreme.month_models, width)
+                .iter()
+                .all(|row| row.width() <= width)
+        );
     }
 }
 
@@ -324,8 +329,8 @@ fn short_rankings_reduce_rows_and_never_write_outside_their_rectangle() {
                 .draw(|frame| {
                     for y in 0..28 {
                         for x in 0..width + 6 {
-                            let inside = x >= area.x && x < area.right()
-                                && y >= area.y && y < area.bottom();
+                            let inside =
+                                x >= area.x && x < area.right() && y >= area.y && y < area.bottom();
                             frame.buffer_mut()[(x, y)].set_symbol(if inside { " " } else { "!" });
                         }
                     }
@@ -341,7 +346,10 @@ fn short_rankings_reduce_rows_and_never_write_outside_their_rectangle() {
             } else {
                 (height - 1 - u16::from(height >= 6)).min(10) as usize
             };
-            assert_eq!(rows.iter().filter(|row| row.contains("model-")).count(), expected);
+            assert_eq!(
+                rows.iter().filter(|row| row.contains("model-")).count(),
+                expected
+            );
             for y in 0..28 {
                 for x in 0..width + 6 {
                     if x < area.x || x >= area.right() || y < area.y || y >= area.bottom() {
@@ -372,13 +380,24 @@ fn terminal_resize_removes_hidden_models_and_restores_them_without_stale_cells()
             .draw(|frame| super::super::draw_charts(frame, &areas, &usage, now))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let rows: Vec<_> = (0..height).map(|y| row_text(buffer, buffer.area, y)).collect();
+        let rows: Vec<_> = (0..height)
+            .map(|y| row_text(buffer, buffer.area, y))
+            .collect();
         let expected = monthly_areas(&areas)
             .map(|(_, ranking)| (ranking.height - 1 - u16::from(ranking.height >= 6)).min(10))
             .unwrap_or(0) as usize;
-        assert_eq!(rows.iter().filter(|row| row.contains("model-")).count(), expected);
-        assert_eq!(rows.iter().filter(|row| row.contains("本月 Token")).count(), 1);
-        assert_eq!(rows.iter().filter(|row| row.contains("本月金额")).count(), 1);
+        assert_eq!(
+            rows.iter().filter(|row| row.contains("model-")).count(),
+            expected
+        );
+        assert_eq!(
+            rows.iter().filter(|row| row.contains("本月 Token")).count(),
+            1
+        );
+        assert_eq!(
+            rows.iter().filter(|row| row.contains("本月金额")).count(),
+            1
+        );
         if expected == 0 {
             assert!(!rows.iter().any(|row| row.contains("TOP")));
         }
@@ -436,7 +455,14 @@ fn export_real_chart_terminal_fixtures() {
     let now = chrono::DateTime::parse_from_rfc3339("2026-09-12T12:00:00+00:00")
         .unwrap()
         .timestamp();
-    for (width, height) in [(48, 18), (52, 16), (80, 20), (100, 24), (120, 28), (160, 32)] {
+    for (width, height) in [
+        (48, 18),
+        (52, 16),
+        (80, 20),
+        (100, 24),
+        (120, 28),
+        (160, 32),
+    ] {
         for pattern in ["equal", "varied"] {
             let mut usage = sample_usage();
             usage.month.buckets.fill(0);
