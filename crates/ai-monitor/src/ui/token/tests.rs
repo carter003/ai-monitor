@@ -216,10 +216,12 @@ fn stems_are_straight_and_connect_directly_to_the_x_axis() {
             .chars()
             .any(|ch| ('\u{2801}'..='\u{28ff}').contains(&ch))
     }));
-    assert!(!buffer
-        .content
-        .iter()
-        .any(|cell| cell.symbol().chars().any(|ch| "█▌▐▁▂▃▄▅▆▇".contains(ch))));
+    assert!(
+        !buffer
+            .content
+            .iter()
+            .any(|cell| cell.symbol().chars().any(|ch| "█▌▐▁▂▃▄▅▆▇".contains(ch)))
+    );
 }
 
 #[test]
