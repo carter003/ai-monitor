@@ -15,8 +15,9 @@ use ratatui::{
 #[cfg(test)]
 mod tests;
 
-const RANKING_MIN_HEIGHT: u16 = 12; // Title, header, and all ten models.
-const MONTHLY_MIN_WIDTH: u16 = 66;
+const RANKING_MIN_WIDTH: usize = 16;
+const RANKING_NAME_MIN: usize = 10;
+const MONEY_CHART_MIN_WIDTH: u16 = 24;
 const PANEL_GAP: u16 = 2;
 
 /// A whole number of terminal cells per visible tick interval. Both labels and
@@ -83,38 +84,30 @@ pub(super) fn tick_positions(chart: &Chart<'_>, available: usize) -> Vec<(usize,
         .collect()
 }
 
-/// Use the combined height of both monthly charts so TOP 10 never needs a
-/// second column or gets clipped to five entries. Short/narrow panes retain
-/// the existing full-width charts rather than squeezing unreadable content.
+/// Split only the money chart's row. The monthly Token rectangle is returned
+/// unchanged: the ranking must never borrow its width, height, or position.
+/// If the bottom row cannot fit two readable panels, keep the full-width chart.
 pub(super) fn monthly_areas(areas: &[Rect]) -> Option<([Rect; 2], Rect)> {
     let tokens = *areas.get(1)?;
     let cost = *areas.get(2)?;
-    if tokens.width < MONTHLY_MIN_WIDTH
-        || tokens.height < super::MIN_CHART_HEIGHT
-        || cost.height < super::MIN_CHART_HEIGHT
-        || tokens.x != cost.x
-        || tokens.width != cost.width
-        || tokens.bottom() != cost.y
+    let available = cost.width.checked_sub(PANEL_GAP)?;
+    let left_width = available / 2;
+    let right_width = available - left_width;
+    if cost.height < super::MIN_CHART_HEIGHT
+        || left_width < MONEY_CHART_MIN_WIDTH
+        || (right_width as usize) < RANKING_MIN_WIDTH
     {
         return None;
     }
-    let height = tokens.height.saturating_add(cost.height);
-    if height < RANKING_MIN_HEIGHT {
-        return None;
-    }
-    let left_width = (tokens.width - PANEL_GAP) / 2;
-    let right = Rect::new(
-        tokens.x + left_width + PANEL_GAP,
-        tokens.y,
-        tokens.width - left_width - PANEL_GAP,
-        height,
+    let ranking = Rect::new(
+        cost.x + left_width + PANEL_GAP,
+        cost.y,
+        right_width,
+        cost.height,
     );
     Some((
-        [
-            Rect::new(tokens.x, tokens.y, left_width, tokens.height),
-            Rect::new(cost.x, cost.y, left_width, cost.height),
-        ],
-        right,
+        [tokens, Rect::new(cost.x, cost.y, left_width, cost.height)],
+        ranking,
     ))
 }
 
@@ -135,6 +128,9 @@ fn model_name(model: &str, width: usize) -> String {
 }
 
 fn ranking_table(models: &[ModelUsage], width: usize) -> Vec<Line<'static>> {
+    if width < RANKING_MIN_WIDTH {
+        return vec![];
+    }
     let taken = &models[..models.len().min(10)];
     let costs: Vec<_> = taken
         .iter()
@@ -156,29 +152,51 @@ fn ranking_table(models: &[ModelUsage], width: usize) -> Vec<Line<'static>> {
         .max()
         .unwrap_or(0)
         .max(5);
-    // Two outer cells and at least one cell in each of the three gaps.
-    let fixed = 3 + cost_width + token_width + 2 + 3;
-    if width < fixed + columns("模型") {
-        return vec![Line::styled(
-            truncate(" 窗口过窄", width),
-            Style::default().fg(MUTED),
-        )];
+    let mut widths = [3, RANKING_NAME_MIN, cost_width, token_width];
+    let mut enabled = [true; 4];
+    let required = |enabled: &[bool; 4]| {
+        let count = enabled.iter().filter(|show| **show).count();
+        2 + count - 1
+            + (0..4)
+                .filter(|index| enabled[*index])
+                .map(|index| widths[index])
+                .sum::<usize>()
+    };
+    // Remove secondary fields before squeezing the model name or clipping a
+    // number. Every displayed row and its header use the same chosen columns.
+    for optional in [2, 3] {
+        if required(&enabled) <= width {
+            break;
+        }
+        enabled[optional] = false;
     }
-    let widths = [
-        3,
-        (width - fixed).min(MONTH_MODEL_MAX_BYTES),
-        cost_width,
-        token_width,
-    ];
-    let free = width - 2 - widths.iter().sum::<usize>();
-    let gaps = [
-        free / 3 + usize::from(!free.is_multiple_of(3)),
-        free / 3 + usize::from(free % 3 > 1),
-        free / 3,
-    ];
+    if required(&enabled) > width {
+        return vec![];
+    }
+    let count = enabled.iter().filter(|show| **show).count();
+    let fixed = 2 + count - 1
+        + (0..4)
+            .filter(|index| *index != 1 && enabled[*index])
+            .map(|index| widths[index])
+            .sum::<usize>();
+    widths[1] = (width - fixed).min(MONTH_MODEL_MAX_BYTES);
+    let free = width
+        - 2
+        - (0..4)
+            .filter(|index| enabled[*index])
+            .map(|index| widths[index])
+            .sum::<usize>();
+    let gap = free / (count - 1);
+    let remainder = free % (count - 1);
+    let left_padding = 1 + remainder / 2;
+    let right_padding = 1 + remainder - remainder / 2;
+    let last = (0..4).rfind(|index| enabled[*index]).unwrap_or(1);
     let row = |cells: [(String, Color); 4]| {
-        let mut spans = vec![Span::raw(" ")];
+        let mut spans = vec![Span::raw(" ".repeat(left_padding))];
         for (index, (text, color)) in cells.into_iter().enumerate() {
+            if !enabled[index] {
+                continue;
+            }
             let padding = " ".repeat(widths[index].saturating_sub(columns(&text)));
             let text = if index == 1 {
                 format!("{text}{padding}")
@@ -186,16 +204,15 @@ fn ranking_table(models: &[ModelUsage], width: usize) -> Vec<Line<'static>> {
                 format!("{padding}{text}")
             };
             spans.push(Span::styled(text, Style::default().fg(color)));
-            if let Some(gap) = gaps.get(index) {
-                spans.push(Span::raw(" ".repeat(*gap)));
+            if index != last {
+                spans.push(Span::raw(" ".repeat(gap)));
             }
         }
-        spans.push(Span::raw(" "));
+        spans.push(Span::raw(" ".repeat(right_padding)));
         Line::from(spans)
     };
-    let mut result = vec![row(
-        ["#", "模型", "金额", "Token"].map(|s| (s.into(), MUTED))
-    )];
+    let header = ["#", "模型", "金额", "Token"].map(|text| (text.into(), MUTED));
+    let mut result = vec![row(header)];
     for (index, model) in taken.iter().enumerate() {
         result.push(row([
             (format!("{}.", index + 1), MUTED),
@@ -211,36 +228,55 @@ fn ranking_table(models: &[ModelUsage], width: usize) -> Vec<Line<'static>> {
 }
 
 pub(super) fn draw_monthly_ranking(frame: &mut Frame, area: Rect, models: &[ModelUsage]) {
-    if area.width < 20 || area.height < RANKING_MIN_HEIGHT {
+    if (area.width as usize) < RANKING_MIN_WIDTH || area.height < 2 {
         return;
     }
+    let show_header = area.height >= 6;
+    let reserved = 1 + u16::from(show_header);
+    let count = (area.height - reserved).min(10) as usize;
+    let taken = &models[..models.len().min(count)];
+    let table = ranking_table(taken, area.width as usize);
+    if table.is_empty() {
+        return;
+    }
+    let title = if taken.is_empty() {
+        " 本月模型 · Token".to_owned()
+    } else {
+        let count = taken.len();
+        [
+            format!(" 本月模型 · Token TOP {count}"),
+            format!(" 本月模型 · TOP {count}"),
+            format!(" TOP {count}"),
+        ]
+        .into_iter()
+        .find(|text| columns(text) <= area.width as usize)
+        .unwrap_or_default()
+    };
     frame.render_widget(
         Paragraph::new(Line::styled(
-            truncate(" 本月模型 · Token TOP 10", area.width as usize),
+            truncate(&title, area.width as usize),
             Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
         )),
         Rect::new(area.x, area.y, area.width, 1),
     );
-    let table = ranking_table(models, area.width as usize);
-    frame.render_widget(
-        Paragraph::new(table[0].clone()),
-        Rect::new(area.x, area.y + 1, area.width, 1),
-    );
-    let body = Rect::new(area.x, area.y + 2, area.width, area.height - 2);
-    let count = table.len() - 1;
-    if models.is_empty() {
+    if show_header {
         frame.render_widget(
-            Paragraph::new("暂无本月用量记录")
-                .style(Style::default().fg(MUTED))
-                .centered(),
-            Rect::new(body.x, body.y + body.height / 2, body.width, 1),
+            Paragraph::new(table[0].clone()),
+            Rect::new(area.x, area.y + 1, area.width, 1),
+        );
+    }
+    if taken.is_empty() {
+        frame.render_widget(
+            Paragraph::new(truncate(" 暂无本月用量记录", area.width as usize))
+                .style(Style::default().fg(MUTED)),
+            Rect::new(area.x, area.y + reserved, area.width, 1),
         );
         return;
     }
-    // Center each row in an equal-height band. Integer-cell rounding can only
-    // change adjacent row gaps by one cell, including on terminal resize.
+    // Exactly one terminal row per model, with no blank spacer rows. Height
+    // limits the number of models, never the height of the adjacent chart.
     for (index, line) in table.into_iter().skip(1).enumerate() {
-        let y = body.y + ((2 * index + 1) * body.height as usize / (2 * count)) as u16;
-        frame.render_widget(Paragraph::new(line), Rect::new(body.x, y, body.width, 1));
+        let y = area.y + reserved + index as u16;
+        frame.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
     }
 }

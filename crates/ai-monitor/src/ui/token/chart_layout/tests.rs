@@ -159,6 +159,8 @@ fn all_ranking_rows_share_column_widths_and_numeric_right_edges() {
             .collect();
         for (index, row) in rows.iter().enumerate() {
             assert_eq!(row.width(), width);
+            assert_eq!(row.spans[2].width(), row.spans[4].width());
+            assert_eq!(row.spans[4].width(), row.spans[6].width());
             assert_eq!(
                 row.spans
                     .iter()
@@ -204,63 +206,183 @@ fn model_names_are_provider_free_utf8_safe_and_at_most_fifteen_bytes() {
 }
 
 #[test]
-fn monthly_layout_uses_two_left_charts_and_one_full_height_ranking() {
+fn ranking_shares_only_the_money_row_and_monthly_token_is_unchanged() {
     let usage = sample_usage();
     let now = chrono::DateTime::parse_from_rfc3339("2026-09-12T12:00:00+00:00")
         .unwrap()
         .timestamp();
-    for width in [66, 80, 100, 140, 180] {
-        for monthly_height in [12, 17, 24, 35] {
-            let first_height = monthly_height / 2;
+    let charts = super::super::local_charts(&usage, 30);
+    for width in [50, 66, 80, 100, 140, 180] {
+        for cost_height in [5, 6, 10, 11, 12, 18] {
             let areas = [
-                Rect::new(0, 0, width, 8),
-                Rect::new(0, 8, width, first_height),
-                Rect::new(0, 8 + first_height, width, monthly_height - first_height),
+                Rect::new(2, 1, width, 8),
+                Rect::new(2, 9, width, 7),
+                Rect::new(2, 16, width, cost_height),
             ];
             let (left, ranking) = monthly_areas(&areas).unwrap();
-            assert!(left[0].width.abs_diff(ranking.width) <= 1);
-            assert_eq!(left[0].right() + PANEL_GAP, ranking.x);
-            assert_eq!(left[0].bottom(), left[1].y);
-            assert_eq!(ranking.y, left[0].y);
-            assert_eq!(ranking.bottom(), left[1].bottom());
-            let mut terminal = Terminal::new(TestBackend::new(width, 8 + monthly_height)).unwrap();
+            assert_eq!(left[0], areas[1]);
+            assert!(left[1].width.abs_diff(ranking.width) <= 1);
+            assert_eq!(left[1].right() + PANEL_GAP, ranking.x);
+            assert_eq!(ranking.y, areas[2].y);
+            assert_eq!(ranking.height, areas[2].height);
+            assert_eq!(ranking.right(), areas[2].right());
+            let height = areas[2].bottom() + 2;
+            let mut terminal = Terminal::new(TestBackend::new(width + 4, height)).unwrap();
             terminal
                 .draw(|frame| super::super::draw_charts(frame, &areas, &usage, now))
                 .unwrap();
             let buffer = terminal.backend().buffer();
+            let mut reference = Terminal::new(TestBackend::new(width + 4, height)).unwrap();
+            reference
+                .draw(|frame| super::super::draw_stem_chart(frame, areas[1], &charts[1], 12))
+                .unwrap();
+            for y in areas[1].y..areas[1].bottom() {
+                for x in areas[1].x..areas[1].right() {
+                    assert_eq!(buffer[(x, y)], reference.backend().buffer()[(x, y)]);
+                }
+            }
+            let reserved = 1 + u16::from(cost_height >= 6);
+            let expected = (cost_height - reserved).min(10) as usize;
             let rows: Vec<_> = (ranking.y..ranking.bottom())
                 .filter_map(|y| {
                     let text = row_text(buffer, ranking, y);
                     text.contains("model-").then_some((y, text))
                 })
                 .collect();
-            assert_eq!(rows.len(), 10, "{width} x {monthly_height}");
-            for (index, (_, text)) in rows.iter().enumerate() {
+            assert_eq!(rows.len(), expected, "{width} x {cost_height}");
+            let title = row_text(buffer, ranking, ranking.y);
+            assert!(title.contains(&format!("TOP {expected}")), "{title}");
+            for (index, (y, text)) in rows.iter().enumerate() {
+                assert_eq!(*y, ranking.y + reserved + index as u16);
                 assert!(
                     text.trim_start().starts_with(&format!("{}.", index + 1)),
                     "{text}"
                 );
                 assert!(text.contains(&format!("model-{index:02}")), "{text}");
             }
-            let gaps: Vec<_> = rows.windows(2).map(|p| p[1].0 - p[0].0).collect();
-            assert!(gaps.iter().max().unwrap() - gaps.iter().min().unwrap() <= 1);
-            assert!(row_text(buffer, left[0], left[0].y).contains("本月 Token"));
             assert!(row_text(buffer, left[1], left[1].y).contains("本月金额"));
+            for y in ranking.y..ranking.bottom() {
+                for x in left[1].right()..ranking.x {
+                    assert_eq!(buffer[(x, y)].symbol(), " ");
+                }
+            }
         }
     }
 }
 
 #[test]
 fn small_monthly_panes_keep_full_width_charts() {
-    for (width, height) in [(40, 24), (65, 24), (100, 10)] {
+    for (width, cost_height) in [(0, 12), (40, 12), (49, 12), (100, 4)] {
         let areas = [
             Rect::new(0, 0, width, 8),
-            Rect::new(0, 8, width, height / 2),
-            Rect::new(0, 8 + height / 2, width, height - height / 2),
+            Rect::new(0, 8, width, 8),
+            Rect::new(0, 16, width, cost_height),
         ];
         assert!(monthly_areas(&areas).is_none());
     }
     assert!(monthly_areas(&[]).is_none());
+}
+
+#[test]
+fn ranking_drops_columns_before_clipping_names_or_numbers() {
+    let usage = sample_usage();
+    for (width, show_cost, show_token) in [(40, true, true), (24, false, true), (19, false, false)] {
+        let rows = ranking_table(&usage.month_models, width);
+        let header = rows[0].to_string();
+        assert_eq!(header.contains("金额"), show_cost);
+        assert_eq!(header.contains("Token"), show_token);
+        for (index, row) in rows.iter().skip(1).enumerate() {
+            let text = row.to_string();
+            assert!(text.contains(&format!("model-{index:02}")));
+            if show_token {
+                assert!(text.contains(&compact(usage.month_models[index].total_tokens())));
+            }
+            assert_eq!(row.width(), width);
+        }
+    }
+    for width in 0..=120 {
+        let rows = ranking_table(&usage.month_models, width);
+        assert_eq!(rows.is_empty(), width < RANKING_MIN_WIDTH);
+        assert!(rows.iter().all(|row| row.width() <= width));
+    }
+    let mut extreme = sample_usage();
+    extreme.month_models[0].input_total = u64::MAX;
+    extreme.month_models[0].cost = Some(f64::MAX);
+    for width in 0..=120 {
+        assert!(ranking_table(&extreme.month_models, width).iter().all(|row| row.width() <= width));
+    }
+}
+
+#[test]
+fn short_rankings_reduce_rows_and_never_write_outside_their_rectangle() {
+    let usage = sample_usage();
+    for width in [12, 16, 20, 24, 32, 50, 80] {
+        for height in 0..=24 {
+            let area = Rect::new(3, 2, width, height);
+            let mut terminal = Terminal::new(TestBackend::new(width + 6, 28)).unwrap();
+            terminal
+                .draw(|frame| {
+                    for y in 0..28 {
+                        for x in 0..width + 6 {
+                            let inside = x >= area.x && x < area.right()
+                                && y >= area.y && y < area.bottom();
+                            frame.buffer_mut()[(x, y)].set_symbol(if inside { " " } else { "!" });
+                        }
+                    }
+                    draw_monthly_ranking(frame, area, &usage.month_models);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let rows: Vec<_> = (area.y..area.bottom())
+                .map(|y| row_text(buffer, area, y))
+                .collect();
+            let expected = if width < RANKING_MIN_WIDTH as u16 || height < 2 {
+                0
+            } else {
+                (height - 1 - u16::from(height >= 6)).min(10) as usize
+            };
+            assert_eq!(rows.iter().filter(|row| row.contains("model-")).count(), expected);
+            for y in 0..28 {
+                for x in 0..width + 6 {
+                    if x < area.x || x >= area.right() || y < area.y || y >= area.bottom() {
+                        assert_eq!(buffer[(x, y)].symbol(), "!");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn terminal_resize_removes_hidden_models_and_restores_them_without_stale_cells() {
+    let usage = sample_usage();
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-12T12:00:00+00:00")
+        .unwrap()
+        .timestamp();
+    let mut terminal = Terminal::new(TestBackend::new(120, 28)).unwrap();
+    for (width, height) in [(120, 28), (64, 16), (49, 16), (120, 28)] {
+        terminal.backend_mut().resize(width, height);
+        terminal.resize(Rect::new(0, 0, width, height)).unwrap();
+        let areas = [
+            Rect::default(),
+            Rect::new(0, 0, width, height / 2),
+            Rect::new(0, height / 2, width, height - height / 2),
+        ];
+        terminal
+            .draw(|frame| super::super::draw_charts(frame, &areas, &usage, now))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<_> = (0..height).map(|y| row_text(buffer, buffer.area, y)).collect();
+        let expected = monthly_areas(&areas)
+            .map(|(_, ranking)| (ranking.height - 1 - u16::from(ranking.height >= 6)).min(10))
+            .unwrap_or(0) as usize;
+        assert_eq!(rows.iter().filter(|row| row.contains("model-")).count(), expected);
+        assert_eq!(rows.iter().filter(|row| row.contains("本月 Token")).count(), 1);
+        assert_eq!(rows.iter().filter(|row| row.contains("本月金额")).count(), 1);
+        if expected == 0 {
+            assert!(!rows.iter().any(|row| row.contains("TOP")));
+        }
+    }
 }
 
 #[test]
@@ -314,7 +436,7 @@ fn export_real_chart_terminal_fixtures() {
     let now = chrono::DateTime::parse_from_rfc3339("2026-09-12T12:00:00+00:00")
         .unwrap()
         .timestamp();
-    for (width, height) in [(80, 24), (120, 28), (160, 32)] {
+    for (width, height) in [(48, 18), (52, 16), (80, 20), (100, 24), (120, 28), (160, 32)] {
         for pattern in ["equal", "varied"] {
             let mut usage = sample_usage();
             usage.month.buckets.fill(0);
