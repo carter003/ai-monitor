@@ -20,7 +20,6 @@ const NAME_MIN: usize = 10;
 const GAP: usize = 2;
 const LINE_COLOR: Color = Color::Rgb(33, 150, 243);
 const MONTH_RANKING_MIN_WIDTH: u16 = 66;
-const MONTH_RANKING_GAP: u16 = 2;
 const MONTH_MODEL_MAX_BYTES: usize = 15;
 
 pub(super) fn lines(usage: &UsageStats, width: u16, height: usize) -> Vec<Line<'static>> {
@@ -33,7 +32,7 @@ pub(super) fn lines(usage: &UsageStats, width: u16, height: usize) -> Vec<Line<'
         if limit > 0 {
             result.push(Line::raw(""));
             result.push(Line::styled(
-                truncate(" 模型用量 · 本月", width as usize),
+                truncate(" 模型用量 · 最近24小时", width as usize),
                 Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
             ));
             result.extend(model_table(&usage.models, width as usize, limit));
@@ -340,13 +339,9 @@ fn draw_monthly_ranking(frame: &mut Frame, area: Rect, models: &[ModelUsage]) {
         area.width,
         area.height.saturating_sub(1),
     );
-    let columns = Layout::horizontal([
-        Constraint::Percentage(50),
-        Constraint::Length(MONTH_RANKING_GAP),
-        Constraint::Percentage(50),
-    ])
-    .split(body);
-    for (column, start) in [(columns[0], 0usize), (columns[2], 5usize)] {
+    let columns = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(body);
+    for (column, start) in [(columns[0], 0usize), (columns[1], 5usize)] {
         if column.width == 0 {
             continue;
         }
@@ -437,14 +432,10 @@ pub(super) fn draw_charts(frame: &mut Frame, areas: &[Rect], usage: &UsageStats,
             continue;
         }
         if index == 2 && area.width >= MONTH_RANKING_MIN_WIDTH {
-            let split = Layout::horizontal([
-                Constraint::Percentage(52),
-                Constraint::Length(MONTH_RANKING_GAP),
-                Constraint::Percentage(48),
-            ])
-            .split(*area);
+            let split = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(*area);
             draw_stem_chart(frame, split[0], chart, through_day);
-            draw_monthly_ranking(frame, split[2], &usage.models);
+            draw_monthly_ranking(frame, split[1], &usage.month_models);
         } else {
             draw_stem_chart(frame, *area, chart, through_day);
         }
