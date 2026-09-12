@@ -104,7 +104,12 @@ pub(super) fn model_table(models: &[ModelUsage], width: usize, limit: usize) -> 
 
     // Preserve the 25-cell name slot before squeezing it: drop THINK, the
     // cache suffix, OUT, then IN. COST and total stay together on narrow panes.
-    for optional in [Column::Think, Column::InputHit, Column::Output, Column::Input] {
+    for optional in [
+        Column::Think,
+        Column::InputHit,
+        Column::Output,
+        Column::Input,
+    ] {
         if NAME_MAX + required(&slots) <= inner {
             break;
         }
