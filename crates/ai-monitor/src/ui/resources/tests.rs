@@ -18,7 +18,9 @@ fn fixture() -> SystemStats {
             3, 4, 3, 3, 6, 9, 42, 15, 9, 6, 4, 3, 2, 3, 4, 5, 8, 11, 9, 6, 5, 8, 6, 4, 3, 5, 4, 3,
             4, 11, 4, 3, 10, 13, 16, 5, 4, 3, 5, 6, 3, 4, 3, 3,
         ]
-        .into(),
+        .into_iter()
+        .map(f64::from)
+        .collect(),
         ..SystemStats::default()
     }
 }
@@ -69,7 +71,7 @@ fn normal_panel_matches_the_approved_groups_and_column_order() {
         "CPU 核心",
         "逐核占用",
         "CPU 趋势",
-        "峰值 42%",
+        "峰值 42.0%",
         "最近 44 次采样",
         "0–50%",
     ] {
@@ -88,8 +90,8 @@ fn normal_panel_matches_the_approved_groups_and_column_order() {
     assert!(line(&buffer, 13).contains("06"));
     assert!(line(&buffer, 13).contains("12"));
     assert!(line(&buffer, 14).contains("CPU 趋势"));
-    assert!(line(&buffer, 15).contains('▖'));
-    assert!(line(&buffer, 16).contains('▌'));
+    assert!(line(&buffer, 15).contains('▄'));
+    assert!(line(&buffer, 16).contains('█'));
     assert!(line(&buffer, 18).contains("最近 44 次采样"));
 }
 
@@ -206,30 +208,30 @@ fn odd_core_count_is_column_major_without_repeating_the_last_core() {
 #[test]
 fn history_peak_and_count_describe_the_visible_samples_only() {
     let stats = SystemStats {
-        cpu_history: std::iter::once(99)
-            .chain(std::iter::repeat_n(3, 88))
+        cpu_history: std::iter::once(99.)
+            .chain(std::iter::repeat_n(3., 44))
             .collect(),
         ..fixture()
     };
     let buffer = render(&stats, 48, 20);
     let text = text_of(&buffer);
-    assert!(text.contains("峰值 3%"));
-    assert!(!text.contains("99%"));
-    assert!(text.contains("最近 88 次采样"));
-    assert!(text.contains("0–10%"));
+    assert!(text.contains("峰值 3.0%"));
+    assert!(!text.contains("99.0%"));
+    assert!(text.contains("最近 44 次采样"));
+    assert!(text.contains("0–5%"));
     assert_eq!(buffer[(45, 17)].symbol(), "█");
 }
 
 #[test]
 fn startup_history_is_right_aligned() {
     let stats = SystemStats {
-        cpu_history: [3, 3, 3, 3].into(),
+        cpu_history: [3., 3., 3., 3.].into(),
         ..fixture()
     };
     let buffer = render(&stats, 48, 20);
     assert_eq!(buffer[(2, 17)].symbol(), " ");
-    assert_eq!(buffer[(43, 17)].symbol(), " ");
-    for x in 44..46 {
+    assert_eq!(buffer[(41, 17)].symbol(), " ");
+    for x in 42..46 {
         assert_eq!(buffer[(x, 17)].symbol(), "█");
     }
 }
@@ -290,14 +292,18 @@ fn panel_height_is_bounded_and_reserves_quota_space() {
 #[test]
 fn history_dynamic_scale_adapts_to_peak() {
     for (peak, expected_scale) in [
-        (5, "0–10%"),
-        (12, "0–20%"),
-        (22, "0–30%"),
-        (30, "0–40%"),
-        (42, "0–50%"),
-        (55, "0–65%"),
-        (70, "0–80%"),
-        (90, "0–100%"),
+        (0., "0–5%"),
+        (3.4, "0–5%"),
+        (5., "0–10%"),
+        (9., "0–10%"),
+        (12., "0–15%"),
+        (22., "0–30%"),
+        (30., "0–40%"),
+        (42., "0–50%"),
+        (55., "0–65%"),
+        (70., "0–80%"),
+        (90., "0–100%"),
+        (100., "0–100%"),
     ] {
         let stats = SystemStats {
             cpu_history: std::iter::repeat_n(peak, 20).collect(),
@@ -311,6 +317,119 @@ fn history_dynamic_scale_adapts_to_peak() {
     }
 }
 
+#[test]
+fn cpu_section_dividers_are_solid_and_uniform_to_the_suffix() {
+    for width in [16, 24, 44, 80] {
+        for (title, suffix) in [("CPU 核心", "逐核占用"), ("CPU 趋势", "峰值 9.0%")] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+            terminal
+                .draw(|frame| section(frame, frame.area(), title, suffix))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let dividers: Vec<_> = (0..width)
+                .filter(|x| buffer[(*x, 0)].symbol() == "─")
+                .collect();
+            assert!(!dividers.is_empty());
+            for (index, x) in dividers.iter().enumerate() {
+                assert_eq!(*x, dividers[0] + index as u16);
+                let cell = &buffer[(*x, 0)];
+                assert_eq!(cell.fg, CYAN);
+                assert_eq!(cell.modifier, Modifier::empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn fractional_cpu_samples_have_distinct_heights() {
+    let stats = SystemStats {
+        cpu_history: [3.1, 3.4, 3.7].into(),
+        ..fixture()
+    };
+    let buffer = render(&stats, 48, 20);
+    assert!(text_of(&buffer).contains("峰值 3.7%"));
+    assert!(text_of(&buffer).contains("0–5%"));
+    // All three values used to round to only two integers before rendering.
+    assert_eq!(buffer[(43, 16)].symbol(), "▇");
+    assert_eq!(buffer[(44, 16)].symbol(), "█");
+    assert_eq!(buffer[(45, 15)].symbol(), "▂");
+    for x in 43..46 {
+        assert_eq!(buffer[(x, 17)].symbol(), "█");
+    }
+}
+
+#[test]
+fn history_uses_all_eight_subcell_levels() {
+    let stats = SystemStats {
+        cpu_history: (0..=8).map(|n| f64::from(n) * 5. / 16.).collect(),
+        ..fixture()
+    };
+    let mut terminal = Terminal::new(TestBackend::new(24, 4)).unwrap();
+    terminal
+        .draw(|frame| history(frame, frame.area(), &stats))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    for (index, symbol) in [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(buffer[(15 + index as u16, 2)].symbol(), symbol);
+        assert_eq!(buffer[(15 + index as u16, 1)].symbol(), " ");
+    }
+}
+
+#[test]
+fn invalid_history_samples_are_gaps_not_shifted_timestamps() {
+    let stats = SystemStats {
+        cpu_history: [0., f64::NAN, f64::INFINITY, -1., 1000., 100.].into(),
+        ..fixture()
+    };
+    let buffer = render(&stats, 48, 20);
+    assert!(text_of(&buffer).contains("峰值 100.0%"));
+    assert!(text_of(&buffer).contains("最近 6 次采样"));
+    for y in 15..18 {
+        for x in 40..44 {
+            assert_eq!(buffer[(x, y)].symbol(), " ");
+        }
+        for x in 44..46 {
+            assert_eq!(buffer[(x, y)].symbol(), "█");
+        }
+    }
+    let missing = SystemStats {
+        cpu_history: [f64::NAN, f64::INFINITY, -1.].into(),
+        ..fixture()
+    };
+    let text = text_of(&render(&missing, 48, 20));
+    assert!(text.contains("峰值 —"));
+    assert!(text.contains("采样中"));
+}
+
+#[test]
+fn zero_history_is_empty_and_a_short_spike_is_not_averaged_away() {
+    let stats = SystemStats {
+        cpu_history: [0., 9., 0.].into(),
+        ..fixture()
+    };
+    let buffer = render(&stats, 48, 20);
+    assert!(text_of(&buffer).contains("峰值 9.0%"));
+    assert!(text_of(&buffer).contains("0–10%"));
+    assert_eq!(buffer[(44, 15)].symbol(), "▆");
+    for y in 15..18 {
+        assert_eq!(buffer[(43, y)].symbol(), " ");
+        assert_eq!(buffer[(45, y)].symbol(), " ");
+    }
+    let stats = SystemStats {
+        cpu_history: std::iter::repeat_n(0., 44).collect(),
+        ..fixture()
+    };
+    let buffer = render(&stats, 48, 20);
+    for y in 15..18 {
+        for x in 2..46 {
+            assert_eq!(buffer[(x, y)].symbol(), " ");
+        }
+    }
+}
+
 pub(super) fn print_previews() {
     for (width, height) in [(48, 20), (32, 16), (24, 12)] {
         println!(
@@ -318,4 +437,15 @@ pub(super) fn print_previews() {
             text_of(&render(&fixture(), width, height))
         );
     }
+    let stats = SystemStats {
+        cpu_history: [
+            3.1, 3.4, 3.7, 4.2, 3.8, 3.3, 2.9, 3.2, 4.1, 5.3, 6.2, 9.0, 6.8, 4.7, 3.6, 3.2,
+        ]
+        .into(),
+        ..fixture()
+    };
+    println!(
+        "SYSTEM LOW-CPU RATATUI BUFFER 48x20\n{}\nEND SYSTEM BUFFER",
+        text_of(&render(&stats, 48, 20))
+    );
 }

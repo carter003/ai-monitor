@@ -247,17 +247,27 @@ fn load_row(frame: &mut Frame, area: Rect, load: &str) {
 }
 
 fn section(frame: &mut Frame, area: Rect, title: &str, suffix: &str) {
-    let title = format!("{title} ");
     let suffix = format!(" {suffix}");
-    text(frame, area, &"─".repeat(area.width as usize), TRACK, false);
     let suffix_width = columns(&suffix).min(area.width as usize) as u16;
-    let title_width = area.width.saturating_sub(suffix_width + 2);
+    let title_room = area.width.saturating_sub(suffix_width + 2);
+    let title = truncate(&format!("{title} "), title_room as usize);
+    let title_width = columns(&title) as u16;
     text(
         frame,
         slice(area, 0, 0, title_width, 1),
-        &truncate(&title, title_width as usize),
+        &title,
         CYAN,
         true,
+    );
+    // Paint only the actual divider area, with one color and weight throughout.
+    // Styling a wide title rectangle would recolor/bolden only part of the rule.
+    let rule_width = area.width.saturating_sub(title_width + suffix_width);
+    text(
+        frame,
+        slice(area, title_width, 0, rule_width, 1),
+        &"─".repeat(rule_width as usize),
+        CYAN,
+        false,
     );
     right(
         frame,
@@ -303,76 +313,49 @@ fn history(frame: &mut Frame, area: Rect, stats: &SystemStats) {
     if area.height < HISTORY_HEIGHT as u16 || area.width == 0 {
         return;
     }
-    let capacity = area.width as usize * 2;
+    // One real sample per column: eighth-block bars have four times the
+    // vertical resolution of quadrants. Do not average away short spikes.
     let samples: Vec<_> = stats
         .cpu_history
         .iter()
         .rev()
-        .take(capacity)
+        .take(area.width as usize)
         .rev()
-        .map(|n| (*n).min(100))
+        .map(|n| percentage(Some(*n)))
         .collect();
-    let peak_val = samples.iter().copied().max().unwrap_or(0);
-    let peak = if samples.is_empty() {
-        "峰值 —".into()
-    } else {
-        format!("峰值 {peak_val}%")
-    };
+    let peak_val = samples.iter().filter_map(|n| *n).reduce(f64::max);
+    let peak = peak_val.map_or_else(|| "峰值 —".into(), |n| format!("峰值 {n:.1}%"));
     section(frame, row(area, 0), "CPU 趋势", &peak);
     let graph = slice(area, 0, 1, area.width, area.height - 2);
-    let scale_max = match peak_val {
-        0..=8 => 10,
-        9..=16 => 20,
-        17..=25 => 30,
-        26..=35 => 40,
-        36..=45 => 50,
-        46..=60 => 65,
-        61..=75 => 80,
-        _ => 100,
-    };
-    if samples.is_empty() {
+    // Keep zero as the baseline and about 10% headroom. Discrete ranges avoid
+    // rescaling on every tiny change; a 9% peak now fits the 0–10% range.
+    let scale_max = [5, 10, 15, 20, 30, 40, 50, 65, 80, 100]
+        .into_iter()
+        .find(|n| f64::from(*n) >= peak_val.unwrap_or(0.) * 1.1)
+        .unwrap_or(100);
+    if peak_val.is_none() {
         text(frame, row(graph, 0), "采样中", MUTED, false);
     } else {
-        let resolution = u64::from(graph.height) * 2;
+        let resolution = u64::from(graph.height) * 8;
         let levels: Vec<u64> = samples
             .iter()
-            .map(|n| {
-                if *n == 0 {
-                    0
-                } else {
-                    let lvl = (*n * resolution + scale_max / 2) / scale_max;
-                    lvl.clamp(1, resolution)
+            .map(|n| match n {
+                Some(n) if *n > 0. => {
+                    let level = (*n * resolution as f64 / f64::from(scale_max)).round() as u64;
+                    level.clamp(1, resolution)
                 }
+                // Invalid samples remain gaps at their original time positions.
+                _ => 0,
             })
             .collect();
-        let active_cols = samples.len().div_ceil(2) as u16;
-        let start_col = graph.width.saturating_sub(active_cols);
-        let is_odd = samples.len() % 2 != 0;
-
-        const QUADRANTS: [[char; 3]; 3] = [[' ', '▗', '▐'], ['▖', '▄', '▟'], ['▌', '▙', '█']];
-
+        let start_col = graph.width as usize - samples.len();
+        const BARS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
         let mut lines = Vec::with_capacity(graph.height as usize);
         for y in 0..graph.height {
-            let row_from_bottom = graph.height - 1 - y;
-            let base_level = u64::from(row_from_bottom) * 2;
-            let mut line = String::with_capacity(graph.width as usize);
-            line.push_str(&" ".repeat(start_col as usize));
-
-            for c in 0..active_cols as usize {
-                let (left_h, right_h) = if is_odd {
-                    if c == 0 {
-                        (0, levels[0])
-                    } else {
-                        (levels[2 * c - 1], levels[2 * c])
-                    }
-                } else {
-                    (levels[2 * c], levels[2 * c + 1])
-                };
-
-                let left_cell = left_h.saturating_sub(base_level).min(2) as usize;
-                let right_cell = right_h.saturating_sub(base_level).min(2) as usize;
-
-                line.push(QUADRANTS[left_cell][right_cell]);
+            let base_level = u64::from(graph.height - 1 - y) * 8;
+            let mut line = " ".repeat(start_col);
+            for level in &levels {
+                line.push(BARS[level.saturating_sub(base_level).min(8) as usize]);
             }
             lines.push(Line::from(line));
         }

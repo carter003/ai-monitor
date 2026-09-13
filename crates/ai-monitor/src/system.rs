@@ -17,7 +17,8 @@ pub struct SystemStats {
     pub disk_read_per_sec: Option<f64>,
     pub disk_write_per_sec: Option<f64>,
     pub load: String,
-    pub cpu_history: VecDeque<u64>,
+    /// CPU percentages at the original sampling precision, not rounded integers.
+    pub cpu_history: VecDeque<f64>,
     pub error: Option<String>,
 }
 
@@ -77,7 +78,7 @@ impl SystemSampler {
         self.stats.cpu = values.first().copied();
         self.stats.cores = values.into_iter().skip(1).collect();
         if let Some(cpu) = self.stats.cpu {
-            self.stats.cpu_history.push_back(cpu.round() as u64);
+            self.stats.cpu_history.push_back(cpu);
             if self.stats.cpu_history.len() > 240 {
                 self.stats.cpu_history.pop_front();
             }
