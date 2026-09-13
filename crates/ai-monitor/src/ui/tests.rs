@@ -305,7 +305,7 @@ fn the_charts_start_after_content_not_at_forty_percent() {
     let (a, a_drawn) = token_rects(short, &usage);
     let (b, b_drawn) = token_rects(tall, &usage);
     assert!(a_drawn && b_drawn);
-    let expected = token::lines(&usage, 100, usize::MAX).len() as u16;
+    let expected = token::lines(&usage, 100, usize::MAX).len() as u16 + 1;
     assert_eq!(a[0].height, expected);
     assert_eq!(b[0].height, expected);
     assert_eq!(a[1].y, a[0].bottom());
@@ -423,7 +423,7 @@ fn short_panes_show_as_many_readable_charts_as_fit() {
     let height = token::lines(&usage, 100, usize::MAX).len() as u16;
     for count in 0..=3u16 {
         let (parts, drawn) = token_rects(
-            Rect::new(0, 0, 100, height + count * token::MIN_CHART_HEIGHT),
+            Rect::new(0, 0, 100, height + 1 + count * token::MIN_CHART_HEIGHT),
             &usage,
         );
         assert_eq!(drawn, count > 0);
@@ -435,7 +435,7 @@ fn short_panes_show_as_many_readable_charts_as_fit() {
             count as usize
         );
         if count > 0 {
-            assert_eq!(parts[0].height, height);
+            assert_eq!(parts[0].height, height + 1);
         }
     }
 }

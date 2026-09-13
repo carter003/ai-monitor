@@ -14,7 +14,7 @@ mod tests;
 const MIN_CARD_WIDTH: usize = 22;
 const OUTER_PADDING: usize = 2;
 const INNER_PADDING: usize = 2;
-const CARD_HEIGHT: usize = 6;
+const CARD_HEIGHT: usize = 4;
 const UNIT_WIDTH: usize = 6;
 const BORDER: Color = Color::Rgb(183, 201, 209);
 const BACKGROUND: Color = Color::White;
@@ -94,13 +94,10 @@ fn card(
             border,
         ),
     ]);
-    let blank = body_row(Vec::new(), width);
     [
         top,
-        blank.clone(),
         metric(&compact(total.tokens), "TOKENS", width, value_width, INK),
         metric(&money(total.cost), "COST", width, value_width, CYAN),
-        blank,
         // The grid combines spans, so edge styles must live on the span.
         Line::from(Span::styled(format!("╰{}╯", "─".repeat(width - 2)), border)),
     ]

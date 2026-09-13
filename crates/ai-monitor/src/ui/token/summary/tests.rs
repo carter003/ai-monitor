@@ -40,7 +40,7 @@ fn positions(row: &str, needle: &str) -> Vec<usize> {
 
 #[test]
 fn four_two_and_one_column_grids_keep_every_period_once() {
-    for (width, count, height) in [(112, 4, 6), (64, 2, 13), (32, 1, 27)] {
+    for (width, count, height) in [(112, 4, 4), (64, 2, 9), (32, 1, 19)] {
         let rows = lines(&usage(), width);
         let rendered = text(&rows);
         assert_eq!(rows.len(), height);
@@ -78,8 +78,8 @@ fn frames_are_equal_centered_and_values_share_the_same_left_edge() {
                 }
                 assert_eq!(positions(&row.to_string(), "│"), expected);
             }
-            let tokens = group[2].to_string();
-            let costs = group[3].to_string();
+            let tokens = group[1].to_string();
+            let costs = group[2].to_string();
             assert_eq!(positions(&tokens, "TOKENS"), positions(&costs, "COST"));
             let mut amounts = positions(&tokens, "1.0B");
             amounts.extend(positions(&tokens, "4.2B"));
@@ -99,8 +99,8 @@ fn units_use_one_shared_column_across_different_magnitudes() {
     usage.all_total.tokens = 126_300_000_000;
     usage.all_total.cost = 12_345.0;
     let rows = lines(&usage, 120);
-    let tokens = rows[2].to_string();
-    let costs = rows[3].to_string();
+    let tokens = rows[1].to_string();
+    let costs = rows[2].to_string();
     assert_eq!(positions(&tokens, "TOKENS"), positions(&costs, "COST"));
     assert!(tokens.contains("126.3B") && costs.contains("$12345"));
     assert!(tokens.contains(&compact(usage.day_total.tokens)));
@@ -196,8 +196,8 @@ fn terminal_cells_keep_the_rectangle_background_and_numeric_hierarchy() {
         }
         if width >= 32 {
             let value_x = area.x + positions(&rows[0].to_string(), "╭")[0] as u16 + 3;
-            let token = &buffer[(value_x, area.y + 2)];
-            let cost = &buffer[(value_x, area.y + 3)];
+            let token = &buffer[(value_x, area.y + 1)];
+            let cost = &buffer[(value_x, area.y + 2)];
             assert_eq!(token.fg, INK);
             assert_eq!(cost.fg, CYAN);
             assert_eq!(token.bg, BACKGROUND);

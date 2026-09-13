@@ -192,9 +192,11 @@ pub fn draw(
 }
 
 /// The summary and full-width ranking take only the rows they actually need.
-/// Charts share the remainder (within one row). Short panes show as many
-/// readable charts as fit, rather than wasting space when all three cannot.
+/// Charts share the remainder (within one row), separated from the content by
+/// one blank row. Short panes show as many readable charts as fit, rather than
+/// wasting space when all three cannot.
 fn token_rects(inner: Rect, usage: &UsageStats) -> ([Rect; 4], bool) {
+    const SEPARATOR: u16 = 1;
     let content_height = token_panel_lines(
         usage,
         Rect {
@@ -204,7 +206,10 @@ fn token_rects(inner: Rect, usage: &UsageStats) -> ([Rect; 4], bool) {
     )
     .len()
     .min(u16::MAX as usize) as u16;
-    let remaining = inner.height.saturating_sub(content_height);
+    let remaining = inner
+        .height
+        .saturating_sub(content_height)
+        .saturating_sub(SEPARATOR);
     let chart_count = if usage.error.is_none()
         && (!usage.hours.buckets.is_empty() || !usage.month.buckets.is_empty())
         && inner.width >= token::MIN_CHART_WIDTH
@@ -215,7 +220,7 @@ fn token_rects(inner: Rect, usage: &UsageStats) -> ([Rect; 4], bool) {
     };
     let charts_drawn = chart_count > 0;
     let top_height = if charts_drawn {
-        content_height
+        content_height + SEPARATOR
     } else {
         inner.height
     };
