@@ -252,13 +252,7 @@ fn section(frame: &mut Frame, area: Rect, title: &str, suffix: &str) {
     let title_room = area.width.saturating_sub(suffix_width + 2);
     let title = truncate(&format!("{title} "), title_room as usize);
     let title_width = columns(&title) as u16;
-    text(
-        frame,
-        slice(area, 0, 0, title_width, 1),
-        &title,
-        CYAN,
-        true,
-    );
+    text(frame, slice(area, 0, 0, title_width, 1), &title, CYAN, true);
     // Paint only the actual divider area, with one color and weight throughout.
     // Styling a wide title rectangle would recolor/bolden only part of the rule.
     let rule_width = area.width.saturating_sub(title_width + suffix_width);
