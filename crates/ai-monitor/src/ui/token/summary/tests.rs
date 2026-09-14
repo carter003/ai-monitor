@@ -73,7 +73,7 @@ fn zero_running_days_does_not_divide_by_zero() {
 }
 
 #[test]
-fn cards_keep_fixed_compact_width_instead_of_stretching_to_fill_panel() {
+fn cards_keep_compact_width_and_are_evenly_distributed() {
     let rows = lines(&usage(), 160);
     let top = rows[0].to_string();
     let starts = positions(&top, "╭");
@@ -81,9 +81,35 @@ fn cards_keep_fixed_compact_width_instead_of_stretching_to_fill_panel() {
     assert_eq!(starts.len(), 5);
     let widths: Vec<_> = starts.iter().zip(&ends).map(|(a, b)| b - a + 1).collect();
     assert!(widths.iter().all(|width| *width == MIN_CARD_WIDTH));
+
+    let distances: Vec<_> = starts.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    let min = distances.iter().copied().min().unwrap();
+    let max = distances.iter().copied().max().unwrap();
+    assert!(max - min <= 1, "starts={starts:?}");
+
     let left = starts[0];
     let right = 160 - ends.last().unwrap() - 1;
     assert!(left.abs_diff(right) <= 1);
+}
+
+#[test]
+fn metric_values_are_centered_inside_each_card() {
+    let rows = lines(&usage(), 120);
+    let top = rows[0].to_string();
+    let token_row = rows[1].to_string();
+    let starts = positions(&top, "╭");
+    let ends = positions(&top, "╮");
+    let values = ["1.0B", "4.2B", "4.2B", "4.2B", "1.1B"];
+
+    for ((start, end), value) in starts.iter().zip(&ends).zip(values) {
+        let value_start = positions(&token_row, value)
+            .into_iter()
+            .find(|position| position > start && position < end)
+            .unwrap();
+        let left = value_start - start - 1;
+        let right = end - value_start - columns(value);
+        assert!(left.abs_diff(right) <= 1, "value={value}, left={left}, right={right}");
+    }
 }
 
 #[test]
@@ -109,9 +135,10 @@ fn border_and_value_styles_remain_intact() {
         .draw(|frame| frame.render_widget(Paragraph::new(rows.clone()), area))
         .unwrap();
     let buffer = terminal.backend().buffer();
-    let first = positions(&rows[0].to_string(), "╭")[0] as u16;
-    let token = &buffer[(first + 3, 1)];
-    let cost = &buffer[(first + 3, 2)];
+    let token_x = positions(&rows[1].to_string(), "1.0B")[0] as u16;
+    let cost_x = positions(&rows[2].to_string(), "$146")[0] as u16;
+    let token = &buffer[(token_x, 1)];
+    let cost = &buffer[(cost_x, 2)];
     assert_eq!(token.fg, INK);
     assert_eq!(cost.fg, CYAN);
     assert!(token.modifier.contains(Modifier::BOLD));
