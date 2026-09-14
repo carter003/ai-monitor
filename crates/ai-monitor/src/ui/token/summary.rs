@@ -10,9 +10,9 @@ use ratatui::{
 #[cfg(test)]
 mod tests;
 
-const MIN_CARD_WIDTH: usize = 20;
-const OUTER_PADDING: usize = 2;
-const INNER_PADDING: usize = 2;
+const MIN_CARD_WIDTH: usize = 14;
+const OUTER_PADDING: usize = 1;
+const INNER_PADDING: usize = 1;
 const CARD_HEIGHT: usize = 4;
 const BORDER: Color = Color::Rgb(183, 201, 209);
 const BACKGROUND: Color = Color::White;
@@ -87,9 +87,6 @@ pub(super) fn lines(usage: &UsageStats, width: usize) -> Vec<Line<'static>> {
         .find(|count| needed * count + GAP * (count - 1) <= available)
         .unwrap_or(1);
     let card_width = needed.min(available.max(1));
-    let used = card_width * count + GAP * (count - 1);
-    let left = width.saturating_sub(used) / 2;
-    let right = width.saturating_sub(used + left);
 
     let mut result = Vec::new();
     for group in totals.chunks(count) {
@@ -97,15 +94,24 @@ pub(super) fn lines(usage: &UsageStats, width: usize) -> Vec<Line<'static>> {
             result.push(Line::raw(""));
         }
         let cards: Vec<_> = group.iter().map(|item| card(item, card_width)).collect();
+        let slots = group.len();
+        let slot_width = available / slots.max(1);
+        let remainder = available % slots.max(1);
+
         for row in 0..CARD_HEIGHT {
-            let mut spans = vec![Span::raw(" ".repeat(left))];
+            let mut spans = vec![Span::raw(" ".repeat(OUTER_PADDING))];
             for (column, card) in cards.iter().enumerate() {
-                if column > 0 {
-                    spans.push(Span::raw(" ".repeat(GAP)));
-                }
+                let this_slot = slot_width + usize::from(column < remainder);
+                let free = this_slot.saturating_sub(card_width);
+                let left = free / 2;
+                let right = free.saturating_sub(left);
+                spans.push(Span::raw(" ".repeat(left)));
                 spans.extend(card[row].spans.clone());
+                spans.push(Span::raw(" ".repeat(right)));
             }
-            spans.push(Span::raw(" ".repeat(right)));
+            spans.push(Span::raw(
+                " ".repeat(width.saturating_sub(OUTER_PADDING + available)),
+            ));
             result.push(Line::from(spans));
         }
     }
@@ -146,32 +152,21 @@ fn card(item: &SummaryItem, width: usize) -> [Line<'static>; CARD_HEIGHT] {
 fn metric(value: &str, width: usize, color: Color) -> Line<'static> {
     let room = width.saturating_sub(2 + INNER_PADDING * 2);
     let shown = truncate(value, room);
-    body_row(
-        vec![Span::styled(
+    let used = columns(&shown);
+    let body_width = width.saturating_sub(2);
+    let free = body_width.saturating_sub(used);
+    let left = free / 2;
+    let right = free.saturating_sub(left);
+    let border = Style::default().fg(BORDER).bg(BACKGROUND);
+    Line::from(vec![
+        Span::styled(format!("│{}", " ".repeat(left)), border),
+        Span::styled(
             shown,
             Style::default()
                 .fg(color)
                 .bg(BACKGROUND)
                 .add_modifier(Modifier::BOLD),
-        )],
-        width,
-    )
-}
-
-fn body_row(content: Vec<Span<'static>>, width: usize) -> Line<'static> {
-    let used: usize = content.iter().map(Span::width).sum();
-    let border = Style::default().fg(BORDER).bg(BACKGROUND);
-    let mut spans = vec![Span::styled(
-        format!("│{}", " ".repeat(INNER_PADDING)),
-        border,
-    )];
-    spans.extend(content);
-    spans.push(Span::styled(
-        format!(
-            "{}│",
-            " ".repeat(width.saturating_sub(2 + INNER_PADDING + used))
         ),
-        border,
-    ));
-    Line::from(spans)
+        Span::styled(format!("{}│", " ".repeat(right)), border),
+    ])
 }
