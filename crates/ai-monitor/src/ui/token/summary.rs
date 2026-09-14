@@ -1,8 +1,7 @@
-//! Equal-width summary cards. Only presentation changes; totals and money
-//! formatting still come from the existing usage model and token panel.
+//! Compact summary cards for local token usage.
 
-use super::{CYAN, GAP, INK, MUTED, columns, compact, money, truncate};
-use crate::model::{UsageStats, UsageTotal};
+use super::{CYAN, GAP, INK, columns, compact, money, truncate};
+use crate::model::UsageStats;
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -11,43 +10,91 @@ use ratatui::{
 #[cfg(test)]
 mod tests;
 
-const MIN_CARD_WIDTH: usize = 22;
+const MIN_CARD_WIDTH: usize = 20;
 const OUTER_PADDING: usize = 2;
 const INNER_PADDING: usize = 2;
 const CARD_HEIGHT: usize = 4;
-const UNIT_WIDTH: usize = 6;
 const BORDER: Color = Color::Rgb(183, 201, 209);
 const BACKGROUND: Color = Color::White;
 
+#[derive(Clone)]
+struct SummaryItem {
+    label: String,
+    tokens: String,
+    cost: String,
+}
+
+fn items(usage: &UsageStats) -> [SummaryItem; 5] {
+    let days = usage.running_days;
+    let average_tokens = if days == 0 {
+        0
+    } else {
+        usage.all_total.tokens / days
+    };
+    let average_cost = if days == 0 {
+        0
+    } else {
+        (usage.all_total.cost / days as f64).round().max(0.0) as u64
+    };
+
+    [
+        SummaryItem {
+            label: "当日".into(),
+            tokens: compact(usage.day_total.tokens),
+            cost: money(usage.day_total.cost),
+        },
+        SummaryItem {
+            label: "本周".into(),
+            tokens: compact(usage.week_total.tokens),
+            cost: money(usage.week_total.cost),
+        },
+        SummaryItem {
+            label: "本月".into(),
+            tokens: compact(usage.month_total.tokens),
+            cost: money(usage.month_total.cost),
+        },
+        SummaryItem {
+            label: format!("累计({days}天)"),
+            tokens: compact(usage.all_total.tokens),
+            cost: money(usage.all_total.cost),
+        },
+        SummaryItem {
+            label: "平均".into(),
+            tokens: compact(average_tokens),
+            cost: format!("${average_cost}"),
+        },
+    ]
+}
+
 pub(super) fn lines(usage: &UsageStats, width: usize) -> Vec<Line<'static>> {
-    // Below this width a complete Chinese title and frame cannot coexist.
     if width < 18 {
         return super::summary_lines(usage, width);
     }
-    let totals = [
-        ("当日", &usage.day_total),
-        ("本周", &usage.week_total),
-        ("本月", &usage.month_total),
-        ("历史累计", &usage.all_total),
-    ];
-    // One shared value column keeps TOKENS/COST aligned even when the four
-    // periods have different magnitudes. Do not hard-code dollar widths.
+
+    let totals = items(usage);
     let value_width = totals
         .iter()
-        .map(|(_, total)| columns(&compact(total.tokens)).max(columns(&money(total.cost))))
+        .map(|item| columns(&item.tokens).max(columns(&item.cost)))
         .max()
-        .unwrap_or(0)
-        .max(7);
-    let needed = MIN_CARD_WIDTH.max(2 + INNER_PADDING * 2 + value_width + GAP + UNIT_WIDTH);
-    let available = width - OUTER_PADDING * 2;
-    let count = [4usize, 2, 1]
+        .unwrap_or(0);
+    let title_width = totals
+        .iter()
+        .map(|item| columns(&item.label))
+        .max()
+        .unwrap_or(0);
+    let needed = MIN_CARD_WIDTH
+        .max(value_width + INNER_PADDING * 2 + 2)
+        .max(title_width + 5);
+    let available = width.saturating_sub(OUTER_PADDING * 2);
+    let count = [5usize, 3, 2, 1]
         .into_iter()
         .find(|count| needed * count + GAP * (count - 1) <= available)
         .unwrap_or(1);
-    let card_width = (available - GAP * (count - 1)) / count;
+    let card_width = needed.min(available.max(1));
     let used = card_width * count + GAP * (count - 1);
-    let left = (width - used) / 2;
-    let right = width - used - left;
+    let left = width.saturating_sub(used) / 2;
+    let right = width.saturating_sub(used + left);
+
     let mut result = Vec::new();
     for group in totals.chunks(count) {
         if !result.is_empty() {
@@ -55,7 +102,7 @@ pub(super) fn lines(usage: &UsageStats, width: usize) -> Vec<Line<'static>> {
         }
         let cards: Vec<_> = group
             .iter()
-            .map(|(label, total)| card(label, total, card_width, value_width))
+            .map(|item| card(item, card_width))
             .collect();
         for row in 0..CARD_HEIGHT {
             let mut spans = vec![Span::raw(" ".repeat(left))];
@@ -72,14 +119,9 @@ pub(super) fn lines(usage: &UsageStats, width: usize) -> Vec<Line<'static>> {
     result
 }
 
-fn card(
-    label: &str,
-    total: &UsageTotal,
-    width: usize,
-    value_width: usize,
-) -> [Line<'static>; CARD_HEIGHT] {
+fn card(item: &SummaryItem, width: usize) -> [Line<'static>; CARD_HEIGHT] {
     let border = Style::default().fg(BORDER).bg(BACKGROUND);
-    let title = truncate(label, width - 5);
+    let title = truncate(&item.label, width.saturating_sub(5));
     let top = Line::from(vec![
         Span::styled("╭─ ", border),
         Span::styled(
@@ -90,44 +132,34 @@ fn card(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!(" {}╮", "─".repeat(width - 5 - columns(&title))),
+            format!(" {}╮", "─".repeat(width.saturating_sub(5 + columns(&title)))),
             border,
         ),
     ]);
     [
         top,
-        metric(&compact(total.tokens), "TOKENS", width, value_width, INK),
-        metric(&money(total.cost), "COST", width, value_width, CYAN),
-        // The grid combines spans, so edge styles must live on the span.
-        Line::from(Span::styled(format!("╰{}╯", "─".repeat(width - 2)), border)),
+        metric(&item.tokens, width, INK),
+        metric(&item.cost, width, CYAN),
+        Line::from(Span::styled(
+            format!("╰{}╯", "─".repeat(width.saturating_sub(2))),
+            border,
+        )),
     ]
 }
 
-fn metric(
-    value: &str,
-    unit: &str,
-    width: usize,
-    value_width: usize,
-    color: Color,
-) -> Line<'static> {
-    let room = width - 2 - INNER_PADDING * 2;
+fn metric(value: &str, width: usize, color: Color) -> Line<'static> {
+    let room = width.saturating_sub(2 + INNER_PADDING * 2);
     let shown = truncate(value, room);
-    let mut spans = vec![Span::styled(
-        shown.clone(),
-        Style::default()
-            .fg(color)
-            .bg(BACKGROUND)
-            .add_modifier(Modifier::BOLD),
-    )];
-    // Hide secondary labels before shortening the numbers on very narrow
-    // cards. Any unavoidable truncation uses the existing explicit ellipsis.
-    if value_width + GAP + UNIT_WIDTH <= room {
-        spans.push(Span::styled(
-            format!("{}{unit}", " ".repeat(value_width - columns(&shown) + GAP)),
-            Style::default().fg(MUTED).bg(BACKGROUND),
-        ));
-    }
-    body_row(spans, width)
+    body_row(
+        vec![Span::styled(
+            shown,
+            Style::default()
+                .fg(color)
+                .bg(BACKGROUND)
+                .add_modifier(Modifier::BOLD),
+        )],
+        width,
+    )
 }
 
 fn body_row(content: Vec<Span<'static>>, width: usize) -> Line<'static> {
@@ -139,7 +171,10 @@ fn body_row(content: Vec<Span<'static>>, width: usize) -> Line<'static> {
     )];
     spans.extend(content);
     spans.push(Span::styled(
-        format!("{}│", " ".repeat(width - 2 - INNER_PADDING - used)),
+        format!(
+            "{}│",
+            " ".repeat(width.saturating_sub(2 + INNER_PADDING + used))
+        ),
         border,
     ));
     Line::from(spans)
