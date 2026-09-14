@@ -36,6 +36,7 @@ fn usage() -> UsageStats {
             tokens: 126_300_000_000,
             cost: 318.62,
         },
+        running_days: 12,
         ..UsageStats::default()
     }
 }
@@ -54,10 +55,12 @@ fn summaries_are_peers_above_a_full_width_model_table() {
     let rendered = lines(&usage, 120, 40);
     let text = text(&rendered);
     let labels = rendered[0].to_string();
-    for label in ["当日", "本周", "本月", "历史累计"] {
+    for label in ["当日", "本周", "本月", "累计(12天)", "平均"] {
         assert!(labels.contains(label), "{labels}");
         assert_eq!(text.matches(label).count(), 1);
     }
+    assert!(!text.contains("TOKENS"));
+    assert!(!text.contains("历史累计"));
     assert!(text.contains("126.3B") && text.contains("$318.6"));
     assert!(text.contains("deepseek-v4-flash"));
     assert!(!text.contains("deepseek/"));
