@@ -26,11 +26,7 @@ struct SummaryItem {
 
 fn items(usage: &UsageStats) -> [SummaryItem; 5] {
     let days = usage.running_days;
-    let average_tokens = if days == 0 {
-        0
-    } else {
-        usage.all_total.tokens / days
-    };
+    let average_tokens = usage.all_total.tokens.checked_div(days).unwrap_or(0);
     let average_cost = if days == 0 {
         0
     } else {
@@ -100,10 +96,7 @@ pub(super) fn lines(usage: &UsageStats, width: usize) -> Vec<Line<'static>> {
         if !result.is_empty() {
             result.push(Line::raw(""));
         }
-        let cards: Vec<_> = group
-            .iter()
-            .map(|item| card(item, card_width))
-            .collect();
+        let cards: Vec<_> = group.iter().map(|item| card(item, card_width)).collect();
         for row in 0..CARD_HEIGHT {
             let mut spans = vec![Span::raw(" ".repeat(left))];
             for (column, card) in cards.iter().enumerate() {
@@ -132,7 +125,10 @@ fn card(item: &SummaryItem, width: usize) -> [Line<'static>; CARD_HEIGHT] {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!(" {}╮", "─".repeat(width.saturating_sub(5 + columns(&title)))),
+            format!(
+                " {}╮",
+                "─".repeat(width.saturating_sub(5 + columns(&title)))
+            ),
             border,
         ),
     ]);
