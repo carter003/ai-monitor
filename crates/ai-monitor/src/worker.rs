@@ -145,9 +145,9 @@ impl Workers {
                         break;
                     }
                     let stats = match reader.as_ref() {
-                        Some(active) => active.load(),
+                        Some(active) => active.load(config.usage_start),
                         None => Reader::open(&config.usage_db).and_then(|opened| {
-                            let loaded = opened.load();
+                            let loaded = opened.load(config.usage_start);
                             reader = Some(opened);
                             loaded
                         }),

@@ -3,9 +3,10 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+use chrono::NaiveDate;
 /// 配置文件里出现的键。声明为常量而不是结构体字段：解析器是手写的平面
 /// reader（见 `parse_config`），这个表既驱动解析也充当未知键守卫。
-const KEYS: [&str; 10] = [
+const KEYS: [&str; 11] = [
     "refresh_seconds",
     "codex_home",
     "agy_home",
@@ -15,6 +16,7 @@ const KEYS: [&str; 10] = [
     "openrouter_key_file",
     "go2_key_file",
     "usage_db",
+    "usage_start",
     "web_port",
 ];
 
@@ -30,6 +32,8 @@ struct FileConfig {
     openrouter_key_file: Option<String>,
     go2_key_file: Option<String>,
     usage_db: Option<String>,
+    /// YYYY-MM-DD，本地消耗累计天数的起始自然日（含）。
+    usage_start: Option<String>,
 }
 
 /// 解析扁平的 `key = value` 配置。值是带引号字符串或无符号整数；注释
@@ -77,6 +81,7 @@ fn parse_config(text: &str) -> Result<FileConfig, String> {
                 "opencode_home" => config.opencode_home = Some(unquoted.to_owned()),
                 "grok_home" => config.grok_home = Some(unquoted.to_owned()),
                 "usage_db" => config.usage_db = Some(unquoted.to_owned()),
+                "usage_start" => config.usage_start = Some(unquoted.to_owned()),
                 _ => unreachable!("KEYS 与 match 分支一一对应"),
             },
             _ => return Err(format!("{} 的值必须是带引号的字符串", key)),
@@ -99,7 +104,8 @@ pub struct Config {
     pub go2_key: PathBuf,
     /// sqlite database written by the herdr-usage collector. Read-only here.
     pub usage_db: PathBuf,
-    /// Loopback HTTP port; zero asks the OS to choose a free port.
+    /// 本地消耗累计天数的起始自然日（含）。None 表示回退到查库最早记录。
+    pub usage_start: Option<NaiveDate>,
     pub web_port: u16,
 }
 
@@ -157,6 +163,10 @@ impl Config {
             ),
             go2_key: expand(file.go2_key_file, config_root.join("ai-monitor/go2.key")),
             usage_db: expand(file.usage_db, home.join(".local/share/herdr/usage.db")),
+            usage_start: file.usage_start.as_deref().map(|s| {
+                NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                    .map_err(|_| format!("usage_start 格式错误，应为 YYYY-MM-DD：{}", s))
+            }).transpose()?,
             home,
         })
     }

@@ -29,7 +29,7 @@ impl Reader {
 
     /// Read every panel. Returns an error only when a query fails; an empty
     /// database is a valid, all-zero result.
-    pub fn load(&self) -> rusqlite::Result<UsageStats> {
+    pub fn load(&self, usage_start: Option<NaiveDate>) -> rusqlite::Result<UsageStats> {
         let now = Local::now();
         let day_start = local_midnight(now, Period::Day);
         let week_start = local_midnight(now, Period::Week);
@@ -48,7 +48,7 @@ impl Reader {
             month_total: self.total(Some(month_start))?,
             year_total: self.total(Some(year_start))?,
             all_total,
-            running_days: self.running_days(now)?,
+            running_days: self.running_days(now, usage_start)?,
             error: None,
         })
     }
@@ -87,7 +87,13 @@ impl Reader {
     }
 
     /// Inclusive number of local calendar days from the first event through today.
-    fn running_days(&self, now: chrono::DateTime<Local>) -> rusqlite::Result<u64> {
+    /// When `usage_start` is set (config key `usage_start`), the first day is
+    /// taken from that date instead of the earliest record in the database.
+    fn running_days(
+        &self,
+        now: chrono::DateTime<Local>,
+        usage_start: Option<NaiveDate>,
+    ) -> rusqlite::Result<u64> {
         let first: Option<i64> = self.connection.query_row(
             "SELECT MIN(occurred_at) FROM usage_event",
             [],
@@ -99,10 +105,10 @@ impl Reader {
         let Some(first) = Local.timestamp_millis_opt(first_ms).single() else {
             return Ok(0);
         };
-        let elapsed = (now.date_naive() - first.date_naive()).num_days();
+        let first_date = usage_start.unwrap_or(first.date_naive());
+        let elapsed = (now.date_naive() - first_date).num_days();
         Ok(elapsed.max(0) as u64 + 1)
     }
-
     /// The existing model table: rolling 24-hour totals, top six.
     fn models(&self, since_ms: i64) -> rusqlite::Result<Vec<ModelUsage>> {
         self.models_with_limit(since_ms, 6)
@@ -363,7 +369,7 @@ mod tests {
     #[test]
     fn running_days_are_inclusive_and_empty_db_is_zero() {
         let empty = reader(seeded());
-        assert_eq!(empty.running_days(Local::now()).expect("days"), 0);
+        assert_eq!(empty.running_days(Local::now(), None).expect("days"), 0);
 
         let connection = seeded();
         let now = Local
@@ -385,7 +391,7 @@ mod tests {
             Some(0.0),
             first.timestamp_millis(),
         );
-        assert_eq!(reader(connection).running_days(now).expect("days"), 4);
+        assert_eq!(reader(connection).running_days(now, None).expect("days"), 4);
     }
 
     #[test]
@@ -617,7 +623,7 @@ mod tests {
             return;
         }
         let reader = Reader::open(db_path).expect("open production db");
-        let stats = reader.load().expect("load stats");
+        let stats = reader.load(None).expect("load stats");
         assert!(!stats.models.is_empty(), "models should not be empty");
         for m in &stats.models {
             assert!(!m.model.contains("hy3"), "hy3 should not be in 24H models: {}", m.model);
