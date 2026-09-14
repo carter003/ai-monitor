@@ -186,6 +186,8 @@ pub struct UsageStats {
     pub year_total: UsageTotal,
     /// Whole-table totals; the homepage summary row shows the same figures.
     pub all_total: UsageTotal,
+    /// Inclusive local-calendar days from the first recorded event through today.
+    pub running_days: u64,
     /// Set when the database could not be read, so the homepage can say so
     /// instead of rendering zeros that look like real data.
     pub error: Option<String>,
