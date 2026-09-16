@@ -163,6 +163,9 @@ impl GrokState {
             usage,
             model,
             model_source,
+            // The log never names the upstream provider; the Grok CLI is the
+            // only writer, and the plans filter keys on `source = 'grok'`.
+            provider: None,
             occurred_at,
         })
     }

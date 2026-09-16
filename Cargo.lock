@@ -16,7 +16,7 @@ dependencies = [
 
 [[package]]
 name = "ai-monitor"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "chrono",
  "crossterm",
@@ -487,6 +487,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

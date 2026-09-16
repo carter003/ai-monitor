@@ -1,5 +1,5 @@
 //! Optional standalone entry point; ai-monitor embeds the server directly.
-use herdr_usage::{db_path, web::server::Server};
+use herdr_usage::{db_path, plans::PlanOptions, web::server::Server};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut port = 19999u16;
@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let database = db_path();
-    let server = Server::start(database.clone(), port)?;
+    let server = Server::start(database.clone(), port, PlanOptions::default())?;
     println!(
         "Token 统计网页：http://{}\n数据库：{}",
         server.address(),

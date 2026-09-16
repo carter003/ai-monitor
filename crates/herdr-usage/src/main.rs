@@ -12,6 +12,11 @@ use std::{
 /// Set by the SIGINT/SIGTERM handler; read by the main loop.
 static STOPPED: AtomicBool = AtomicBool::new(false);
 
+/// `collect_offset` row marking the one-off provider backfill as done. It is not
+/// a collection source; the table is reused because the value must survive
+/// restarts exactly like a watermark does.
+const BACKFILL_KIND: &str = "omp-provider-backfill";
+
 fn main() {
     let database = db_path();
     let home = home_dir();
@@ -34,7 +39,15 @@ fn main() {
         paths.opencode_db.display()
     );
 
+    let roots = paths.omp_session_roots();
     let mut collector = sources::Collector::new(paths);
+    match backfill_once(&mut connection, &roots) {
+        Ok(Some(rows)) => println!("provider 回填：{rows} 行"),
+        Ok(None) => {}
+        // A failure leaves the marker unwritten and retries on the next start
+        // rather than blocking collection.
+        Err(error) => eprintln!("[warn] provider 回填失败：{error}（下次启动重试）"),
+    }
     let mut first = true;
     while !STOPPED.load(Ordering::Relaxed) {
         let started = std::time::Instant::now();
@@ -73,6 +86,24 @@ fn main() {
         sleep_until_next_round(sources::ROUND);
     }
     println!("herdr-usage 退出");
+}
+
+/// Run the one-off `provider` backfill unless its marker says it is done.
+///
+/// Returns `None` when the marker is already present, otherwise the number of
+/// rows filled. The marker is written only after a successful pass, so an
+/// interrupted backfill runs again on the next start (the update itself is
+/// idempotent: it only touches rows that are still NULL).
+fn backfill_once(
+    connection: &mut rusqlite::Connection,
+    roots: &[std::path::PathBuf],
+) -> rusqlite::Result<Option<usize>> {
+    if db::offset(connection, BACKFILL_KIND)?.is_some() {
+        return Ok(None);
+    }
+    let rows = sources::backfill_omp_provider(connection, roots)?;
+    db::save_offset(connection, BACKFILL_KIND, "1")?;
+    Ok(Some(rows))
 }
 
 /// Sleep in short slices so a signal is honoured promptly.

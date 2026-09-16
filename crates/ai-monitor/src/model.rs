@@ -251,11 +251,7 @@ impl SourceState {
     }
 
     fn placeholders(source: Source) -> Vec<Card> {
-        let mut cards = vec![Card::empty(source.title())];
-        if source == Source::Codex {
-            cards.push(Card::empty("Codex · 5.3 Spark"));
-        }
-        cards
+        vec![Card::empty(source.title())]
     }
 
     pub fn begin(&mut self, identity: String) {
@@ -294,7 +290,7 @@ impl SourceState {
 }
 
 /// Only hold a source when every returned independent pool is exhausted.
-/// Empty cards describe unavailable pools (such as an absent Spark subscription).
+/// Empty cards describe pools the account did not return.
 pub fn weekly_hold_until(cards: &[Card], now: i64) -> Option<i64> {
     let mut until = None;
     for card in cards

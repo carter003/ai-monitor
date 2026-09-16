@@ -1,5 +1,7 @@
 # Rust build artifacts
 target/
+node_modules/
+integrations/herdr-tps/.runtime/
 **/*.rs.bk
 
 # Local databases and logs

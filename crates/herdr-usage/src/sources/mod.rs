@@ -26,6 +26,9 @@ use std::{
 #[derive(Clone, Debug)]
 pub struct SourcePaths {
     pub omp: PathBuf,
+    /// `~/.omp/profiles`; each `<profile>/agent/sessions` is a second omp
+    /// account's session tree (the `pro2` profile is a separate login).
+    pub omp_profiles: PathBuf,
     pub codex: PathBuf,
     pub grok_log: PathBuf,
     pub grok_config: PathBuf,
@@ -39,11 +42,31 @@ impl SourcePaths {
             .unwrap_or_else(|| home.join(".local/share"));
         Self {
             omp: home.join(".omp/agent/sessions"),
+            omp_profiles: home.join(".omp/profiles"),
             codex: home.join(".codex/sessions"),
             grok_log: home.join(".grok/logs/unified.jsonl"),
             grok_config: home.join(".grok/config.toml"),
             opencode_db: data.join("opencode/opencode.db"),
         }
+    }
+
+    /// Every omp session root: the primary one plus each profile that has a
+    /// session tree. Profile directories are enumerated in sorted order so two
+    /// runs visit the same files in the same sequence (the watermark is keyed by
+    /// absolute path, so ordering only affects determinism of the round report).
+    pub fn omp_session_roots(&self) -> Vec<PathBuf> {
+        let mut roots = vec![self.omp.clone()];
+        let Ok(entries) = std::fs::read_dir(&self.omp_profiles) else {
+            return roots;
+        };
+        let mut profiles: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path().join("agent/sessions"))
+            .filter(|path| path.is_dir())
+            .collect();
+        profiles.sort();
+        roots.extend(profiles);
+        roots
     }
 }
 
@@ -105,7 +128,10 @@ impl Collector {
         now: i64,
     ) -> rusqlite::Result<usize> {
         let kind = "omp";
-        let files = omp::session_files(&self.paths.omp);
+        let mut files = Vec::new();
+        for root in self.paths.omp_session_roots() {
+            files.extend(omp::session_files(&root));
+        }
         self.scanned_files = files.len();
         let mut store = OffsetStore::from_cursor(db::offset(connection, kind)?.as_deref());
         let mut batch = vec![];
@@ -425,4 +451,93 @@ pub fn unresolved_names(connection: &Connection, since_ms: i64) -> Vec<String> {
     cost::unresolved_within(connection, since_ms)
         .map(|rows| rows.into_iter().map(|row| row.raw_model).collect())
         .unwrap_or_default()
+}
+
+/// Fill in `provider` on the omp rows written before that column existed.
+///
+/// The events already in the database carry no provider and cannot be
+/// re-derived from the watermark (those bytes were consumed long ago), so the
+/// session logs are re-read once. Only rows that actually need it are searched
+/// for, and only files whose mtime is newer than the oldest such row are opened:
+/// a file's mtime is never earlier than its last event, so an older file cannot
+/// contain the line. That pruning is what keeps this from walking the whole
+/// multi-gigabyte session corpus.
+///
+/// Runs inside one transaction and returns the number of rows updated.
+pub fn backfill_omp_provider(
+    connection: &mut Connection,
+    roots: &[PathBuf],
+) -> rusqlite::Result<usize> {
+    use std::{
+        collections::{HashMap, HashSet},
+        io::{BufRead, BufReader},
+    };
+
+    let mut pending: HashSet<String> = {
+        let mut statement = connection
+            .prepare("SELECT event_id FROM usage_event WHERE source = 'omp' AND provider IS NULL")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.filter_map(Result::ok).collect()
+    };
+    if pending.is_empty() {
+        return Ok(0);
+    }
+    let floor_ms: i64 = connection.query_row(
+        "SELECT MIN(occurred_at) FROM usage_event WHERE source = 'omp' AND provider IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+
+    let mut found: HashMap<String, String> = HashMap::new();
+    'roots: for root in roots {
+        for file in omp::session_files(root) {
+            if pending.is_empty() {
+                break 'roots;
+            }
+            let Some(mtime_ms) = std::fs::metadata(&file)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|since| since.as_millis() as i64)
+            else {
+                continue;
+            };
+            if mtime_ms < floor_ms - 3_600_000 {
+                continue;
+            }
+            let Ok(handle) = std::fs::File::open(&file) else {
+                continue;
+            };
+            for line in BufReader::new(handle).split(b'\n') {
+                let Ok(line) = line else { break };
+                // Cheap reject: only assistant records carry a provider.
+                if !line.windows(7).any(|window| window == b"\"usage\"") {
+                    continue;
+                }
+                let Some((id, provider)) = omp::record_provider(&line) else {
+                    continue;
+                };
+                if pending.remove(&id) {
+                    found.insert(id, provider);
+                }
+            }
+        }
+    }
+    if found.is_empty() {
+        return Ok(0);
+    }
+
+    let transaction = connection.transaction()?;
+    let mut updated = 0usize;
+    {
+        let mut statement = transaction.prepare(
+            "UPDATE usage_event SET provider = ?1
+             WHERE source = 'omp' AND event_id = ?2 AND provider IS NULL",
+        )?;
+        for (id, provider) in &found {
+            updated += statement.execute(rusqlite::params![provider, id])?;
+        }
+    }
+    transaction.commit()?;
+    Ok(updated)
 }

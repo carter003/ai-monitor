@@ -1,5 +1,30 @@
 # 验证记录
 
+## 0.7.0
+
+日期：2026-09-15，本机 Linux x86_64（WSL2）。
+
+- **去除已停用的 GPT-5.3-Codex-Spark 额度卡**（`src/providers/parse.rs` 的 `codex()`）：不再为
+  `additional_rate_limits` 里的 Spark 池生成 `Codex · 5.3 Spark` 卡片，也不在账户未返回该池时补
+  「账户未返回 Spark 额度」占位卡。识别规则与原先一致（`metered_feature == codex_bengalfox` 或
+  `limit_name` 含 `spark`），命中即 `continue`，因此旧响应里仍带着该池时同样不显示；其余独立额度池
+  照旧按 `Codex · <limit_name>` 列出。`src/model.rs` 的 `SourceState::placeholders` 随之不再为
+  Codex 追加空占位卡，`weekly_hold_until` 的文档注释去掉 Spark 字样（多池停轮询逻辑不变）。
+- 回归：`retired_spark_pool_is_never_reported`（带 Spark 池的响应只返回 1 张 `Codex · GPT` 卡、
+  周窗口 57%；无独立池时也不多出占位卡）与 `other_codex_pools_keep_their_windows`（非 Spark 池
+  仍保留 5H 窗口）。渲染夹具同步去掉该卡：额度面板 `8 项 → 7 项`、meter 行数 `14 → 12`、
+  `quota_panel_lines` 总行数 `23 → 20`。
+- 回归：`cargo test --locked`：ai-monitor 168 + 1（main）+ 3（`tests/hangup.rs`）+ herdr-usage
+  71 + 19 通过，1 项联网测试默认忽略；`cargo clippy --locked --all-targets -- -D warnings` 通过；
+  `cargo fmt --check` 对本次改动文件（`providers/parse.rs`、`model.rs`、`ui/quota/tests.rs`、
+  `worker.rs`）无差异；工作区另有未提交改动（`config.rs`／`usage.rs`／`ui/token/summary/tests.rs`）
+  存在既有格式差异，不在本次范围内。`worker.rs` 回归测试里 `Card::empty("Spark")` 这类标签改为
+  中性名（`second pool`／`pool unavailable`），逻辑未变。
+- `install.sh` 重新装入 `~/.local/bin/ai-monitor`（Release，页脚自 `Cargo.toml` 取值）。
+- 真实 PTY（tmux 120×44，真实凭据、真实账号）：额度面板头部 `7 项`，Codex 只剩 `Codex · GPT`
+  （周 63%），全文无 `Spark`／`5.3`；页脚 `v0.7.0`。`q` 退出后 tmux 会话关闭、无残留
+  `ai-monitor` 进程、19999 端口释放。
+
 ## 0.6.3
 
 日期：2026-09-11，本机 Linux x86_64（WSL2）。

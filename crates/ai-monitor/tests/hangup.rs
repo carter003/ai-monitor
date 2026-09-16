@@ -103,7 +103,7 @@ fn isolated_config(dir: &Path) -> PathBuf {
     )
     .expect("write isolated config");
     let database = herdr_usage::db::open(&dir.join("usage.db")).unwrap();
-    database.execute("INSERT INTO usage_event VALUES ('codex','test','test-model','event',100,0,0,20,0,1.25,0)", []).unwrap();
+    database.execute("INSERT INTO usage_event(source, event_id, model, model_source, input_total, cache_read, cache_write, output_total, reasoning, cost_usd, occurred_at) VALUES ('codex','test','test-model','event',100,0,0,20,0,1.25,0)", []).unwrap();
     config
 }
 

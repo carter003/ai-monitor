@@ -3,6 +3,7 @@
 pub mod cost;
 pub mod db;
 pub mod event;
+pub mod plans;
 pub mod sources;
 pub mod tail;
 pub mod web;

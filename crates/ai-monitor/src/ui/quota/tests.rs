@@ -33,19 +33,10 @@ fn fixtures() -> Vec<SourceState> {
     vec![
         state(
             Source::Codex,
-            vec![
-                card(
-                    "Codex · GPT",
-                    vec![meter("周", 34., 5 * 86400 + 21 * 3600, 0)],
-                ),
-                card(
-                    "Codex · 5.3 Spark",
-                    vec![
-                        meter("5H", 64., 3600 + 12 * 60, 0),
-                        meter("周", 32., 2 * 86400 + 19 * 3600, 0),
-                    ],
-                ),
-            ],
+            vec![card(
+                "Codex · GPT",
+                vec![meter("周", 34., 5 * 86400 + 21 * 3600, 0)],
+            )],
         ),
         state(
             Source::Agy,
@@ -170,7 +161,7 @@ fn all_meters_share_percentage_bar_and_reset_columns() {
         .iter()
         .filter(|r| r.to_string().contains('%'))
         .collect();
-    assert_eq!(meters.len(), 14);
+    assert_eq!(meters.len(), 12);
     for row in meters {
         let value = row.to_string();
         let percent_at = value.find('%').unwrap();
@@ -398,7 +389,7 @@ fn group_backgrounds_replace_empty_separator_rows_at_any_height() {
     let short = quota_panel_lines(&states, Rect::new(0, 0, 46, 8), NOW);
     let tall = quota_panel_lines(&states, Rect::new(0, 0, 46, 80), NOW);
     assert_eq!(short, tall);
-    assert_eq!(short.len(), 23); // Eight headings, fourteen meters, one balance.
+    assert_eq!(short.len(), 20); // Seven headings, twelve meters, one balance.
     assert!(short.iter().all(|row| !row.to_string().trim().is_empty()));
 }
 
@@ -425,7 +416,7 @@ fn real_buffer_has_the_approved_group_background_and_card_count() {
             .lines()
             .next()
             .unwrap()
-            .contains("8 项")
+            .contains("7 项")
     );
     assert_eq!(buffer[(2, 2)].bg, GROUP_BG);
     assert_eq!(buffer[(2, 2)].fg, INK);

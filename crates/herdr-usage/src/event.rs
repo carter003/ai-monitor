@@ -87,6 +87,10 @@ pub struct ParsedEvent {
     pub usage: UsageEvent,
     pub model: Option<String>,
     pub model_source: Option<ModelSource>,
+    /// Upstream account/provider label. omp reports `message.provider`
+    /// (e.g. `openai-codex`, `google-antigravity`, `opencode-go`, `codebuddy`);
+    /// opencode reports `providerID`; codex and grok logs carry none.
+    pub provider: Option<String>,
     /// UTC epoch milliseconds.
     pub occurred_at: i64,
 }

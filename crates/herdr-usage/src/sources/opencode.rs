@@ -152,6 +152,7 @@ pub fn parse_message(row: &RawMessage) -> Option<ParsedEvent> {
         usage: normalize_opencode(&parsed),
         model_source: model.as_ref().map(|_| ModelSource::Event),
         model,
+        provider: provider.map(str::to_owned),
         occurred_at,
     })
 }

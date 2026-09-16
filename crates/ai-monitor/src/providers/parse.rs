@@ -19,7 +19,6 @@ pub fn codex(value: &Value) -> Result<Vec<Card>, FetchError> {
         "Codex · GPT",
         value.get("rate_limit").ok_or_else(FetchError::format)?,
     )?];
-    let mut found_spark = false;
     if let Some(extras) = value
         .get("additional_rate_limits")
         .and_then(Value::as_array)
@@ -29,28 +28,17 @@ pub fn codex(value: &Value) -> Result<Vec<Card>, FetchError> {
                 .get("limit_name")
                 .and_then(Value::as_str)
                 .unwrap_or("独立额度");
-            let id = entry
-                .get("metered_feature")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let spark = id == "codex_bengalfox" || name.to_ascii_lowercase().contains("spark");
-            found_spark |= spark;
-            let title = if spark {
-                "Codex · 5.3 Spark".into()
-            } else {
-                format!("Codex · {}", safe_label(name))
-            };
+            // GPT-5.3-Codex-Spark 已停用：旧响应里可能还带着这个池，一律不统计。
+            if entry.get("metered_feature").and_then(Value::as_str) == Some("codex_bengalfox")
+                || name.to_ascii_lowercase().contains("spark")
+            {
+                continue;
+            }
             cards.push(codex_card(
-                &title,
+                &format!("Codex · {}", safe_label(name)),
                 entry.get("rate_limit").ok_or_else(FetchError::format)?,
             )?);
         }
-    }
-    if !found_spark {
-        cards.push(Card {
-            note: Some("账户未返回 Spark 额度".into()),
-            ..Card::empty("Codex · 5.3 Spark")
-        });
     }
     Ok(cards)
 }
@@ -232,15 +220,29 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
-    fn preserves_spark_pair_and_week_only_gpt() {
+    fn retired_spark_pool_is_never_reported() {
         let w = |seconds, used| json!({"limit_window_seconds":seconds,"used_percent":used,"reset_at":1800000000});
-        let value = json!({"rate_limit":{"primary_window":w(604800,43),"secondary_window":null},"additional_rate_limits":[{"metered_feature":"codex_bengalfox","limit_name":"GPT-5.3-Codex-Spark","rate_limit":{"primary_window":w(18000,0),"secondary_window":w(604800,18)}}]});
-        let cards = codex(&value).unwrap();
-        assert_eq!(cards.len(), 2);
+        let gpt = json!({"primary_window":w(604800,43),"secondary_window":null});
+        let spark = json!({"metered_feature":"codex_bengalfox","limit_name":"GPT-5.3-Codex-Spark","rate_limit":{"primary_window":w(18000,0),"secondary_window":w(604800,18)}});
+        let cards =
+            codex(&json!({"rate_limit":gpt.clone(),"additional_rate_limits":[spark]})).unwrap();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].title, "Codex · GPT");
         assert_eq!(cards[0].meters.len(), 1);
         assert_eq!(cards[0].meters[0].label, "周");
+        assert_eq!(cards[0].meters[0].remaining, Some(57.));
+        // 账户没有独立额度池时也不留占位卡。
+        assert_eq!(codex(&json!({"rate_limit":gpt})).unwrap().len(), 1);
+    }
+    #[test]
+    fn other_codex_pools_keep_their_windows() {
+        let w = |seconds, used| json!({"limit_window_seconds":seconds,"used_percent":used,"reset_at":1800000000});
+        let value = json!({"rate_limit":{"primary_window":w(604800,43),"secondary_window":null},"additional_rate_limits":[{"metered_feature":"codex_other","limit_name":"GPT-5.4 mini","rate_limit":{"primary_window":w(18000,25),"secondary_window":null}}]});
+        let cards = codex(&value).unwrap();
+        assert_eq!(cards.len(), 2);
+        assert_eq!(cards[1].title, "Codex · GPT-5.4 mini");
         assert_eq!(cards[1].meters[0].label, "5H");
-        assert_eq!(cards[1].meters[1].remaining, Some(82.));
+        assert_eq!(cards[1].meters[0].remaining, Some(75.));
     }
     #[test]
     fn go_shows_remaining_and_never_uses_a_local_billing_estimate() {

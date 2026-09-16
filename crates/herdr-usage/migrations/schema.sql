@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS usage_event(
   event_id     TEXT NOT NULL,    -- dedup key, see plan §2.3
   model        TEXT,             -- providerID/modelID join string; NULL when unresolved
   model_source TEXT,             -- event|context|config_fallback|NULL
+  provider     TEXT,             -- omp: message.provider；opencode: providerID；无该字段的源为 NULL
   input_total  INTEGER NOT NULL, -- gross, includes cache_read
   cache_read   INTEGER NOT NULL, -- 0 <= cache_read <= input_total
   cache_write  INTEGER NOT NULL, -- only opencode non-zero; not displayed, feeds cost
@@ -20,8 +21,11 @@ CREATE TABLE IF NOT EXISTS usage_event(
 
 CREATE INDEX IF NOT EXISTS idx_usage_time ON usage_event(occurred_at);
 
+-- 套餐额度页按 (provider, 时间区间) 聚合，一张索引覆盖三种套餐的过滤条件。
+CREATE INDEX IF NOT EXISTS idx_usage_provider_time ON usage_event(provider, occurred_at);
+
 CREATE TABLE IF NOT EXISTS collect_offset(
-  kind   TEXT PRIMARY KEY,       -- omp|codex|grok|opencode
+  kind   TEXT PRIMARY KEY,       -- omp|codex|grok|opencode，外加非采集源的水位行（omp-provider-backfill）
   cursor TEXT NOT NULL);         -- omp/codex/grok: {path: offset}; opencode: {max_rowid}
 
 CREATE TABLE IF NOT EXISTS model_price(

@@ -23,7 +23,10 @@
 ```text
 ai-monitor/
 ├── Cargo.toml                    # Workspace 根配置
+├── package.json                  # Herdr 实时 TPS 集成的 Node 依赖与命令
 ├── install.sh                    # 一键编译安装脚本
+├── integrations/
+│   └── herdr-tps/                # Codex/OMP 实时速度与 Herdr metadata 接线
 ├── systemd/
 │   └── herdr-usage-collector.service  # 用户级后台采集守护进程配置
 └── crates/
@@ -132,6 +135,18 @@ sh install.sh
 - `ai-monitor`：终端 TUI 看板
 - `herdr-usage`：Token 采集守护程序
 - `import_prices`：价格表同步工具
+
+如需 Herdr Agents 栏实时显示 Codex/OMP 模型与 TPS，再安装独立集成：
+
+```sh
+npm ci
+npm run herdr:tps:install -- --dry-run
+npm run herdr:tps:install
+```
+
+实现、运行边界和诊断方法见
+[Herdr TPS 用户指南](integrations/herdr-tps/README.md)与
+[维护指南](integrations/herdr-tps/MAINTENANCE.md)。
 
 安装脚本使用 `--all-features` 编译；若只需采集器，可单独执行
 `cargo build --release -p herdr-usage`（跳过价格同步工具的 HTTP 依赖编译）。

@@ -1,5 +1,6 @@
 //! Embedded HTTP service: all workers belong to the caller's process.
 use super::{self as web, Query};
+use crate::plans::{self, PlanOptions};
 use std::{
     io::{self, BufRead, BufReader, Read, Write},
     net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream},
@@ -21,7 +22,8 @@ pub struct Server {
     workers: Vec<JoinHandle<()>>,
 }
 impl Server {
-    pub fn start(database: PathBuf, port: u16) -> io::Result<Self> {
+    pub fn start(database: PathBuf, port: u16, plans: PlanOptions) -> io::Result<Self> {
+        let plans = Arc::new(plans);
         let listener = Arc::new(TcpListener::bind((Ipv4Addr::LOCALHOST, port))?);
         listener.set_nonblocking(true)?;
         let mut server = Self {
@@ -34,6 +36,7 @@ impl Server {
             let listener = Arc::clone(&listener);
             let stopped = Arc::clone(&server.stopped);
             let database = database.clone();
+            let plans = Arc::clone(&plans);
             let active = Arc::new(Mutex::new(None));
             server.active.push(Arc::clone(&active));
             let worker = thread::Builder::new()
@@ -53,7 +56,7 @@ impl Server {
                                     *slot = Some(socket);
                                 }
                                 // A browser disconnect is routine. Do not write into the TUI.
-                                let _ = handle(stream, &database);
+                                let _ = handle(stream, &database, &plans);
                                 active.lock().unwrap_or_else(|e| e.into_inner()).take();
                             }
                             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -90,7 +93,7 @@ fn respond(stream: &mut TcpStream, status: &str, mime: &str, body: &[u8]) -> std
     write!(stream, "HTTP/1.1 {status}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'\r\n\r\n", body.len())?;
     stream.write_all(body)
 }
-fn handle(mut stream: TcpStream, database: &Path) -> std::io::Result<()> {
+fn handle(mut stream: TcpStream, database: &Path, plans: &PlanOptions) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let mut line = String::new();
@@ -137,12 +140,29 @@ fn handle(mut stream: TcpStream, database: &Path) -> std::io::Result<()> {
     let asset: Option<(&str, &[u8])> = match path {
         "/" => Some(("text/html; charset=utf-8", include_bytes!("index.html"))),
         "/query" => Some(("text/html; charset=utf-8", include_bytes!("query.html"))),
+        "/plans" => Some(("text/html; charset=utf-8", include_bytes!("plans.html"))),
         "/app.js" => Some(("text/javascript; charset=utf-8", include_bytes!("app.js"))),
         "/style.css" => Some(("text/css; charset=utf-8", include_bytes!("style.css"))),
         _ => None,
     };
     if let Some((mime, body)) = asset {
         return respond(&mut stream, "200 OK", mime, body);
+    }
+    if path == "/api/plans" {
+        return match plans::report(database, plans) {
+            Ok(report) => respond(
+                &mut stream,
+                "200 OK",
+                "application/json; charset=utf-8",
+                &serde_json::to_vec(&report)?,
+            ),
+            Err(error) => respond(
+                &mut stream,
+                "400 Bad Request",
+                "application/json; charset=utf-8",
+                serde_json::json!({"error": error}).to_string().as_bytes(),
+            ),
+        };
     }
     if path != "/api/usage" {
         return respond(&mut stream, "404 Not Found", "text/plain", b"Not found");
@@ -180,7 +200,7 @@ mod tests {
 
     #[test]
     fn dropping_server_cancels_partial_requests_and_releases_listener() {
-        let server = Server::start(PathBuf::from("/unused.db"), 0).unwrap();
+        let server = Server::start(PathBuf::from("/unused.db"), 0, PlanOptions::default()).unwrap();
         let address = server.address();
         let mut clients: Vec<_> = (0..4)
             .map(|_| {
@@ -209,7 +229,7 @@ mod tests {
     fn a_port_conflict_does_not_replace_the_existing_listener() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        let error = Server::start(PathBuf::from("/unused.db"), address.port())
+        let error = Server::start(PathBuf::from("/unused.db"), address.port(), PlanOptions::default())
             .err()
             .unwrap();
         assert_eq!(error.kind(), io::ErrorKind::AddrInUse);

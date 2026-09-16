@@ -204,6 +204,9 @@ impl CodexState {
             usage: normalize_codex(&last),
             model,
             model_source,
+            // A rollout never names its provider; the whole codex source is the
+            // Codex subscription, which the plans filter expresses separately.
+            provider: None,
             occurred_at,
         }]
     }

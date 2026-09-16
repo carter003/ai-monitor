@@ -160,6 +160,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let web_server = herdr_usage::web::server::Server::start(
         config.usage_db.clone(),
         config.web_port,
+        herdr_usage::plans::PlanOptions {
+            agy_home: config.agy.clone(),
+            agy2_home: config.agy2.clone(),
+        },
     )
     .map_err(|error| {
         io::Error::new(

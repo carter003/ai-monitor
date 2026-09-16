@@ -29,7 +29,19 @@ pub fn open_readonly(path: &Path) -> rusqlite::Result<Connection> {
 }
 
 /// Apply the schema. Idempotent: every statement uses `IF NOT EXISTS`.
+///
+/// The batch also creates `idx_usage_provider_time`, which cannot run on a
+/// database created before that column existed, so the column is added first.
+/// An empty column set means the table is created by the batch itself.
 pub fn initialize(connection: &Connection) -> rusqlite::Result<()> {
+    let columns: Vec<String> = {
+        let mut statement = connection.prepare("PRAGMA table_info(usage_event)")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+        rows.filter_map(Result::ok).collect()
+    };
+    if !columns.is_empty() && !columns.iter().any(|name| name == "provider") {
+        connection.execute("ALTER TABLE usage_event ADD COLUMN provider TEXT", [])?;
+    }
     connection.execute_batch(SCHEMA)
 }
 
@@ -50,10 +62,10 @@ pub fn insert_events(
     {
         let mut statement = transaction.prepare(
             "INSERT OR IGNORE INTO usage_event(
-                 source, event_id, model, model_source,
+                 source, event_id, model, model_source, provider,
                  input_total, cache_read, cache_write, output_total, reasoning,
                  cost_usd, occurred_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         )?;
         for (event, priced) in events {
             let (usage, adjusted) = event.usage.clamped();
@@ -76,6 +88,7 @@ pub fn insert_events(
                 event.event_id,
                 event.model,
                 event.model_source.map(|value| value.as_str()),
+                event.provider,
                 usage.input_total,
                 usage.cache_read,
                 usage.cache_write,
@@ -154,6 +167,7 @@ mod tests {
             },
             model: Some("opencode/muse-spark-1.3-contributor-free".into()),
             model_source: Some(ModelSource::Event),
+            provider: Some("opencode".into()),
             occurred_at: at,
         }
     }

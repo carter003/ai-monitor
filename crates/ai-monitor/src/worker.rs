@@ -321,7 +321,7 @@ mod regression_tests {
             },
             Card {
                 meters: vec![Meter::from_used("周", 20., Some(now + 86400), 0).unwrap()],
-                ..Card::empty("Spark")
+                ..Card::empty("second pool")
             },
         ]);
         assert_eq!(
@@ -346,7 +346,7 @@ mod regression_tests {
             Duration::from_secs(60)
         );
         // An absent subscription placeholder does not prevent an otherwise valid hold.
-        let placeholders = vec![card(now + 600), Card::empty("Spark unavailable")];
+        let placeholders = vec![card(now + 600), Card::empty("pool unavailable")];
         assert_eq!(
             next_success_delay(Duration::from_secs(60), &Ok(placeholders), now),
             Duration::from_secs(601)

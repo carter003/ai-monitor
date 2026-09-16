@@ -85,6 +85,11 @@ impl OmpState {
             .and_then(Value::as_str)
             .filter(|text| !text.is_empty())
             .map(str::to_owned);
+        let provider = message
+            .get("provider")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned);
         let usage = normalize_omp(&parsed);
         self.seen.insert(event_id.to_owned());
 
@@ -93,6 +98,7 @@ impl OmpState {
             usage,
             model_source: model.as_ref().map(|_| ModelSource::Event),
             model,
+            provider,
             occurred_at,
         }]
     }
@@ -101,6 +107,21 @@ impl OmpState {
 /// Read an integer field, treating a missing or non-numeric value as 0.
 fn int(value: &Value, key: &str) -> i64 {
     value.get(key).and_then(Value::as_i64).unwrap_or(0)
+}
+
+/// `(envelope id, message.provider)` of an assistant record.
+///
+/// Used only by the one-off `provider` backfill, which must re-read session
+/// lines written before the column existed. `None` when the line is not JSON or
+/// carries no non-empty provider.
+pub fn record_provider(line: &[u8]) -> Option<(String, String)> {
+    let record: Value = serde_json::from_slice(line).ok()?;
+    let id = record.get("id").and_then(Value::as_str)?;
+    let provider = record
+        .pointer("/message/provider")
+        .and_then(Value::as_str)
+        .filter(|provider| !provider.is_empty())?;
+    Some((id.to_owned(), provider.to_owned()))
 }
 
 /// Parse an RFC3339 timestamp into UTC epoch milliseconds.
@@ -160,6 +181,37 @@ mod tests {
         let events = state.parse_line(Path::new("/a.jsonl"), &line(0, ASSISTANT));
         assert!(!ASSISTANT.contains("reasoningTokens"));
         assert_eq!(events[0].usage.reasoning, 0);
+    }
+
+    #[test]
+    fn the_message_provider_is_carried_through() {
+        let mut state = OmpState::new();
+        let events = state.parse_line(Path::new("/a.jsonl"), &line(0, ASSISTANT));
+        assert_eq!(events[0].provider.as_deref(), Some("codebuddy"));
+        // An assistant record without a provider yields None rather than an
+        // empty string, so the column stays NULL for it.
+        let no_provider = ASSISTANT.replace("\"provider\":\"codebuddy\",", "");
+        let events = state.parse_line(Path::new("/a.jsonl"), &line(0, &no_provider));
+        assert_eq!(events[0].provider, None);
+        let blank = ASSISTANT.replace("\"provider\":\"codebuddy\"", "\"provider\":\"\"");
+        let events = state.parse_line(Path::new("/a.jsonl"), &line(0, &blank));
+        assert_eq!(events[0].provider, None);
+    }
+
+    #[test]
+    fn record_provider_reads_the_pair_the_backfill_needs() {
+        assert_eq!(
+            record_provider(ASSISTANT.as_bytes()),
+            Some(("681cad2e".to_owned(), "codebuddy".to_owned()))
+        );
+        // Non-assistant records and malformed lines yield nothing instead of
+        // writing a partial mapping into the backfill.
+        assert_eq!(record_provider(b"not json"), None);
+        assert_eq!(record_provider(br#"{"type":"custom","id":"c1"}"#), None);
+        assert_eq!(
+            record_provider(br#"{"id":"x","message":{"role":"assistant"}}"#),
+            None
+        );
     }
 
     #[test]

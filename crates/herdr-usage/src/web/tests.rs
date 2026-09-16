@@ -24,7 +24,8 @@ fn fixture() -> Connection {
         ("6", Some("vendor/a"), midnight + 86400000, Some(2.0)),
     ] {
         db.execute(
-            "INSERT INTO usage_event VALUES ('codex',?1,?2,'event',100,60,0,20,10,?3,?4)",
+            "INSERT INTO usage_event(source, event_id, model, model_source, input_total, cache_read, cache_write, output_total, reasoning, cost_usd, occurred_at)
+             VALUES ('codex',?1,?2,'event',100,60,0,20,10,?3,?4)",
             rusqlite::params![id, model, cost, at],
         )
         .unwrap();

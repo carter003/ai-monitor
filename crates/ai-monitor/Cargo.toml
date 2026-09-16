@@ -1,6 +1,6 @@
 [package]
 name = "ai-monitor"
-version = "0.6.3"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.88"
 description = "A standalone Linux terminal dashboard for system resources and AI quotas"

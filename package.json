@@ -1,0 +1,20 @@
+{
+  "name": "ai-monitor-local-integrations",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "herdr:codex": "node integrations/herdr-tps/codex-with-tps.mjs",
+    "herdr:omp": "node integrations/herdr-tps/omp-with-tps.mjs",
+    "herdr:tps:install": "node integrations/herdr-tps/install.mjs",
+    "herdr:tps:test": "node --test integrations/herdr-tps/test/*.test.mjs",
+    "omp:patch:balance": "node integrations/herdr-tps/omp-patches/patch-omp-antigravity-balance.mjs",
+    "omp:patch:test": "node --test integrations/herdr-tps/omp-patches/test/*.test.mjs"
+  },
+  "dependencies": {
+    "gpt-tokenizer": "4.0.0",
+    "ws": "8.21.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -12,7 +12,7 @@ ai-monitor
 
 一页两栏，同时展示系统资源和本机 token 消耗：
 
-- **左栏**：上半是系统资源，下半是 Codex 常规 GPT、GPT-5.3-Codex-Spark、AGY、AGY2、
+- **左栏**：上半是系统资源，下半是 Codex 常规 GPT、AGY、AGY2、
   OpenCode Go、OpenCode GO-2、SuperGrok 和 OpenRouter 的**云端剩余配额**。额度列表在系统数字下方独立滚动，
   不会把系统指标顶出画面。
 - **右栏**：本机实际烧掉的 token —— 上半左侧（占宽 70%）是按模型排行的一行一模型表格
@@ -42,7 +42,9 @@ ai-monitor
 
 ## 本地网页与退出
 
-运行 `ai-monitor` 时同步启动 http://127.0.0.1:19999 ，提供 Token 总览和独立每日查询页。网页使用终端的 `usage_db` 配置，在同一进程的工作线程内运行。界面底部版本号左侧显示实际网页地址（窄窗格空间不足时隐藏地址，保留操作提示）。
+运行 `ai-monitor` 时同步启动 http://127.0.0.1:19999 ，提供 Token 总览、套餐额度和独立每日查询页。网页使用终端的 `usage_db` 配置，在同一进程的工作线程内运行。界面底部版本号左侧显示实际网页地址（窄窗格空间不足时隐藏地址，保留操作提示）。
+
+`/plans` 页按各订阅套餐自己的额度重置周期统计每周用量并推算上限（口径与降级说明见 `herdr-usage` 的 README）。
 
 按 `q` / Esc / Ctrl+C 或结束进程、关闭终端时，网页同步关闭；即使 `SIGKILL` 强制结束也不会留下网页孤儿进程。正常退出会关闭活动连接并回收线程。端口占用会在进入终端界面前明确报错，可配置 `web_port` 更换端口。
 
@@ -67,6 +69,14 @@ Token 数据来自 `~/.local/share/herdr/usage.db`，由 Herdr 侧的 `herdr-usa
 数据库不存在时右栏显示「未连接 usage.db」，不报错。路径可用配置项 `usage_db` 覆盖。
 
 运行只需要 Linux 及交互终端，不需要 Rust、Node、Python 或额外的 TUI 插件。建议窗格至少 32 列、24 行；更小的窗格有降级显示。
+
+## 0.7.0 更新
+
+去除已停用的 Codex 模型额度：OpenAI 停用 GPT-5.3-Codex-Spark 后，左栏不再出现 `Codex · 5.3 Spark`
+卡片，Codex 只剩 `Codex · GPT`。解析层直接丢弃该额度池（`metered_feature = codex_bengalfox` 或
+`limit_name` 含 `spark`），旧响应里若仍带这个池也不会显示，账户未返回该池时也不再留「账户未返回
+Spark 额度」占位卡；账户返回的其他独立额度池照旧按 `Codex · <名称>` 列出。额度面板项数因此由 8 项
+变为 7 项。
 
 ## 0.6.3 更新
 
@@ -154,7 +164,7 @@ token 与金额在同一次 GROUP BY 里取回。
 
 `t` 改为整页切换：Token 页占满窗格，不再在顶部保留 CPU、内存、网速与磁盘区，模型表、柱状图和总计因此获得完整高度；额度页仍是系统资源加云端额度。底部的刷新、切换、退出提示与版本号位置不变。
 
-版本号以 `Cargo.toml` 的 `version` 为唯一来源（当前 `v0.6.3`）：页脚、HTTP User-Agent 和本文件的最新更新小节都由它派生，改动版本只需改 `Cargo.toml` 一处；`the_readme_changelog_matches_the_crate_version` 会在文档与它不一致时失败。
+版本号以 `Cargo.toml` 的 `version` 为唯一来源（当前 `v0.7.0`）：页脚、HTTP User-Agent 和本文件的最新更新小节都由它派生，改动版本只需改 `Cargo.toml` 一处；`the_readme_changelog_matches_the_crate_version` 会在文档与它不一致时失败。
 
 ## 0.1.8 更新
 
@@ -226,7 +236,7 @@ AGY／AGY2 改为云端查询并支持令牌自动续期，关闭客户端也能
 
 ## 账户与数据来源
 
-- **Codex**：读取 `~/.codex/auth.json` 中的现有 ChatGPT 登录凭据，查询账户 usage。常规额度按返回的窗口显示；Spark 从独立额度池读取并保留 5H／周两个窗口。此接口属于 Codex 客户端内部接口，可能随服务更新而变化。不会启动 Codex 模型推理或刷新／改写其登录文件。
+- **Codex**：读取 `~/.codex/auth.json` 中的现有 ChatGPT 登录凭据，查询账户 usage。常规额度按返回的窗口显示，账户返回的其他独立额度池一并列出；已停用的 GPT-5.3-Codex-Spark 不再统计。此接口属于 Codex 客户端内部接口，可能随服务更新而变化。不会启动 Codex 模型推理或刷新／改写其登录文件。
 - **AGY / AGY2**：分别读取 `~/.gemini/antigravity-cli/antigravity-oauth-token` 和 `~/.gemini2/antigravity-cli/antigravity-oauth-token`，直接查询 Google 云端 `retrieveUserQuotaSummary`。**两个客户端都可以关闭，不需要后台 AGY 服务**。显示 Gemini 共享池的 5H／周额度，Pro 和 Flash 不重复列为两份额度。访问令牌接近到期时自动续期；服务端提前返回 401 时最多续期重试一次。新令牌仅保存在各自监控线程内存中，不改写 AGY 登录文件；客户端重新登录后自动读取新凭据。刷新凭据被撤销时需重新登录相应客户端，登录后可再关闭。缺少文件凭据或云端连接／格式异常时，尝试同一配置目录的已运行本地服务并标记“本地服务备用”；登录失效和限流不会被备用路径掩盖。云端接口与 OAuth 客户端配置属于内部协议，可能随 AGY 版本更新而变化。
 - **OpenCode Go**：使用 OpenCode 已保存的 Go API Key 查询 `/zen/go/v1/usage`，显示 5H／周／月剩余比例，不抓取浏览器 Cookie。
 - **OpenCode GO-2**：第二把 OpenCode Go 订阅 Key，读取 `~/.config/ai-monitor/go2.key`（文件只包含 Key，建议权限 `600`），查询同一 `/zen/go/v1/usage` 接口，卡片显示在 OpenCode Go 下方。未放置 Key 文件时该卡片提示配置方法，不影响其他来源。
@@ -264,7 +274,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-测试覆盖双账户隔离、自动续期及内存复用、令牌轮换、401 有界重试、登录撤销、Spark 多窗口、额度缺失／过期、Go 用量方向、余额计算、Grok protobuf 错误帧、Linux CPU／内存／网络／磁盘指标、重试退避和小窗格渲染。`tests/hangup.rs` 另外验证终端挂断、`q` / Esc / Ctrl+C、SIGTERM / SIGHUP / SIGKILL 都能让进程退出并释放网页端口，包括存在未完成 HTTP 请求的情况：它用 tmux 起一个独立会话再关掉，未安装 tmux 的环境会跳过并打印跳过原因。
+测试覆盖双账户隔离、自动续期及内存复用、令牌轮换、401 有界重试、登录撤销、Codex 多额度池与停用池过滤、额度缺失／过期、Go 用量方向、余额计算、Grok protobuf 错误帧、Linux CPU／内存／网络／磁盘指标、重试退避和小窗格渲染。`tests/hangup.rs` 另外验证终端挂断、`q` / Esc / Ctrl+C、SIGTERM / SIGHUP / SIGKILL 都能让进程退出并释放网页端口，包括存在未完成 HTTP 请求的情况：它用 tmux 起一个独立会话再关掉，未安装 tmux 的环境会跳过并打印跳过原因。
 
 ## 协议参考
 

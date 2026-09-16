@@ -25,6 +25,7 @@ impl Fixture {
         let _ = fs::remove_dir_all(&root);
         let paths = sources::SourcePaths {
             omp: root.join(".omp/agent/sessions/-project-x"),
+            omp_profiles: root.join(".omp/profiles"),
             codex: root.join(".codex/sessions/2026/09/11"),
             grok_log: root.join(".grok/logs/unified.jsonl"),
             grok_config: root.join(".grok/config.toml"),
@@ -236,6 +237,67 @@ fn a_resumed_codex_round_recovers_the_model_beyond_the_64k_head() {
         model.as_deref(),
         Some("gpt-6-astra"),
         "the latest turn_context before the watermark must win"
+    );
+}
+
+#[test]
+fn a_second_omp_profile_session_tree_is_collected_too() {
+    // The `pro2` profile is a second omp login; its sessions live outside
+    // `~/.omp/agent/sessions` and were invisible before the second root.
+    let fixture = Fixture::new("omp-profiles");
+    let mut connection = fixture.connection();
+    let mut collector = sources::Collector::new(fixture.paths.clone());
+    collector
+        .run_round(&mut connection, 1_000)
+        .expect("cold round");
+
+    let sessions = fixture.paths.omp_profiles.join("pro2/agent/sessions/-p2");
+    fs::create_dir_all(&sessions).expect("profile sessions dir");
+    fs::write(sessions.join("x.jsonl"), format!("{OMP_LINE}\n")).expect("seed profile session");
+
+    let report = collector.run_round(&mut connection, 2_000).expect("round");
+    assert_eq!(report.inserted, 1, "the second profile's events are collected");
+    let (source, provider): (String, Option<String>) = connection
+        .query_row(
+            "SELECT source, provider FROM usage_event WHERE event_id = '681cad2e'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("profile event");
+    assert_eq!(source, "omp", "both profiles stay under the omp source");
+    assert_eq!(provider.as_deref(), Some("codebuddy"));
+}
+
+#[test]
+fn backfill_fills_the_provider_of_rows_written_before_the_column_existed() {
+    let fixture = Fixture::new("omp-backfill");
+    let file = fixture.paths.omp.join("old.jsonl");
+    fs::write(&file, format!("{OMP_LINE}\n")).expect("seed session");
+    let mut connection = fixture.connection();
+    connection
+        .execute(
+            "INSERT INTO usage_event(source, event_id, model, model_source, input_total, cache_read, cache_write, output_total, reasoning, cost_usd, occurred_at)
+             VALUES ('omp','681cad2e','deepseek-v4.1-flash','event',22355,22144,0,86,0,NULL,1789058297999)",
+            [],
+        )
+        .expect("pre-provider row");
+    let roots = vec![fixture.paths.omp.clone()];
+    assert_eq!(
+        sources::backfill_omp_provider(&mut connection, &roots).expect("backfill"),
+        1
+    );
+    let provider: Option<String> = connection
+        .query_row(
+            "SELECT provider FROM usage_event WHERE event_id = '681cad2e'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("provider");
+    assert_eq!(provider.as_deref(), Some("codebuddy"));
+    // Idempotent: nothing is left to fill on a second pass.
+    assert_eq!(
+        sources::backfill_omp_provider(&mut connection, &roots).expect("second pass"),
+        0
     );
 }
 

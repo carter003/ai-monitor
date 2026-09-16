@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>套餐额度 · Token 用量统计</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body>
+<header><div><span class="eyebrow">AI MONITOR / LOCAL</span><h1>套餐额度</h1><p>按各订阅套餐自己的额度重置周期，统计每周已用量并推算额度上限。</p></div><div class="status"><span class="dot"></span>本地数据 <button id="refresh" type="button">刷新</button><small id="updated">正在连接…</small></div></header>
+<nav aria-label="页面"><a href="/">总览</a><a href="/plans" aria-current="page">套餐额度</a><a href="/query">每日查询</a></nav>
+<main>
+<div id="error" role="alert" hidden></div>
+<p id="context" class="muted"></p>
+<section aria-label="当前周期"><div class="section-title"><div><h2>当前周期</h2><p class="muted">同组的两份订阅额度相同，上限共享</p></div></div><div id="plan-cards" class="plan-cards"></div></section>
+<section class="panel" aria-label="账户映射"><div class="section-title"><h2>账户映射</h2><span class="muted">套餐 → 额度账本账户</span></div><div id="accounts" class="account-list"></div></section>
+<section class="panel" aria-label="口径说明"><div class="section-title"><h2>口径与降级说明</h2></div><ul id="notes" class="notes"></ul></section>
+<section class="panel" aria-label="每周趋势">
+<div class="section-title"><div><h2>每周趋势</h2><p class="muted">每个套餐每个周期一个点；空心点表示周期仍在进行</p></div><label>统计指标<select id="metric"><option value="tokens">Token 数</option><option value="cost_usd">金额（USD）</option></select></label><label>周期数<select id="weeks"><option value="4">近 4 周</option><option value="12" selected>近 12 周</option><option value="all">全部</option></select></label></div>
+<div class="charts">
+<div><h2>每周实际使用量</h2><div id="used-chart" class="chart-host"></div></div>
+<div><h2>每周推算最大额度</h2><div id="max-chart" class="chart-host"></div></div>
+</div>
+</section>
+<footer>额度周期由套餐自己的重置时间决定，不一定是自然周。推算口径：该组周期内的实际用量 ÷ 该周期已用比例（比例回落按「同周期额外赠送额度」累加，被下一周期接替的旧周期只统计到接替时刻）。比例来自 omp 额度账本；Grok 的比例来自 Grok CLI 自己的账单日志。金额由本机价格表（OpenRouter 定价）换算，仅供横向比较。</footer>
+</main></body></html>
