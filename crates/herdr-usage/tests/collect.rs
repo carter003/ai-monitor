@@ -82,6 +82,7 @@ fn count(connection: &rusqlite::Connection, source: &str) -> i64 {
 const OMP_LINE: &str = r#"{"id":"681cad2e","timestamp":"2026-09-10T16:38:17.999Z","type":"message","message":{"role":"assistant","model":"deepseek-v4.1-flash","provider":"codebuddy","usage":{"input":211,"output":86,"cacheRead":22144,"cacheWrite":0,"totalTokens":22441}}}"#;
 
 const CODEX_TURN: &str = r#"{"timestamp":"2026-09-10T16:00:00.000Z","type":"turn_context","payload":{"turn_id":"t1","model":"gpt-5.6-luna"}}"#;
+const CODEX_SESSION_META: &str = r#"{"timestamp":"2026-09-10T15:59:59.000Z","type":"session_meta","payload":{"id":"codex-session-1","session_id":"codex-session-1"}}"#;
 
 const CODEX_TURN_ASTRA: &str = r#"{"timestamp":"2026-09-10T16:00:30.000Z","type":"turn_context","payload":{"turn_id":"t2","model":"gpt-6-astra"}}"#;
 const CODEX_COUNT: &str = r#"{"timestamp":"2026-09-10T16:00:01.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":29027,"cached_input_tokens":17152,"output_tokens":484,"reasoning_output_tokens":69,"total_tokens":29511},"last_token_usage":{"input_tokens":16067,"cached_input_tokens":12672,"output_tokens":157,"reasoning_output_tokens":0,"total_tokens":16224}}}}"#;
@@ -302,6 +303,90 @@ fn backfill_fills_the_provider_of_rows_written_before_the_column_existed() {
 }
 
 #[test]
+fn opencode_account_rotation_is_stored_per_request() {
+    let fixture = Fixture::new("omp-opencode-account-timeline");
+    let file = fixture.paths.omp.join("session.jsonl");
+    fs::write(&file, "").expect("seed session file");
+
+    let auth_db = fixture.paths.omp.parent().expect("sessions parent").join("agent.db");
+    let auth = rusqlite::Connection::open(auth_db).expect("auth db");
+    auth.execute_batch(
+        "CREATE TABLE auth_credentials(
+             id INTEGER PRIMARY KEY, provider TEXT, credential_type TEXT, data TEXT
+         );
+         CREATE TABLE cache(key TEXT PRIMARY KEY, value TEXT);
+         INSERT INTO auth_credentials VALUES
+             (7, 'opencode-go', 'api_key', '{\"key\":\"account-a\"}'),
+             (8, 'opencode-go', 'api_key', '{\"key\":\"account-b\"}');",
+    )
+    .expect("auth schema");
+    drop(auth);
+
+    let mut connection = fixture.connection();
+    let mut collector = sources::Collector::new(fixture.paths.clone());
+    collector
+        .run_round(&mut connection, 1_000)
+        .expect("baseline");
+
+    let message = |id: &str, at: i64| {
+        format!(
+            r#"{{"id":"{id}","type":"message","message":{{"role":"assistant","provider":"opencode-go","model":"m","timestamp":{at},"duration":10,"usage":{{"input":1,"output":2}}}}}}"#
+        )
+    };
+    let lines = [
+        r#"{"type":"session","id":"session-1"}"#.to_owned(),
+        r#"{"type":"custom","customType":"herdr-api-key-sticky-v1","data":{"action":"pin","provider":"opencode-go","sessionId":"session-1","credentialId":7,"at":100}}"#.to_owned(),
+        message("request-a", 1000),
+        r#"{"type":"custom","customType":"herdr-api-key-sticky-v1","data":{"action":"release","provider":"opencode-go","sessionId":"session-1","reason":"rotation","at":200}}"#.to_owned(),
+        r#"{"type":"custom","customType":"herdr-api-key-sticky-v1","data":{"action":"pin","provider":"opencode-go","sessionId":"session-1","credentialId":8,"at":300}}"#.to_owned(),
+        message("request-b", 2000),
+    ];
+    fixture.append(&file, &format!("{}\n", lines.join("\n")));
+    assert_eq!(
+        collector
+            .run_round(&mut connection, 2_000)
+            .expect("timeline round")
+            .inserted,
+        2
+    );
+
+    // Simulate rows produced by the former final-sticky-only collector. The
+    // one-off migration must recover both exact request owners from the file.
+    connection
+        .execute(
+            "UPDATE usage_event SET account_key='old', account_label='old',
+             account_source='sticky_cache'",
+            [],
+        )
+        .expect("downgrade account metadata");
+    assert_eq!(
+        sources::backfill_omp_api_key_timeline(
+            &mut connection,
+            std::slice::from_ref(&fixture.paths.omp),
+        )
+        .expect("timeline backfill"),
+        2
+    );
+
+    let rows: Vec<(String, String, String)> = connection
+        .prepare(
+            "SELECT event_id, account_label, account_source
+             FROM usage_event ORDER BY occurred_at",
+        )
+        .expect("query")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("rows")
+        .collect::<Result<_, _>>()
+        .expect("collect rows");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].0, "request-a");
+    assert_eq!(rows[1].0, "request-b");
+    assert_ne!(rows[0].1, rows[1].1, "one session must retain both keys");
+    assert_eq!(rows[0].2, "session_pin");
+    assert_eq!(rows[1].2, "session_pin");
+}
+
+#[test]
 fn a_second_round_with_no_new_bytes_inserts_nothing() {
     let fixture = Fixture::new("idle");
     let omp_file = fixture.paths.omp.join("s.jsonl");
@@ -489,7 +574,7 @@ fn codex_seeds_the_model_from_a_pre_watermark_turn_context() {
     let fixture = Fixture::new("codex-seed");
     let file = fixture.paths.codex.join("rollout-seed.jsonl");
     // History that the baseline round will skip: it still describes the session.
-    fs::write(&file, format!("{CODEX_TURN}\n")).expect("seed history");
+    fs::write(&file, format!("{CODEX_SESSION_META}\n{CODEX_TURN}\n")).expect("seed history");
     let mut connection = fixture.connection();
     let mut collector = sources::Collector::new(fixture.paths.clone());
     collector
@@ -501,15 +586,23 @@ fn codex_seeds_the_model_from_a_pre_watermark_turn_context() {
     fixture.append(&file, &format!("{CODEX_COUNT}\n"));
     let report = collector.run_round(&mut connection, 2_000).expect("round");
     assert_eq!(report.inserted, 1);
-    let (model, source): (Option<String>, Option<String>) = connection
+    let (model, source, session, provider): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = connection
         .query_row(
-            "SELECT model, model_source FROM usage_event WHERE source='codex'",
+            "SELECT model, model_source, session_id, provider
+             FROM usage_event WHERE source='codex'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .expect("row");
     assert_eq!(model.as_deref(), Some("gpt-5.6-luna"));
     assert_eq!(source.as_deref(), Some("context"));
+    assert_eq!(session.as_deref(), Some("codex-session-1"));
+    assert_eq!(provider.as_deref(), Some("openai-codex"));
 }
 
 #[test]

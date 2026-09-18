@@ -16,6 +16,8 @@ static STOPPED: AtomicBool = AtomicBool::new(false);
 /// a collection source; the table is reused because the value must survive
 /// restarts exactly like a watermark does.
 const BACKFILL_KIND: &str = "omp-provider-backfill";
+const REQUEST_BACKFILL_KIND: &str = "omp-request-metadata-backfill-v1";
+const API_KEY_TIMELINE_BACKFILL_KIND: &str = "omp-api-key-timeline-backfill-v1";
 
 fn main() {
     let database = db_path();
@@ -47,6 +49,16 @@ fn main() {
         // A failure leaves the marker unwritten and retries on the next start
         // rather than blocking collection.
         Err(error) => eprintln!("[warn] provider 回填失败：{error}（下次启动重试）"),
+    }
+    match request_backfill_once(&mut connection, &roots) {
+        Ok(Some(rows)) => println!("request metadata 回填：{rows} 行"),
+        Ok(None) => {}
+        Err(error) => eprintln!("[warn] request metadata 回填失败：{error}（下次启动重试）"),
+    }
+    match api_key_timeline_backfill_once(&mut connection, &roots) {
+        Ok(Some(rows)) => println!("OpenCode Go 账户时间线回填：{rows} 行"),
+        Ok(None) => {}
+        Err(error) => eprintln!("[warn] OpenCode Go 账户时间线回填失败：{error}（下次启动重试）"),
     }
     let mut first = true;
     while !STOPPED.load(Ordering::Relaxed) {
@@ -103,6 +115,30 @@ fn backfill_once(
     }
     let rows = sources::backfill_omp_provider(connection, roots)?;
     db::save_offset(connection, BACKFILL_KIND, "1")?;
+    Ok(Some(rows))
+}
+
+fn request_backfill_once(
+    connection: &mut rusqlite::Connection,
+    roots: &[std::path::PathBuf],
+) -> rusqlite::Result<Option<usize>> {
+    if db::offset(connection, REQUEST_BACKFILL_KIND)?.is_some() {
+        return Ok(None);
+    }
+    let rows = sources::backfill_omp_request_metadata(connection, roots)?;
+    db::save_offset(connection, REQUEST_BACKFILL_KIND, "1")?;
+    Ok(Some(rows))
+}
+
+fn api_key_timeline_backfill_once(
+    connection: &mut rusqlite::Connection,
+    roots: &[std::path::PathBuf],
+) -> rusqlite::Result<Option<usize>> {
+    if db::offset(connection, API_KEY_TIMELINE_BACKFILL_KIND)?.is_some() {
+        return Ok(None);
+    }
+    let rows = sources::backfill_omp_api_key_timeline(connection, roots)?;
+    db::save_offset(connection, API_KEY_TIMELINE_BACKFILL_KIND, "1")?;
     Ok(Some(rows))
 }
 

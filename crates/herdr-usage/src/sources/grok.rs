@@ -141,6 +141,10 @@ impl GrokState {
         let ts_raw = root.get("ts").and_then(Value::as_str)?;
         let occurred_at = parse_rfc3339_millis(ts_raw)?;
         let loop_index = pointer_i64(root, "/ctx/loop_index");
+        let duration_ms = root
+            .pointer("/ctx/model_elapsed_ms")
+            .and_then(Value::as_i64)
+            .filter(|duration| *duration >= 0);
 
         let ctx = GrokCtx {
             prompt_tokens: pointer_i64(root, "/ctx/prompt_tokens"),
@@ -163,9 +167,20 @@ impl GrokState {
             usage,
             model,
             model_source,
-            // The log never names the upstream provider; the Grok CLI is the
-            // only writer, and the plans filter keys on `source = 'grok'`.
-            provider: None,
+            // The log never names a separate upstream provider. Use the known
+            // Grok channel so request reports do not conflate it with clients.
+            provider: Some("grok".to_owned()),
+            session_id: Some(sid.to_owned()),
+            started_at: Some(
+                duration_ms
+                    .map(|duration| occurred_at.saturating_sub(duration))
+                    .unwrap_or(occurred_at),
+            ),
+            completed_at: duration_ms.map(|_| occurred_at),
+            duration_ms,
+            account_key: None,
+            account_label: None,
+            account_source: None,
             occurred_at,
         })
     }
@@ -229,6 +244,14 @@ mod tests {
             "01a08a84-4c3d-75e2-8a3d-d8eea8c383a5:3:2026-09-10T09:51:07.339Z"
         );
         assert_eq!(event.occurred_at, 1_789_033_867_339);
+        assert_eq!(
+            event.session_id.as_deref(),
+            Some("01a08a84-4c3d-75e2-8a3d-d8eea8c383a5")
+        );
+        assert_eq!(event.provider.as_deref(), Some("grok"));
+        assert_eq!(event.duration_ms, Some(48_865));
+        assert_eq!(event.completed_at, Some(1_789_033_867_339));
+        assert_eq!(event.started_at, Some(1_789_033_818_474));
         assert_eq!(event.usage.input_total, 323742);
         assert_eq!(event.usage.cache_read, 321280);
         assert_eq!(event.usage.cache_write, 0);

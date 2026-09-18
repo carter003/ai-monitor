@@ -128,14 +128,28 @@ impl Collector {
         now: i64,
     ) -> rusqlite::Result<usize> {
         let kind = "omp";
+        let roots = self.paths.omp_session_roots();
+        let catalogs: Vec<_> = roots
+            .iter()
+            .map(|root| {
+                let database = root.parent().unwrap_or(root).join("agent.db");
+                (root.clone(), omp::AccountCatalog::load(&database))
+            })
+            .collect();
         let mut files = Vec::new();
-        for root in self.paths.omp_session_roots() {
-            files.extend(omp::session_files(&root));
+        for root in &roots {
+            files.extend(omp::session_files(root));
         }
         self.scanned_files = files.len();
         let mut store = OffsetStore::from_cursor(db::offset(connection, kind)?.as_deref());
         let mut batch = vec![];
         for file in &files {
+            self.omp.seed_file(file);
+            let accounts = catalogs
+                .iter()
+                .find(|(root, _)| file.starts_with(root))
+                .map(|(_, accounts)| accounts)
+                .expect("OMP session file belongs to an enumerated root");
             let Some((size, lines, rotated)) = read_new_bytes(&mut store, file, |_, _| {})? else {
                 continue;
             };
@@ -143,7 +157,7 @@ impl Collector {
                 self.omp.forget(file);
             }
             for line in lines {
-                for event in self.omp.parse_line(file, &line) {
+                for event in self.omp.parse_line_with_accounts(file, &line, accounts) {
                     let priced = price(prices, &event);
                     batch.push((event, priced));
                 }
@@ -474,8 +488,9 @@ pub fn backfill_omp_provider(
     };
 
     let mut pending: HashSet<String> = {
-        let mut statement = connection
-            .prepare("SELECT event_id FROM usage_event WHERE source = 'omp' AND provider IS NULL")?;
+        let mut statement = connection.prepare(
+            "SELECT event_id FROM usage_event WHERE source = 'omp' AND provider IS NULL",
+        )?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         rows.filter_map(Result::ok).collect()
     };
@@ -536,6 +551,183 @@ pub fn backfill_omp_provider(
         )?;
         for (id, provider) in &found {
             updated += statement.execute(rusqlite::params![provider, id])?;
+        }
+    }
+    transaction.commit()?;
+    Ok(updated)
+}
+
+/// Enrich already-collected OMP usage rows with request/session metadata.
+/// Only structural lines and assistant usage records are parsed; no prompt,
+/// response, or tool content is written to the usage database.
+pub fn backfill_omp_request_metadata(
+    connection: &mut Connection,
+    roots: &[PathBuf],
+) -> rusqlite::Result<usize> {
+    use std::{
+        collections::{HashMap, HashSet},
+        io::{BufRead, BufReader},
+    };
+
+    let mut pending: HashSet<String> = {
+        let mut statement = connection.prepare(
+            "SELECT event_id FROM usage_event
+             WHERE source='omp' AND session_id IS NULL
+               AND provider IN ('google-antigravity','opencode-go')",
+        )?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .filter_map(Result::ok)
+            .collect();
+        rows
+    };
+    if pending.is_empty() {
+        return Ok(0);
+    }
+    let floor_ms: i64 = connection.query_row(
+        "SELECT MIN(occurred_at) FROM usage_event
+         WHERE source='omp' AND session_id IS NULL
+           AND provider IN ('google-antigravity','opencode-go')",
+        [],
+        |row| row.get(0),
+    )?;
+    let mut found = HashMap::<String, ParsedEvent>::new();
+    let mut state = omp::OmpState::new();
+    'roots: for root in roots {
+        let catalog = omp::AccountCatalog::load(&root.parent().unwrap_or(root).join("agent.db"));
+        for file in omp::session_files(root) {
+            if pending.is_empty() {
+                break 'roots;
+            }
+            let Some(mtime_ms) = std::fs::metadata(&file)
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis() as i64)
+            else {
+                continue;
+            };
+            if mtime_ms < floor_ms.saturating_sub(3_600_000) {
+                continue;
+            }
+            let Ok(handle) = std::fs::File::open(&file) else {
+                continue;
+            };
+            for (ordinal, line) in BufReader::new(handle).split(b'\n').enumerate() {
+                let Ok(line) = line else { break };
+                if !line.windows(9).any(|part| part == b"\"session\"")
+                    && !line.windows(14).any(|part| part == b"credential_pin")
+                    && !line
+                        .windows(b"herdr-api-key-sticky-v1".len())
+                        .any(|part| part == b"herdr-api-key-sticky-v1")
+                    && !line.windows(7).any(|part| part == b"\"usage\"")
+                {
+                    continue;
+                }
+                let tail = tail::TailLine {
+                    start: ordinal as u64,
+                    bytes: line,
+                };
+                for event in state.parse_line_with_accounts(&file, &tail, &catalog) {
+                    if pending.remove(&event.event_id) {
+                        found.insert(event.event_id.clone(), event);
+                    }
+                }
+            }
+        }
+    }
+    if found.is_empty() {
+        return Ok(0);
+    }
+    let transaction = connection.transaction()?;
+    let mut updated = 0;
+    {
+        let mut statement = transaction.prepare(
+            "UPDATE usage_event SET
+                 session_id=?1, started_at=?2, completed_at=?3, duration_ms=?4,
+                 account_key=?5, account_label=?6, account_source=?7
+             WHERE source='omp' AND event_id=?8 AND session_id IS NULL",
+        )?;
+        for event in found.values() {
+            updated += statement.execute(rusqlite::params![
+                event.session_id,
+                event.started_at,
+                event.completed_at,
+                event.duration_ms,
+                event.account_key,
+                event.account_label,
+                event.account_source,
+                event.event_id,
+            ])?;
+        }
+    }
+    transaction.commit()?;
+    Ok(updated)
+}
+
+/// Correct OpenCode Go request ownership from the append-only API-key pin
+/// timeline emitted by the Herdr OMP extension. Unlike `session:sticky`, these
+/// entries preserve rotations within one session. Rows without timeline
+/// evidence are deliberately left unchanged.
+pub fn backfill_omp_api_key_timeline(
+    connection: &mut Connection,
+    roots: &[PathBuf],
+) -> rusqlite::Result<usize> {
+    use std::{
+        collections::HashMap,
+        io::{BufRead, BufReader},
+    };
+
+    let mut found = HashMap::<String, ParsedEvent>::new();
+    for root in roots {
+        let catalog = omp::AccountCatalog::load(&root.parent().unwrap_or(root).join("agent.db"));
+        let mut state = omp::OmpState::new();
+        for file in omp::session_files(root) {
+            let Ok(handle) = std::fs::File::open(&file) else {
+                continue;
+            };
+            for (ordinal, line) in BufReader::new(handle).split(b'\n').enumerate() {
+                let Ok(line) = line else { break };
+                if !line.windows(9).any(|part| part == b"\"session\"")
+                    && !line
+                        .windows(b"herdr-api-key-sticky-v1".len())
+                        .any(|part| part == b"herdr-api-key-sticky-v1")
+                    && !line.windows(7).any(|part| part == b"\"usage\"")
+                {
+                    continue;
+                }
+                let tail = tail::TailLine {
+                    start: ordinal as u64,
+                    bytes: line,
+                };
+                for event in state.parse_line_with_accounts(&file, &tail, &catalog) {
+                    if event.provider.as_deref() == Some("opencode-go")
+                        && event.account_source.as_deref() == Some("session_pin")
+                    {
+                        found.insert(event.event_id.clone(), event);
+                    }
+                }
+            }
+        }
+    }
+    if found.is_empty() {
+        return Ok(0);
+    }
+
+    let transaction = connection.transaction()?;
+    let mut updated = 0usize;
+    {
+        let mut statement = transaction.prepare(
+            "UPDATE usage_event SET account_key=?1, account_label=?2, account_source=?3
+             WHERE source='omp' AND provider='opencode-go' AND event_id=?4",
+        )?;
+        for event in found.values() {
+            updated += statement.execute(rusqlite::params![
+                event.account_key,
+                event.account_label,
+                event.account_source,
+                event.event_id,
+            ])?;
         }
     }
     transaction.commit()?;

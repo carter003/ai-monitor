@@ -81,6 +81,7 @@ cargo run --offline -p ai-monitor
 
 - **总览 `/`**：全部模型的今日、本周（周一开始）、本月、累计 Token 与金额，近 30 天趋势和全部历史模型排行。
 - **套餐额度 `/plans`**：四个订阅套餐（Codex、AGY、AGY2、SuperGrok）当前周期的已用量、周期起止与推算出的每周上限，以及两张每周期一个点的折线图（实际使用量 / 最大额度）。
+- **Request 追踪 `/requests`**：统计 OMP、Codex、Grok、OpenCode 四个客户端，按每次 request 展示开始时间、客户端、通道、模型、可获得的端到端耗时、session 和具体账户；最近窗口为 3000 条，可按会话 ID、客户端、通道、模型和账户组合筛选。单独列出同一 `client + session + provider` 使用过多个账户的情况。只存元数据，不存对话上下文；上游没有可靠耗时或账户证据时明确显示“未记录/未解析”。
 - **独立查询页 `/query`**：日期范围、全部模型或单模型筛选；可切换「每天合计」「每天按模型」，每天合计补齐无记录日期。明细每页 50 行。
 - Token 数量达到 10 亿使用 B，其余使用 M（1 B = 10 亿，1 M = 100 万），较小数值保留必要小数。
 - 点击趋势柱可跳转到查询页查看当天模型明细；点击排行中的模型可查看该模型每天的数据。支持今天、近 7 / 30 天、本月、全部历史快捷查询，单次最多 3661 天。
@@ -94,6 +95,8 @@ JSON 接口：`GET /api/usage?start=2026-09-01&end=2026-09-12&model=vendor%2Fmod
 响应包含全局 `overview`、筛选范围 `total` / `daily` / `details` / `ranking`，以及模型列表和时区。
 
 JSON 接口：`GET /api/plans`，返回 `ledger_found`、`accounts`、`plans`（每个套餐含当前周期 `period`、已用量 `used_*`、推算上限 `max_*` 与历史 `weekly` 点）和 `notes`。
+
+JSON 接口：`GET /api/requests`，返回账户解析覆盖率、平均耗时、跨账户 session 和最近 3000 条 request；`client` 直接来自 SQLite 的 `usage_event.source`。AGY 使用 OMP `credential_pin` 指纹与 OAuth 账户匹配；OpenCode Go 优先按只读账户观察器写入的 `herdr-api-key-sticky-v1` pin/release 时间线，把每个 request 匹配到当时的脱敏 Key 指纹。没有时间线的旧记录才回退到 `agent.db` 的最终 session sticky 状态。账户字段在采集时直接写入 request 行；统计端只查询 SQLite，并通过一次分组聚合和 `HAVING COUNT(*) > 1` 找出同一 `client + session + provider` 下的多个账户，不进行 request 或账户两两比对。无法恢复的旧记录不会猜测。
 
 ### 套餐额度的口径
 

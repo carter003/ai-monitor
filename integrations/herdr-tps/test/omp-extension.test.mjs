@@ -127,6 +127,9 @@ test('tracks only OMP thinking and normal text deltas, then drains shutdown', as
     handlers.get('message_update')({ message, assistantMessageEvent }, context);
   }
   handlers.get('message_end')({ message }, context);
+  // A duplicate terminal event must not replay the final snapshot after the
+  // observer releases its reconciliation buffer.
+  handlers.get('message_end')({ message }, context);
   handlers.get('agent_end')();
   const shutdown = handlers.get('session_shutdown')();
   assert.ok(shutdown instanceof Promise);

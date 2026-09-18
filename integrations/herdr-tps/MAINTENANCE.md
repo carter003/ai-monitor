@@ -29,7 +29,8 @@ Codex TUI --remote ↔ WebSocket proxy ↔ Codex App Server
                     CodexTpsObserver ──┐
                                       ├→ LiveTpsReporter → HerdrMetadataPublisher → Herdr socket
 OMP + --extension → OmpTpsObserver ─────┘        ↓
-                                         RollingTokenRate
+                                         TokenRateMeter (OMP 18.2.4 多尺度指数衰减)
+                                         / RollingTokenRate (兼容滑动窗口)
                                                ↓
                                         model-token-counter
 ```
@@ -226,22 +227,23 @@ profile 参数与路径解析统一由 `lib/omp-profile.mjs` 提供，wrapper �
 
 | 默认参数 | 值 | owner |
 | --- | ---: | --- |
-| 采样间隔 / 滚动窗口 / stale | 250ms / 2000ms / 1500ms | `rolling-token-rate.mjs` |
+| 衰减半衰期 (TokenRateMeter) | 5s / 20s / 80s | `token-rate-meter.mjs` |
+| 采样分块与词边界保留 | 250ms / 32 字符 | `token-rate-meter.mjs` |
+| 轮次间残差衰减因子 | 0.8 | `token-rate-meter.mjs` |
 | 常规非零显示最短观测 / 更新间隔 | 500ms / 1000ms | `live-tps-reporter.mjs` |
-| 指数平滑时间常数 / 结束 hold | 1000ms / 1000ms | `live-tps-reporter.mjs` |
+| 指数平滑时间常数 | 1000ms | `live-tps-reporter.mjs` |
 | metadata 心跳 / 持久 TTL | 2000ms / 5000ms | `live-tps-reporter.mjs` |
 | 非零 TPS TTL | 2500ms | `max(stale, heartbeat) + 2 × sampleInterval` |
 
-采样器保存各 stream 的累计文本，只对 dirty stream 重新分词，避免逐 delta 分词的边界误差。
-原始速率为 `round((currentTokens - baselineTokens) / elapsedMs * 1000)`；长停顿后的首个 delta
-以前一累计 token 数重建基线，generation 变化清空旧流。
+生产环境（Codex 与 OMP wrapper）采用 OMP 18.2.4 移植的 `TokenRateMeter` 算法：
 
-显示由 reporter 平滑，并抑制小于 `max(2, 上次显示值 × 5%)` 的变化。stale 显示 0；
-模型切换、generation 重置或归零会重置相应采样/显示状态。
-结束时优先保留已显示的可读速度 1 秒，避免结束瞬间尖峰；新输出取消 hold。
-无有效末帧时通常归零，OMP 若提供 duration，可用可见输出 token / duration 补出结束速度。
-单个近乎瞬时的 chunk 不应被当作可靠的流式高 TPS。
+1. **多尺度指数衰减**：在 5s、20s、80s 三个半衰期桶内同时维护 tokens 与 time；使用解析积分 `(halfLife / ln2) * (1 - 2^(-t / halfLife))` 计算流式增长与时间权值。
+2. **词边界分块分词**：流式 delta 按 250ms 周期分块，并在最后空格/换行符处分割（保留末尾最多 32 字符至下一块），消除跨 delta 分词边界误差与突发抖动。
+3. **实际 Output Usage 校准**：在 `message_end` / `turn/completed` 拿到服务商权威 usage output tokens 时，以 0.8 残差衰减因子校正流式累积误差。
+4. **轮次间保持可见（Rate Retention）**：轮次结束后保持已显示的速度数字，不会在 1 秒后突兀归零；轮次间维持平滑展示，会话重置、模型切换或长久空闲后归零。
+5. **历史会话预热（Seeding）**：会话启动/切换时，若历史中已有含耗时的 assistant 消息，自动以其 usage output 与 duration 预热速率计，实现平滑无缝显示。
 
+兼容保留的 `RollingTokenRate` 仍支持 2000ms 矩形滑动窗口与 1000ms 结束 hold 模式，供旧版测试或独立采样器调用。
 ### Tokenizer 边界
 
 模型名先去掉供应商路径前缀，再由 `model-token-counter.mjs` 的正则选择：

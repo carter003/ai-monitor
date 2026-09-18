@@ -3,6 +3,7 @@ const $ = id => document.getElementById(id);
 const number = value => new Intl.NumberFormat('zh-CN').format(value || 0);
 const isQuery = location.pathname === '/query';
 const isPlans = location.pathname === '/plans';
+const isRequests = location.pathname === '/requests';
 const initial = new URLSearchParams(location.search);
 const tokens = value => {
   value = value || 0;
@@ -171,7 +172,19 @@ if (initial.has('model') || initial.has('unknown')) {
 }
 if (initial.get('group') === 'model') $('group').value = 'model';
 }
-if (isPlans) {
+if (isRequests) {
+  $('refresh').addEventListener('click', loadRequests);
+  $('request-filters').addEventListener('submit', event => { event.preventDefault(); renderRequests(); });
+  $('request-session').addEventListener('input', renderRequests);
+  for (const id of ['request-client', 'request-provider', 'request-model', 'request-account']) {
+    $(id).addEventListener('change', renderRequests);
+  }
+  $('request-clear').addEventListener('click', () => {
+    for (const id of ['request-session', 'request-client', 'request-provider', 'request-model', 'request-account']) $(id).value = '';
+    renderRequests();
+  });
+  loadRequests();
+} else if (isPlans) {
   $('metric').addEventListener('change',renderLineCharts);
   $('weeks').addEventListener('change',renderLineCharts);
   $('refresh').addEventListener('click',loadPlans);
@@ -180,6 +193,101 @@ if (isPlans) {
   $('refresh').addEventListener('click',load);
   $('metric').addEventListener('change',renderChart);
   load();
+}
+
+// ---- Request / account tracking ------------------------------------------
+const duration = value => value == null ? '未记录' : value < 1000 ? `${value} ms` : `${(value / 1000).toFixed(2)} s`;
+const unknownFilter = '__unknown__';
+let requestReport;
+function simpleTable(columns, rows) {
+  if (!rows.length) return node('div', '暂无记录', 'empty');
+  const table = node('table'), head = node('thead'), hr = node('tr'), body = node('tbody');
+  for (const column of columns) { const th = node('th', column.label); th.scope = 'col'; hr.append(th); }
+  head.append(hr);
+  for (const row of rows) {
+    const tr = node('tr');
+    for (const column of columns) tr.append(node('td', column.value(row)));
+    body.append(tr);
+  }
+  table.append(head, body);
+  return table;
+}
+function requestField(row, key) {
+  const value = row[key];
+  return value == null || value === '' ? unknownFilter : value;
+}
+function requestFilterOptions(id, allLabel, rows, key, unknownLabel) {
+  const select = $(id), selected = select.value;
+  const values = [...new Set(rows.map(row => requestField(row, key)))].sort((a, b) => {
+    if (a === unknownFilter) return 1;
+    if (b === unknownFilter) return -1;
+    return a.localeCompare(b, 'zh-CN');
+  });
+  select.replaceChildren(new Option(allLabel, ''));
+  for (const value of values) select.add(new Option(value === unknownFilter ? unknownLabel : value, value));
+  if ([...select.options].some(option => option.value === selected)) select.value = selected;
+}
+function renderRequests() {
+  if (!requestReport) return;
+  const session = $('request-session').value.trim().toLocaleLowerCase();
+  const filters = [
+    ['client', $('request-client').value],
+    ['provider', $('request-provider').value],
+    ['model', $('request-model').value],
+    ['account', $('request-account').value],
+  ];
+  const rows = requestReport.recent.filter(row =>
+    (!session || row.session_id.toLocaleLowerCase().includes(session)) &&
+    filters.every(([key, value]) => !value || requestField(row, key) === value)
+  );
+  $('request-filter-summary').textContent = `显示 ${number(rows.length)} / ${number(requestReport.recent.length)} 条 · 最近窗口最多 ${number(requestReport.recent_limit || 3000)} 条，SQLite 保存全部历史`;
+  $('request-table').replaceChildren(simpleTable([
+    {label:'开始时间', value:r => r.local_time},
+    {label:'耗时', value:r => duration(r.duration_ms)},
+    {label:'客户端', value:r => r.client},
+    {label:'通道', value:r => r.provider},
+    {label:'模型', value:r => modelName(r.model)},
+    {label:'账户', value:r => r.account || '未解析'},
+    {label:'Session', value:r => r.session_id},
+  ], rows));
+}
+async function loadRequests() {
+  const current = ++request;
+  controller?.abort(); controller = new AbortController();
+  $('refresh').disabled = true; $('updated').textContent = '正在更新…';
+  try {
+    const response = await fetch('/api/requests', {signal: controller.signal});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '查询失败');
+    if (current !== request) return;
+    requestReport = data;
+    $('error').hidden = true;
+    $('context').textContent = `按 request 统计 · ${data.timezone} · OMP / Codex / Grok / OpenCode`;
+    const rate = data.requests ? data.resolved / data.requests * 100 : 0;
+    $('request-cards').replaceChildren(
+      card('Request 总数', number(data.requests), '每次 assistant 请求一条'),
+      card('账户已解析', number(data.resolved), `${rate.toFixed(1)}%`),
+      card('平均耗时', duration(data.average_duration_ms), '发出到完成'),
+      card('跨账户 Session', number(data.cross_account_sessions.length), '同 session + provider'),
+    );
+    $('cross-sessions').replaceChildren(simpleTable([
+      {label:'客户端', value:r => r.client},
+      {label:'Session', value:r => r.session_id},
+      {label:'通道', value:r => r.provider},
+      {label:'账户', value:r => r.accounts.join(' → ')},
+      {label:'Request 数', value:r => number(r.requests)},
+      {label:'最后时间', value:r => new Date(r.last_at).toLocaleString('zh-CN')},
+    ], data.cross_account_sessions));
+    requestFilterOptions('request-client', '全部客户端', data.recent, 'client', '未识别客户端');
+    requestFilterOptions('request-provider', '全部通道', data.recent, 'provider', '未识别通道');
+    requestFilterOptions('request-model', '全部模型', data.recent, 'model', '未识别模型');
+    requestFilterOptions('request-account', '全部账户', data.recent, 'account', '未解析账户');
+    renderRequests();
+    $('updated').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN');
+  } catch (error) {
+    if (current !== request || error.name === 'AbortError') return;
+    $('error').textContent = error.message; $('error').hidden = false; $('updated').textContent = '更新失败';
+  } finally { if (current === request) $('refresh').disabled = false; }
 }
 
 // ---- 套餐额度页 ----------------------------------------------------------

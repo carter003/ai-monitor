@@ -1,5 +1,8 @@
 import { HerdrMetadataPublisher } from './lib/herdr-metadata-publisher.mjs';
 import { LiveTpsReporter } from './lib/live-tps-reporter.mjs';
+import { registerOmpAntigravitySessionRouter } from './lib/omp-antigravity-session-router.mjs';
+import { registerOmpApiKeyObserver } from './lib/omp-api-key-observer.mjs';
+import { registerOmpApiKeyStickiness } from './lib/omp-api-key-stickiness.mjs';
 import { argumentValue, profileFromSessionPath } from './lib/omp-profile.mjs';
 
 function messageKey(message) {
@@ -141,7 +144,7 @@ class OmpTpsObserver {
 
   end(event, context) {
     const message = event?.message;
-    if (message?.role !== 'assistant') {
+    if (message?.role !== 'assistant' || this.ended) {
       return;
     }
 
@@ -156,7 +159,14 @@ class OmpTpsObserver {
       });
     }
     this.ended = true;
-    this.reporter.pause(messageEndAt(message), message.duration);
+    if (message?.usage?.output !== undefined) {
+      this.reporter.pause(messageEndAt(message), message.duration, message.usage.output);
+    } else {
+      this.reporter.pause(messageEndAt(message), message.duration);
+    }
+    // Snapshot reconciliation is complete. Keeping the final thinking and
+    // answer strings until the next turn unnecessarily pins the whole reply.
+    this.seen.clear();
   }
 }
 
@@ -193,12 +203,31 @@ export function registerOmpTpsHandlers(pi, reporterOrFactory, { requireUi = fals
     displayRefreshTimer.unref?.();
   };
 
+  const seedFromHistory = (context) => {
+    try {
+      const entries = context?.sessionManager?.getEntries?.();
+      if (!Array.isArray(entries)) return;
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const item = entries[i];
+        const msg = item?.type === 'message' ? item.message : item;
+        if (msg?.role !== 'assistant') continue;
+        if (typeof msg?.duration === 'number' && typeof msg?.usage?.output === 'number') {
+          reporter.seed?.(msg.usage.output, msg.duration);
+          return;
+        }
+      }
+    } catch {
+      // ignore
+    }
+  };
+
   pi.on('session_start', (_event, context) => {
     if (!activateRootSession(context)) {
       return;
     }
     reporter.setModel(messageModel(undefined, context));
     updateDisplayAgent(context);
+    seedFromHistory(context);
   });
 
   pi.on('session_switch', (_event, context) => {
@@ -207,6 +236,7 @@ export function registerOmpTpsHandlers(pi, reporterOrFactory, { requireUi = fals
     }
     reporter.setModel(messageModel(undefined, context));
     updateDisplayAgent(context);
+    seedFromHistory(context);
   });
 
   pi.on('message_start', (event, context) => {
@@ -268,10 +298,22 @@ export function createOmpMetadataPublisher(pi) {
 }
 
 export default function herdrTpsExtension(pi) {
+  registerOmpAntigravitySessionRouter(pi);
+  // Selection observation is permanent collection infrastructure. The
+  // stickiness wrapper is only a compatibility policy and can be disabled once
+  // upstream OMP owns that behavior, without changing usage collection.
+  if (process.env.HERDR_TPS_OMP_API_KEY_STICKINESS !== '0') {
+    registerOmpApiKeyStickiness(pi);
+  }
+  registerOmpApiKeyObserver(pi);
   const publisher = createOmpMetadataPublisher(pi);
   if (!publisher.enabled) {
     return;
   }
 
-  registerOmpTpsHandlers(pi, () => new LiveTpsReporter({ publisher }), { requireUi: true });
+  registerOmpTpsHandlers(
+    pi,
+    () => new LiveTpsReporter({ publisher, rateEngine: 'token-rate-meter' }),
+    { requireUi: true },
+  );
 }

@@ -21,14 +21,197 @@ use crate::{
     tail::TailLine,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
 };
 
 #[derive(Default)]
 pub struct OmpState {
     seen: HashSet<String>,
+    sessions: HashMap<PathBuf, String>,
+    pins: HashMap<(PathBuf, String), String>,
+    api_key_pins: HashMap<(PathBuf, String), String>,
+    api_key_timelines: HashSet<(PathBuf, String)>,
+    seeded: HashSet<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountIdentity {
+    pub key: String,
+    pub label: String,
+    pub source: &'static str,
+}
+
+/// Safe account identities reconstructed from OMP's auth database. Secrets are
+/// read only long enough to hash them and are never returned or persisted.
+#[derive(Default)]
+pub struct AccountCatalog {
+    by_pin: HashMap<(String, String), AccountIdentity>,
+    by_id: HashMap<(String, String), AccountIdentity>,
+    sticky: HashMap<(String, String), AccountIdentity>,
+    single: HashMap<String, AccountIdentity>,
+}
+
+const API_KEY_STICKY_ENTRY: &str = "herdr-api-key-sticky-v1";
+
+impl AccountCatalog {
+    pub fn load(path: &Path) -> Self {
+        let Ok(connection) = rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) else {
+            return Self::default();
+        };
+        let mut catalog = Self::default();
+        let mut by_provider = HashMap::<String, Vec<AccountIdentity>>::new();
+        let Ok(mut statement) = connection.prepare(
+            "SELECT id, provider, credential_type, data FROM auth_credentials
+             WHERE provider IN ('google-antigravity', 'opencode-go') ORDER BY id",
+        ) else {
+            return catalog;
+        };
+        let Ok(rows) = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        }) else {
+            return catalog;
+        };
+        for row in rows.filter_map(Result::ok) {
+            let (id, provider, kind, data) = row;
+            let Ok(data) = serde_json::from_str::<Value>(&data) else {
+                continue;
+            };
+            let identity = if kind == "oauth" {
+                let field = |name| data.get(name).and_then(Value::as_str).unwrap_or("");
+                let email = field("email");
+                let raw = [
+                    provider.as_str(),
+                    field("accountId"),
+                    email,
+                    field("orgId"),
+                    field("projectId"),
+                ]
+                .join("\0");
+                let pin = sha256(&raw);
+                let identity = AccountIdentity {
+                    key: format!("oauth:{pin}"),
+                    label: if email.is_empty() {
+                        format!("Antigravity 账户 {}", &pin[..8])
+                    } else {
+                        email.to_owned()
+                    },
+                    source: "credential_pin",
+                };
+                catalog
+                    .by_pin
+                    .insert((provider.clone(), pin), identity.clone());
+                identity
+            } else if kind == "api_key" {
+                let Some(secret) = data.get("key").and_then(Value::as_str) else {
+                    continue;
+                };
+                let fingerprint = sha256(secret);
+                AccountIdentity {
+                    key: format!("api_key:{fingerprint}"),
+                    label: format!("OpenCode Go Key {}", &fingerprint[..8]),
+                    source: "sticky_cache",
+                }
+            } else {
+                continue;
+            };
+            by_provider
+                .entry(provider.clone())
+                .or_default()
+                .push(identity.clone());
+            catalog.by_id.insert((provider, id.to_string()), identity);
+        }
+        for (provider, identities) in by_provider {
+            if identities.len() == 1 {
+                let mut identity = identities[0].clone();
+                identity.source = "single_credential";
+                catalog.single.insert(provider, identity);
+            }
+        }
+        drop(statement);
+        let Ok(mut statement) =
+            connection.prepare("SELECT key, value FROM cache WHERE key LIKE 'session:sticky:%'")
+        else {
+            return catalog;
+        };
+        let Ok(rows) = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) else {
+            return catalog;
+        };
+        for (key, value) in rows.filter_map(Result::ok) {
+            let mut parts = key.splitn(4, ':');
+            if parts.next() != Some("session") || parts.next() != Some("sticky") {
+                continue;
+            }
+            let (Some(provider), Some(session)) = (parts.next(), parts.next()) else {
+                continue;
+            };
+            let Some(id) = serde_json::from_str::<Value>(&value)
+                .ok()
+                .and_then(|value| value.get("credentialId").and_then(Value::as_i64))
+            else {
+                continue;
+            };
+            let Some(identity) = catalog.by_id.get(&(provider.to_owned(), id.to_string())) else {
+                continue;
+            };
+            let mut identity = identity.clone();
+            identity.source = "sticky_cache";
+            catalog
+                .sticky
+                .insert((provider.to_owned(), session.to_owned()), identity);
+        }
+        catalog
+    }
+
+    fn resolve(
+        &self,
+        provider: &str,
+        session: Option<&str>,
+        pin: Option<&str>,
+    ) -> Option<AccountIdentity> {
+        if let Some(pin) = pin {
+            if let Some(identity) = self.by_pin.get(&(provider.to_owned(), pin.to_owned())) {
+                return Some(identity.clone());
+            }
+        }
+        if let Some(session) = session {
+            if let Some(identity) = self.sticky.get(&(provider.to_owned(), session.to_owned())) {
+                return Some(identity.clone());
+            }
+        }
+        self.single.get(provider).cloned()
+    }
+
+    fn resolve_credential_id(
+        &self,
+        provider: &str,
+        credential_id: &str,
+    ) -> Option<AccountIdentity> {
+        self.by_id
+            .get(&(provider.to_owned(), credential_id.to_owned()))
+            .cloned()
+            .map(|mut identity| {
+                identity.source = "session_pin";
+                identity
+            })
+    }
+}
+
+fn sha256(value: &str) -> String {
+    format!("{:x}", Sha256::digest(value.as_bytes()))
 }
 
 impl OmpState {
@@ -38,15 +221,109 @@ impl OmpState {
 
     /// omp keeps one event per envelope id, so nothing is derived per file.
     /// The seen-set is retained for the lifetime of the process.
-    pub fn forget(&mut self, _path: &Path) {}
+    pub fn forget(&mut self, path: &Path) {
+        self.sessions.remove(path);
+        self.pins.retain(|(file, _), _| file != path);
+        self.api_key_pins.retain(|(file, _), _| file != path);
+        self.api_key_timelines.retain(|(file, _)| file != path);
+        self.seeded.remove(path);
+    }
 
-    pub fn parse_line(&mut self, _path: &Path, line: &TailLine) -> Vec<ParsedEvent> {
+    /// Read only the small JSONL header so a collector restart can associate
+    /// newly appended requests with the upstream session id. No messages or
+    /// conversation content are retained.
+    pub fn seed_file(&mut self, path: &Path) {
+        if !self.seeded.insert(path.to_owned()) {
+            return;
+        }
+        let Ok(file) = std::fs::File::open(path) else {
+            return;
+        };
+        for line in BufReader::new(file).lines().map_while(Result::ok).take(8) {
+            let Ok(record) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if record.get("type").and_then(Value::as_str) == Some("session") {
+                if let Some(id) = record.get("id").and_then(Value::as_str) {
+                    self.sessions.insert(path.to_owned(), id.to_owned());
+                }
+                break;
+            }
+        }
+    }
+
+    pub fn parse_line(&mut self, path: &Path, line: &TailLine) -> Vec<ParsedEvent> {
+        self.parse_line_with_accounts(path, line, &AccountCatalog::default())
+    }
+
+    pub fn parse_line_with_accounts(
+        &mut self,
+        path: &Path,
+        line: &TailLine,
+        accounts: &AccountCatalog,
+    ) -> Vec<ParsedEvent> {
         if line.bytes.is_empty() {
             return vec![];
         }
         let Ok(record) = serde_json::from_slice::<Value>(&line.bytes) else {
             return vec![];
         };
+        match record.get("type").and_then(Value::as_str) {
+            Some("session") => {
+                if let Some(id) = record.get("id").and_then(Value::as_str) {
+                    self.sessions.insert(path.to_owned(), id.to_owned());
+                }
+                return vec![];
+            }
+            Some("credential_pin") => {
+                if let (Some(provider), Some(hash)) = (
+                    record.get("provider").and_then(Value::as_str),
+                    record.get("hash").and_then(Value::as_str),
+                ) {
+                    self.pins
+                        .insert((path.to_owned(), provider.to_owned()), hash.to_owned());
+                }
+                return vec![];
+            }
+            Some("custom")
+                if record.get("customType").and_then(Value::as_str)
+                    == Some(API_KEY_STICKY_ENTRY) =>
+            {
+                let Some(data) = record.get("data") else {
+                    return vec![];
+                };
+                let (Some(provider), Some(session_id), Some(action)) = (
+                    data.get("provider").and_then(Value::as_str),
+                    data.get("sessionId").and_then(Value::as_str),
+                    data.get("action").and_then(Value::as_str),
+                ) else {
+                    return vec![];
+                };
+                // A branched session can inherit custom entries from its parent.
+                // Only the exact session named by the entry owns this timeline.
+                if self.sessions.get(path).map(String::as_str) != Some(session_id) {
+                    return vec![];
+                }
+                let key = (path.to_owned(), provider.to_owned());
+                match action {
+                    "pin" => {
+                        if let Some(credential_id) =
+                            data.get("credentialId").and_then(credential_id)
+                        {
+                            self.api_key_timelines.insert(key.clone());
+                            self.api_key_pins.insert(key, credential_id);
+                        }
+                    }
+                    "release" => {
+                        self.api_key_timelines.insert(key.clone());
+                        self.api_key_pins.remove(&key);
+                    }
+                    _ => {}
+                }
+                return vec![];
+            }
+            _ => {}
+        }
         let Some(message) = record.get("message") else {
             return vec![];
         };
@@ -66,9 +343,8 @@ impl OmpState {
         };
         let Some(occurred_at) = message
             .get("timestamp")
-            .and_then(Value::as_str)
-            .or_else(|| record.get("timestamp").and_then(Value::as_str))
-            .and_then(parse_rfc3339_ms)
+            .and_then(timestamp_ms)
+            .or_else(|| record.get("timestamp").and_then(timestamp_ms))
         else {
             return vec![];
         };
@@ -91,6 +367,28 @@ impl OmpState {
             .filter(|text| !text.is_empty())
             .map(str::to_owned);
         let usage = normalize_omp(&parsed);
+        let session_id = self.sessions.get(path).cloned();
+        let pin = provider
+            .as_ref()
+            .and_then(|provider| self.pins.get(&(path.to_owned(), provider.clone())));
+        let account = provider.as_deref().and_then(|provider| {
+            let timeline_key = (path.to_owned(), provider.to_owned());
+            if self.api_key_timelines.contains(&timeline_key) {
+                self.api_key_pins
+                    .get(&timeline_key)
+                    .and_then(|id| accounts.resolve_credential_id(provider, id))
+            } else {
+                accounts.resolve(provider, session_id.as_deref(), pin.map(String::as_str))
+            }
+        });
+        let duration_ms = message
+            .get("duration")
+            .and_then(Value::as_f64)
+            .map(|value| value.max(0.0).round() as i64);
+        let completed_at = message
+            .get("completedAt")
+            .and_then(timestamp_ms)
+            .or_else(|| duration_ms.map(|duration| occurred_at.saturating_add(duration)));
         self.seen.insert(event_id.to_owned());
 
         vec![ParsedEvent {
@@ -99,6 +397,13 @@ impl OmpState {
             model_source: model.as_ref().map(|_| ModelSource::Event),
             model,
             provider,
+            session_id,
+            started_at: Some(occurred_at),
+            completed_at,
+            duration_ms,
+            account_key: account.as_ref().map(|account| account.key.clone()),
+            account_label: account.as_ref().map(|account| account.label.clone()),
+            account_source: account.map(|account| account.source.to_owned()),
             occurred_at,
         }]
     }
@@ -129,6 +434,21 @@ pub fn parse_rfc3339_ms(text: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(text)
         .ok()
         .map(|at| at.timestamp_millis())
+}
+
+fn timestamp_ms(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(parse_rfc3339_ms))
+}
+
+fn credential_id(value: &Value) -> Option<String> {
+    value.as_i64().map(|id| id.to_string()).or_else(|| {
+        value
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+    })
 }
 
 /// Enumerate session log files under the omp sessions root.
@@ -252,5 +572,104 @@ mod tests {
         assert!(state
             .parse_line(Path::new("/a.jsonl"), &line(0, text))
             .is_empty());
+    }
+
+    #[test]
+    fn request_metadata_uses_the_pin_on_each_request_not_a_session_owner() {
+        let path = Path::new("/session.jsonl");
+        let mut state = OmpState::new();
+        let mut accounts = AccountCatalog::default();
+        for (hash, label) in [
+            ("pin-a", "agy-a@example.com"),
+            ("pin-b", "agy-b@example.com"),
+        ] {
+            accounts.by_pin.insert(
+                ("google-antigravity".into(), hash.into()),
+                AccountIdentity {
+                    key: format!("oauth:{hash}"),
+                    label: label.into(),
+                    source: "credential_pin",
+                },
+            );
+        }
+        let session = r#"{"type":"session","id":"session-1"}"#;
+        let pin_a = r#"{"type":"credential_pin","provider":"google-antigravity","hash":"pin-a"}"#;
+        let pin_b = r#"{"type":"credential_pin","provider":"google-antigravity","hash":"pin-b"}"#;
+        let request = |id: &str, at: i64| {
+            format!(
+                r#"{{"id":"{id}","type":"message","message":{{"role":"assistant","provider":"google-antigravity","model":"gemini","timestamp":{at},"duration":1250.4,"usage":{{"input":1,"output":2}}}}}}"#
+            )
+        };
+        assert!(state
+            .parse_line_with_accounts(path, &line(0, session), &accounts)
+            .is_empty());
+        assert!(state
+            .parse_line_with_accounts(path, &line(1, pin_a), &accounts)
+            .is_empty());
+        let first = state
+            .parse_line_with_accounts(path, &line(2, &request("a", 1000)), &accounts)
+            .remove(0);
+        assert!(state
+            .parse_line_with_accounts(path, &line(3, pin_b), &accounts)
+            .is_empty());
+        let second = state
+            .parse_line_with_accounts(path, &line(4, &request("b", 3000)), &accounts)
+            .remove(0);
+
+        assert_eq!(first.session_id.as_deref(), Some("session-1"));
+        assert_eq!(first.account_label.as_deref(), Some("agy-a@example.com"));
+        assert_eq!(second.account_label.as_deref(), Some("agy-b@example.com"));
+        assert_eq!(second.started_at, Some(3000));
+        assert_eq!(second.completed_at, Some(4250));
+        assert_eq!(second.duration_ms, Some(1250));
+    }
+
+    #[test]
+    fn opencode_requests_follow_the_persisted_api_key_timeline() {
+        let path = Path::new("/session.jsonl");
+        let mut state = OmpState::new();
+        let mut accounts = AccountCatalog::default();
+        for (id, fingerprint) in [("7", "aaaa1111"), ("8", "bbbb2222")] {
+            accounts.by_id.insert(
+                ("opencode-go".into(), id.into()),
+                AccountIdentity {
+                    key: format!("api_key:{fingerprint}"),
+                    label: format!("OpenCode Go Key {fingerprint}"),
+                    source: "sticky_cache",
+                },
+            );
+        }
+        let parse = |state: &mut OmpState, ordinal, text: &str| {
+            state.parse_line_with_accounts(path, &line(ordinal, text), &accounts)
+        };
+        let session = r#"{"type":"session","id":"session-1"}"#;
+        let pin_a = r#"{"type":"custom","customType":"herdr-api-key-sticky-v1","data":{"action":"pin","provider":"opencode-go","sessionId":"session-1","credentialId":7,"at":100}}"#;
+        let release = r#"{"type":"custom","customType":"herdr-api-key-sticky-v1","data":{"action":"release","provider":"opencode-go","sessionId":"session-1","reason":"rotation","at":200}}"#;
+        let parent_pin = r#"{"type":"custom","customType":"herdr-api-key-sticky-v1","data":{"action":"pin","provider":"opencode-go","sessionId":"parent-session","credentialId":7,"at":250}}"#;
+        let pin_b = r#"{"type":"custom","customType":"herdr-api-key-sticky-v1","data":{"action":"pin","provider":"opencode-go","sessionId":"session-1","credentialId":"8","at":300}}"#;
+        let request = |id: &str, at: i64| {
+            format!(
+                r#"{{"id":"{id}","type":"message","message":{{"role":"assistant","provider":"opencode-go","model":"m","timestamp":{at},"duration":10,"usage":{{"input":1,"output":2}}}}}}"#
+            )
+        };
+
+        assert!(parse(&mut state, 0, session).is_empty());
+        assert!(parse(&mut state, 1, pin_a).is_empty());
+        let first = parse(&mut state, 2, &request("a", 1000)).remove(0);
+        assert!(parse(&mut state, 3, release).is_empty());
+        assert!(parse(&mut state, 4, parent_pin).is_empty());
+        assert!(parse(&mut state, 5, pin_b).is_empty());
+        let second = parse(&mut state, 6, &request("b", 2000)).remove(0);
+
+        assert_eq!(
+            first.account_label.as_deref(),
+            Some("OpenCode Go Key aaaa1111")
+        );
+        assert_eq!(
+            second.account_label.as_deref(),
+            Some("OpenCode Go Key bbbb2222")
+        );
+        assert_eq!(first.account_source.as_deref(), Some("session_pin"));
+        assert_eq!(second.account_source.as_deref(), Some("session_pin"));
     }
 }

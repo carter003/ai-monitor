@@ -146,7 +146,13 @@ export class CodexTpsObserver {
       }
       case 'turn/completed':
         if (this.currentTurnId && params.turn?.id && params.turn.id !== this.currentTurnId) break;
-        this.reporter.pause(message.emittedAtMs);
+        {
+          const outputTokens =
+            params.turn?.usage?.output ??
+            params.turn?.tokenUsage?.outputTokens ??
+            params.turn?.tokenUsage?.output_tokens;
+          this.reporter.pause(message.emittedAtMs, undefined, outputTokens);
+        }
         this.currentTurnId = undefined;
         break;
       case 'thread/settings/updated':

@@ -16,12 +16,7 @@ gpt-5.6
 [Config reference](https://herdr.dev/docs/config-reference/)；颜色映射见
 [0.9.0 `src/ui/status.rs`](https://github.com/herdrdev/herdr/blob/v0.9.0/src/ui/status.rs)。
 
-目前只接入 Codex 和 OMP。内部每 250ms 采样，使用最近约 2 秒的滚动窗口；侧栏数字最多每秒更新一次。Agent
-存活时速度数字固定展示，连续 1.5 秒没有新的可观测 token、响应结束或等待用户输入时
-显示 `0`。响应结束时将最后一次显示速度保留 1 秒；有足够观测时长的短响应也会保留一个非零帧，
-随后自动归零；若期间开始新的输出则取消归零计时。它不是会话平均值，也不包含输入、
-历史上下文、工具调用参数和工具输出。
-
+目前接入 Codex 和 OMP。生产环境采用 OMP 18.2.4 移植的 `TokenRateMeter` 多尺度指数衰减算法（5s/20s/80s 半衰期桶与 250ms 词边界分块），并在轮次间持续保留已显示速率（rate retention），不再在轮次结束后 1 秒突兀归零；侧栏数字平滑展示，最多每秒更新一次。会话重置或模型切换时清理。它不是会话全局平均值，也不包含输入、历史上下文、工具调用参数和工具输出。
 现代 OpenAI 模型使用 `o200k_base` tokenizer，旧 GPT 模型使用 `cl100k_base`；未知模型
 回退到 UTF-8 字节估算。Codex 同时采集回答、reasoning summary 与可用的 raw reasoning，
 OMP 只采集 text 与 thinking。结束后的总 output usage 可能混入工具调用参数，因此不参与
@@ -205,10 +200,24 @@ Codex 与 OMP 复用以下显示规则：
 避免逐 delta 独立分词造成边界误差；超长单流的 CPU 开销仍随累计文本长度增长。
 更改脚本后需退出并重新启动相应 Codex/OMP 进程，运行中的 wrapper/extension 不会热加载。
 
-## OMP 本地补丁
+## OMP 会话路由扩展
 
-OMP Antigravity 429 与账号轮换平衡补丁由同级 `sol-omp` 仓库维护，不属于实时监控集成。
-升级或重装 OMP 后，按 `sol-omp/scripts/omp-patches/` 中的说明检查并重新应用补丁。
+OMP 账号选择修复只通过普通扩展加载，见
+[维护说明](./OMP-SESSION-ROUTING.md)。wrapper 始终直接启动 `.runtime/omp`，禁止修改、
+重打包或禁用 OMP 可执行文件中的 Bun 字节码。
+
+`opencode-go` 的账户观察与 API-key 粘性是两个独立模块。观察器只读取 OMP `getApiKey` 的实际
+返回值，在 credential 变化或释放时写入不含密钥的 session custom entry，不改变 OMP 选择结果；
+collector 按 append-only pin/release entry 给每次 request 绑定账户并写入 SQLite。粘性模块是
+当前 OMP 的临时兼容策略：首次选择后同一 session 复用同一个 credential ID，账户被限流、
+显式释放、删除或禁用后才重新选择。OMP 原生修复后可设置
+`HERDR_TPS_OMP_API_KEY_STICKINESS=0` 单独关闭粘性策略，账户采集不受影响。
+
+Antigravity 账号平衡与 15% fallback 也合并为扩展层的单次新会话路由：新 session 首次使用
+Antigravity Gemini 时，选择 Gemini 5H 剩余最多的可用 OAuth 账号；若所有可用且额度已知的
+账号中最高值仍低于 15%，则把该 session 切到 `opencode-go/deepseek-v4.1-flash:high`。
+路由完成或 transcript 已存在后，扩展跳过 OMP 每个 request 的主动额度 preflight；真实 429
+仍走 OMP 独立的错误恢复和 fallback 路径。
 
 ## 生命周期与性能维护约束
 

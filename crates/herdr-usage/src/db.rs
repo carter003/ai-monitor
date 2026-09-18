@@ -39,8 +39,24 @@ pub fn initialize(connection: &Connection) -> rusqlite::Result<()> {
         let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
         rows.filter_map(Result::ok).collect()
     };
-    if !columns.is_empty() && !columns.iter().any(|name| name == "provider") {
-        connection.execute("ALTER TABLE usage_event ADD COLUMN provider TEXT", [])?;
+    if !columns.is_empty() {
+        for (name, sql_type) in [
+            ("provider", "TEXT"),
+            ("session_id", "TEXT"),
+            ("started_at", "INTEGER"),
+            ("completed_at", "INTEGER"),
+            ("duration_ms", "INTEGER"),
+            ("account_key", "TEXT"),
+            ("account_label", "TEXT"),
+            ("account_source", "TEXT"),
+        ] {
+            if !columns.iter().any(|column| column == name) {
+                connection.execute(
+                    &format!("ALTER TABLE usage_event ADD COLUMN {name} {sql_type}"),
+                    [],
+                )?;
+            }
+        }
     }
     connection.execute_batch(SCHEMA)
 }
@@ -63,9 +79,12 @@ pub fn insert_events(
         let mut statement = transaction.prepare(
             "INSERT OR IGNORE INTO usage_event(
                  source, event_id, model, model_source, provider,
+                 session_id, started_at, completed_at, duration_ms,
+                 account_key, account_label, account_source,
                  input_total, cache_read, cache_write, output_total, reasoning,
                  cost_usd, occurred_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                     ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         )?;
         for (event, priced) in events {
             let (usage, adjusted) = event.usage.clamped();
@@ -89,6 +108,13 @@ pub fn insert_events(
                 event.model,
                 event.model_source.map(|value| value.as_str()),
                 event.provider,
+                event.session_id,
+                event.started_at,
+                event.completed_at,
+                event.duration_ms,
+                event.account_key,
+                event.account_label,
+                event.account_source,
                 usage.input_total,
                 usage.cache_read,
                 usage.cache_write,
@@ -168,6 +194,13 @@ mod tests {
             model: Some("opencode/muse-spark-1.3-contributor-free".into()),
             model_source: Some(ModelSource::Event),
             provider: Some("opencode".into()),
+            session_id: Some("session-1".into()),
+            started_at: Some(at),
+            completed_at: Some(at + 10),
+            duration_ms: Some(10),
+            account_key: None,
+            account_label: None,
+            account_source: None,
             occurred_at: at,
         }
     }

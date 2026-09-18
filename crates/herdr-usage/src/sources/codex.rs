@@ -54,6 +54,8 @@ const RECOVER_SCAN_LIMIT: u64 = 16 * 1024 * 1024;
 pub struct CodexState {
     /// Model of the most recent `turn_context` seen in each file.
     models: HashMap<PathBuf, String>,
+    /// Stable thread/session id from `session_meta` or `token_usage_record`.
+    sessions: HashMap<PathBuf, String>,
 }
 
 impl CodexState {
@@ -68,6 +70,7 @@ impl CodexState {
     /// describes a different session.
     pub fn forget(&mut self, path: &Path) {
         self.models.remove(path);
+        self.sessions.remove(path);
     }
 
     /// Recover the tracked model from a range of the file that will not be
@@ -81,8 +84,12 @@ impl CodexState {
     pub fn seed_model(&mut self, path: &Path, bytes: &[u8]) {
         if let Some(model) = extract_latest_model(bytes) {
             self.models.insert(path.to_path_buf(), model);
-        } else if !self.models.contains_key(path) {
-            self.recover_model_from_head(path);
+        }
+        if let Some(session) = extract_session_id(bytes) {
+            self.sessions.insert(path.to_path_buf(), session);
+        }
+        if !self.models.contains_key(path) || !self.sessions.contains_key(path) {
+            self.recover_metadata_from_head(path);
         }
     }
 
@@ -96,7 +103,7 @@ impl CodexState {
     /// wild (measured rollouts carry it at ~85 KB); the window now reaches
     /// `RECOVER_SCAN_LIMIT`, and a rollout with no `turn_context` at all pays
     /// the bounded scan exactly once per process.
-    fn recover_model_from_head(&mut self, path: &Path) {
+    fn recover_metadata_from_head(&mut self, path: &Path) {
         let size = match std::fs::metadata(path) {
             Ok(meta) => meta.len(),
             Err(_) => return,
@@ -111,6 +118,9 @@ impl CodexState {
         if let Some(model) = extract_latest_model(&head_bytes) {
             self.models.insert(path.to_path_buf(), model);
         }
+        if let Some(session) = extract_session_id(&head_bytes) {
+            self.sessions.insert(path.to_path_buf(), session);
+        }
     }
     /// Parse one fresh line.
     ///
@@ -123,13 +133,20 @@ impl CodexState {
             return Vec::new();
         };
         match value.get("type").and_then(serde_json::Value::as_str) {
+            Some("session_meta") => {
+                self.record_session(path, &value);
+                Vec::new()
+            }
             Some("turn_context") => {
                 self.record_model(path, &value);
                 Vec::new()
             }
             // Duplicate of `token_count`, ignored so the inference is counted
             // once (see the module doc).
-            Some("token_usage_record") => Vec::new(),
+            Some("token_usage_record") => {
+                self.record_session(path, &value);
+                Vec::new()
+            }
             Some("event_msg") => self.parse_event_msg(path, line, &value),
             _ => Vec::new(),
         }
@@ -149,6 +166,18 @@ impl CodexState {
             .and_then(serde_json::Value::as_str);
         if let Some(model) = model {
             self.models.insert(path.to_path_buf(), model.to_string());
+        }
+    }
+
+    fn record_session(&mut self, path: &Path, value: &serde_json::Value) {
+        let session = value
+            .pointer("/payload/session_id")
+            .or_else(|| value.pointer("/payload/thread_id"))
+            .or_else(|| value.pointer("/payload/id"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|session| !session.is_empty());
+        if let Some(session) = session {
+            self.sessions.insert(path.to_path_buf(), session.to_owned());
         }
     }
 
@@ -192,8 +221,8 @@ impl CodexState {
             reasoning_output_tokens: int_at(usage, "reasoning_output_tokens"),
         };
 
-        if !self.models.contains_key(path) {
-            self.recover_model_from_head(path);
+        if !self.models.contains_key(path) || !self.sessions.contains_key(path) {
+            self.recover_metadata_from_head(path);
         }
         let (model, model_source) = match self.model_for(path) {
             Some(model) => (Some(model.to_string()), Some(ModelSource::Context)),
@@ -204,9 +233,16 @@ impl CodexState {
             usage: normalize_codex(&last),
             model,
             model_source,
-            // A rollout never names its provider; the whole codex source is the
-            // Codex subscription, which the plans filter expresses separately.
-            provider: None,
+            // The rollout is written by the Codex client and its model traffic
+            // uses the OpenAI Codex channel even though token_count omits it.
+            provider: Some("openai-codex".to_owned()),
+            session_id: self.sessions.get(path).cloned(),
+            started_at: Some(occurred_at),
+            completed_at: None,
+            duration_ms: None,
+            account_key: None,
+            account_label: None,
+            account_source: None,
             occurred_at,
         }]
     }
@@ -233,6 +269,27 @@ fn extract_latest_model(bytes: &[u8]) -> Option<String> {
         }
     }
     latest
+}
+
+fn extract_session_id(bytes: &[u8]) -> Option<String> {
+    for line in bytes.split(|byte| *byte == b'\n') {
+        if !contains(line, b"session_meta") && !contains(line, b"token_usage_record") {
+            continue;
+        }
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
+            continue;
+        };
+        let session = value
+            .pointer("/payload/session_id")
+            .or_else(|| value.pointer("/payload/thread_id"))
+            .or_else(|| value.pointer("/payload/id"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|session| !session.is_empty());
+        if let Some(session) = session {
+            return Some(session.to_owned());
+        }
+    }
+    None
 }
 
 /// Read an integer field, degrading to 0 when absent or not an integer.
@@ -392,6 +449,12 @@ mod tests {
         let events = state.parse_line(&file(), &line(TOKEN_USAGE_RECORD, 1024));
         assert!(events.is_empty());
         assert_eq!(state.model_for(&file()), Some("gpt-5.5"));
+        let request = state.parse_line(&file(), &line(TOKEN_COUNT, 2048));
+        assert_eq!(
+            request[0].session_id.as_deref(),
+            Some("01a06a2b-53cc-7c00-adda-d4651a81eeca")
+        );
+        assert_eq!(request[0].provider.as_deref(), Some("openai-codex"));
     }
 
     #[test]

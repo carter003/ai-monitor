@@ -91,6 +91,17 @@ pub struct ParsedEvent {
     /// (e.g. `openai-codex`, `google-antigravity`, `opencode-go`, `codebuddy`);
     /// opencode reports `providerID`; codex and grok logs carry none.
     pub provider: Option<String>,
+    /// Session identity only. Conversation text is deliberately never stored.
+    pub session_id: Option<String>,
+    /// End-to-end request timing, in UTC epoch milliseconds.
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
+    pub duration_ms: Option<i64>,
+    /// Stable credential identity and a safe display label. These live on each
+    /// request (not on the session) because a session may cross accounts.
+    pub account_key: Option<String>,
+    pub account_label: Option<String>,
+    pub account_source: Option<String>,
     /// UTC epoch milliseconds.
     pub occurred_at: i64,
 }

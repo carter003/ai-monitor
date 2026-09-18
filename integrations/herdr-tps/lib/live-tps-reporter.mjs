@@ -4,6 +4,7 @@ import {
   DEFAULT_STALE_MS,
   RollingTokenRate,
 } from './rolling-token-rate.mjs';
+import { TokenRateMeter } from './token-rate-meter.mjs';
 
 const DEFAULT_IDLE_HOLD_MS = 1_000;
 const DEFAULT_DISPLAY_INTERVAL_MS = 1_000;
@@ -15,24 +16,40 @@ const DEFAULT_METADATA_TTL_MS = 5_000;
 export class LiveTpsReporter {
   constructor({
     publisher,
+    sampler,
+    rateEngine = 'rolling',
     sampleIntervalMs = DEFAULT_SAMPLE_INTERVAL_MS,
     staleMs = DEFAULT_STALE_MS,
     displayIntervalMs = DEFAULT_DISPLAY_INTERVAL_MS,
-    idleHoldMs = DEFAULT_IDLE_HOLD_MS,
+    idleHoldMs,
     metadataRefreshMs = DEFAULT_METADATA_REFRESH_MS,
     metadataTtlMs = DEFAULT_METADATA_TTL_MS,
     tokenCounterFactory = tokenCounterForModel,
     autoStart = true,
-  }) {
+  } = {}) {
     this.publisher = publisher;
     this.sampleIntervalMs = sampleIntervalMs;
     this.staleMs = staleMs;
     this.displayIntervalMs = displayIntervalMs;
     this.resetDisplay();
-    this.idleHoldMs = idleHoldMs;
+    this.rateEngine = rateEngine;
+    this.idleHoldMs =
+      idleHoldMs !== undefined
+        ? idleHoldMs
+        : rateEngine === 'rolling'
+          ? DEFAULT_IDLE_HOLD_MS
+          : undefined;
     this.metadataRefreshMs = metadataRefreshMs;
     this.metadataTtlMs = metadataTtlMs;
-    this.sampler = new RollingTokenRate({ staleMs });
+    if (sampler) {
+      this.sampler = sampler;
+    } else if (rateEngine === 'rolling') {
+      this.sampler = new RollingTokenRate({ staleMs });
+    } else {
+      this.sampler = new TokenRateMeter({
+        countTokens: tokenCounterFactory(undefined),
+      });
+    }
     this.tokenCounterFactory = tokenCounterFactory;
     this.currentModel = undefined;
     this.displayAgent = undefined;
@@ -132,38 +149,55 @@ export class LiveTpsReporter {
     this.sampler.append(generationKey, streamKey, delta, now);
   }
 
-  pause(now = Date.now(), fallbackDurationMs) {
+  pause(now = Date.now(), fallbackDurationMs, outputTokens) {
     if (this.closed) return;
     if (this.idleTimer) {
       return;
     }
-    let finalRate = this.sampler.sample(now);
+    const observationDuration = this.sampler.observationDuration?.(now) ?? 0;
+    let finalRate = this.sampler.sample?.(now) ?? this.sampler.rate?.(now);
     // One nearly instantaneous chunk has no meaningful streaming-rate denominator.
-    if (this.lastRate === 0 && this.sampler.observationDuration(now) < this.sampleIntervalMs) {
+    if (this.lastRate === 0 && observationDuration < this.sampleIntervalMs) {
       finalRate = undefined;
     }
     const durationMs = Number(fallbackDurationMs);
     if (
-      (finalRate === undefined || finalRate <= 0) &&
+      (finalRate === undefined || finalRate === null || finalRate <= 0) &&
       Number.isFinite(durationMs) &&
       durationMs > 0
     ) {
-      finalRate = Math.round((this.sampler.totalTokens() / durationMs) * 1_000);
+      const totalTokens = this.sampler.totalTokens?.() ?? 0;
+      finalRate = Math.round((totalTokens / durationMs) * 1_000);
     }
-    if (finalRate === undefined || finalRate <= 0) {
-      this.sampler.pause(now);
+    if (finalRate === undefined || finalRate === null || finalRate <= 0) {
+      this.sampler.pause?.(now, fallbackDurationMs, outputTokens);
       this.publishZero();
       return;
     }
 
     // Preserve the readable streaming value; completion must not introduce a spike.
     if (this.lastRate === 0) this.publishRate(finalRate);
-    this.idleTimer = setTimeout(() => {
-      this.idleTimer = undefined;
-      this.sampler.pause();
-      this.publishZero();
-    }, this.idleHoldMs);
-    this.idleTimer.unref?.();
+    if (this.idleHoldMs !== undefined && Number.isFinite(this.idleHoldMs) && this.idleHoldMs >= 0) {
+      this.idleTimer = setTimeout(() => {
+        this.idleTimer = undefined;
+        this.sampler.pause?.(now, fallbackDurationMs, outputTokens);
+        this.publishZero();
+      }, this.idleHoldMs);
+      this.idleTimer.unref?.();
+    } else {
+      this.sampler.pause?.(now, fallbackDurationMs, outputTokens);
+    }
+  }
+
+  seed(tokens, durationMs) {
+    if (this.closed) return;
+    if (typeof this.sampler.seed === 'function') {
+      this.sampler.seed(tokens, durationMs);
+      const rate = this.sampler.sample?.() ?? this.sampler.rate?.();
+      if (rate !== undefined && rate !== null && rate > 0) {
+        this.publishRate(Math.max(1, Math.round(rate)));
+      }
+    }
   }
 
   cancelIdleHold() {

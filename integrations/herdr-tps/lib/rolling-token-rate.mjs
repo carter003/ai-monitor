@@ -5,6 +5,8 @@ export const DEFAULT_WINDOW_MS = 2_000;
 export const DEFAULT_STALE_MS = 1_500;
 
 export const estimateVisibleTokens = estimateFallbackTokens;
+export { TokenRateMeter, ExponentialBucket } from './token-rate-meter.mjs';
+
 
 export class RollingTokenRate {
   constructor({

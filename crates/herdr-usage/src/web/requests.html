@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Request 追踪 · AI Monitor</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body>
+<header><div><span class="eyebrow">AI MONITOR / LOCAL</span><h1>Request 与账户追踪</h1><p>每个 request 一行，仅保存时间、模型、耗时、session 和账户标识，不保存对话上下文。</p></div><div class="status"><span class="dot"></span>本地数据 <button id="refresh" type="button">刷新</button><small id="updated">正在连接…</small></div></header>
+<nav aria-label="页面"><a href="/">总览</a><a href="/plans">套餐额度</a><a href="/requests" aria-current="page">Request 追踪</a><a href="/query">每日查询</a></nav>
+<main><div id="error" role="alert" hidden></div><p id="context" class="muted"></p>
+<section><div id="request-cards" class="cards"></div></section>
+<section class="panel"><div class="section-title"><div><h2>跨账户 Session</h2><p class="muted">同一客户端 + session + 通道实际出现两个或以上账户</p></div></div><div id="cross-sessions" class="table-wrap"></div></section>
+<section class="panel"><div class="section-title"><div><h2>最近 Request</h2><p class="muted">最多 3000 条；账户未解析时明确标记，不做 session 级猜测</p></div></div>
+<form id="request-filters" class="request-filters">
+<label>会话 ID<input id="request-session" type="search" autocomplete="off" placeholder="包含…"></label>
+<label>客户端<select id="request-client"><option value="">全部客户端</option></select></label>
+<label>通道<select id="request-provider"><option value="">全部通道</option></select></label>
+<label class="model-filter">模型<select id="request-model"><option value="">全部模型</option></select></label>
+<label class="model-filter">账户<select id="request-account"><option value="">全部账户</option></select></label>
+<button id="request-clear" type="button">清除筛选</button>
+</form>
+<p id="request-filter-summary" class="muted request-filter-summary"></p>
+<div id="request-table" class="table-wrap"></div></section>
+<footer>AGY 账户使用 OMP 的 PII-free credential pin 归属；OpenCode Go 使用 sticky credentialId 和密钥指纹归属。指纹不能还原 API Key。</footer>
+</main></body></html>

@@ -141,6 +141,7 @@ fn handle(mut stream: TcpStream, database: &Path, plans: &PlanOptions) -> std::i
         "/" => Some(("text/html; charset=utf-8", include_bytes!("index.html"))),
         "/query" => Some(("text/html; charset=utf-8", include_bytes!("query.html"))),
         "/plans" => Some(("text/html; charset=utf-8", include_bytes!("plans.html"))),
+        "/requests" => Some(("text/html; charset=utf-8", include_bytes!("requests.html"))),
         "/app.js" => Some(("text/javascript; charset=utf-8", include_bytes!("app.js"))),
         "/style.css" => Some(("text/css; charset=utf-8", include_bytes!("style.css"))),
         _ => None,
@@ -150,6 +151,22 @@ fn handle(mut stream: TcpStream, database: &Path, plans: &PlanOptions) -> std::i
     }
     if path == "/api/plans" {
         return match plans::report(database, plans) {
+            Ok(report) => respond(
+                &mut stream,
+                "200 OK",
+                "application/json; charset=utf-8",
+                &serde_json::to_vec(&report)?,
+            ),
+            Err(error) => respond(
+                &mut stream,
+                "400 Bad Request",
+                "application/json; charset=utf-8",
+                serde_json::json!({"error": error}).to_string().as_bytes(),
+            ),
+        };
+    }
+    if path == "/api/requests" {
+        return match web::requests::load(database) {
             Ok(report) => respond(
                 &mut stream,
                 "200 OK",
@@ -229,9 +246,13 @@ mod tests {
     fn a_port_conflict_does_not_replace_the_existing_listener() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        let error = Server::start(PathBuf::from("/unused.db"), address.port(), PlanOptions::default())
-            .err()
-            .unwrap();
+        let error = Server::start(
+            PathBuf::from("/unused.db"),
+            address.port(),
+            PlanOptions::default(),
+        )
+        .err()
+        .unwrap();
         assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
         assert!(TcpStream::connect(address).is_ok());
     }

@@ -32,6 +32,7 @@ pub const REPLAY_WINDOW: i64 = 2000;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RawMessage {
     pub rowid: i64,
+    pub session_id: Option<String>,
     pub data: String,
 }
 
@@ -73,12 +74,24 @@ pub fn baseline_from_cursor(cursor: &str) -> Option<i64> {
 /// Read the replay window: every row with `rowid > floor`, in rowid order so
 /// the caller processes them deterministically.
 pub fn read_window(connection: &Connection, floor: i64) -> rusqlite::Result<Vec<RawMessage>> {
-    let mut statement =
-        connection.prepare("SELECT rowid, data FROM message WHERE rowid > ?1 ORDER BY rowid")?;
+    let columns: Vec<String> = connection
+        .prepare("PRAGMA table_info(message)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    let sql = if columns.iter().any(|column| column == "session_id") {
+        "SELECT rowid, session_id, data FROM message WHERE rowid > ?1 ORDER BY rowid"
+    } else if columns.iter().any(|column| column == "sessionID") {
+        "SELECT rowid, sessionID, data FROM message WHERE rowid > ?1 ORDER BY rowid"
+    } else {
+        "SELECT rowid, NULL, data FROM message WHERE rowid > ?1 ORDER BY rowid"
+    };
+    let mut statement = connection.prepare(sql)?;
     let rows = statement.query_map([floor], |row| {
         Ok(RawMessage {
             rowid: row.get(0)?,
-            data: row.get(1)?,
+            session_id: row.get(1)?,
+            data: row.get(2)?,
         })
     })?;
     rows.collect()
@@ -153,6 +166,23 @@ pub fn parse_message(row: &RawMessage) -> Option<ParsedEvent> {
         model_source: model.as_ref().map(|_| ModelSource::Event),
         model,
         provider: provider.map(str::to_owned),
+        session_id: row.session_id.clone().or_else(|| {
+            value
+                .get("sessionID")
+                .or_else(|| value.get("session_id"))
+                .and_then(Value::as_str)
+                .filter(|session| !session.is_empty())
+                .map(str::to_owned)
+        }),
+        started_at: Some(occurred_at),
+        completed_at: value.pointer("/time/completed").and_then(Value::as_i64),
+        duration_ms: value
+            .pointer("/time/completed")
+            .and_then(Value::as_i64)
+            .map(|completed| completed.saturating_sub(occurred_at).max(0)),
+        account_key: None,
+        account_label: None,
+        account_source: None,
         occurred_at,
     })
 }
@@ -168,6 +198,7 @@ mod tests {
     fn raw(rowid: i64, data: &str) -> RawMessage {
         RawMessage {
             rowid,
+            session_id: Some("session-1".into()),
             data: data.to_owned(),
         }
     }
@@ -184,6 +215,22 @@ mod tests {
         assert_eq!(event.model_source, Some(ModelSource::Event));
         assert_eq!(event.event_id, "160821");
         assert_eq!(event.occurred_at, 1_788_519_452_477);
+    }
+
+    #[test]
+    fn session_can_be_read_from_the_message_json() {
+        let row = RawMessage {
+            rowid: 1,
+            session_id: None,
+            data: ASSISTANT.replacen(
+                r#"{"role":"assistant""#,
+                r#"{"role":"assistant","sessionID":"session-json""#,
+                1,
+            ),
+        };
+        let event = parse_message(&row).expect("assistant row");
+        assert_eq!(event.session_id.as_deref(), Some("session-json"));
+        assert_eq!(event.duration_ms, Some(3_829));
     }
 
     #[test]
@@ -226,7 +273,7 @@ mod tests {
         let connection = Connection::open_in_memory().expect("memory db");
         connection
             .execute(
-                "CREATE TABLE message(rowid INTEGER PRIMARY KEY, data TEXT)",
+                "CREATE TABLE message(rowid INTEGER PRIMARY KEY, session_id TEXT, data TEXT)",
                 [],
             )
             .expect("schema");
@@ -299,7 +346,7 @@ mod tests {
         let connection = Connection::open_in_memory().expect("memory db");
         connection
             .execute(
-                "CREATE TABLE message(rowid INTEGER PRIMARY KEY, data TEXT)",
+                "CREATE TABLE message(rowid INTEGER PRIMARY KEY, session_id TEXT, data TEXT)",
                 [],
             )
             .expect("schema");
