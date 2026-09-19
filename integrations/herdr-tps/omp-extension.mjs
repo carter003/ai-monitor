@@ -313,7 +313,7 @@ export default function herdrTpsExtension(pi) {
 
   registerOmpTpsHandlers(
     pi,
-    () => new LiveTpsReporter({ publisher, rateEngine: 'token-rate-meter' }),
+    () => new LiveTpsReporter({ publisher }),
     { requireUi: true },
   );
 }

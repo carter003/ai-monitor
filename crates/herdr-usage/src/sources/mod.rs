@@ -143,6 +143,7 @@ impl Collector {
         self.scanned_files = files.len();
         let mut store = OffsetStore::from_cursor(db::offset(connection, kind)?.as_deref());
         let mut batch = vec![];
+        let mut inserted = 0;
         for file in &files {
             self.omp.seed_file(file);
             let accounts = catalogs
@@ -150,21 +151,24 @@ impl Collector {
                 .find(|(root, _)| file.starts_with(root))
                 .map(|(_, accounts)| accounts)
                 .expect("OMP session file belongs to an enumerated root");
-            let Some((size, lines, rotated)) = read_new_bytes(&mut store, file, |_, _| {})? else {
-                continue;
-            };
-            if rotated {
-                self.omp.forget(file);
-            }
-            for line in lines {
-                for event in self.omp.parse_line_with_accounts(file, &line, accounts) {
-                    let priced = price(prices, &event);
-                    batch.push((event, priced));
+            read_new_chunks(&mut store, file, |lines, rotated| {
+                if rotated {
+                    self.omp.forget(file);
                 }
-            }
-            let _ = size;
+                for line in lines {
+                    for event in self.omp.parse_line_with_accounts(file, &line, accounts) {
+                        let priced = price(prices, &event);
+                        batch.push((event, priced));
+                    }
+                }
+                if batch.len() >= 1000 {
+                    inserted += db::insert_events(connection, kind, &batch, now)?;
+                    batch.clear();
+                }
+                Ok(())
+            })?;
         }
-        let inserted = db::insert_events(connection, kind, &batch, now)?;
+        inserted += db::insert_events(connection, kind, &batch, now)?;
         db::save_offset(connection, kind, &store.cursor())?;
         Ok(inserted)
     }
@@ -183,26 +187,26 @@ impl Collector {
         });
         let mut store = OffsetStore::from_cursor(db::offset(connection, kind)?.as_deref());
         let mut batch = vec![];
+        let mut inserted = 0;
         for file in &files {
-            let Some((_, lines, rotated)) = read_new_bytes(&mut store, file, |path, prefix| {
-                self.codex.seed_model(path, prefix);
-            })?
-            else {
-                continue;
-            };
-            if rotated {
-                // A rotated rollout file restarts its `turn_context` history; the
-                // tracked model must not leak across the truncation.
-                self.codex.forget(file);
-            }
-            for line in lines {
-                for event in self.codex.parse_line(file, &line) {
-                    let priced = price(prices, &event);
-                    batch.push((event, priced));
+            read_new_chunks(&mut store, file, |lines, rotated| {
+                if rotated {
+                    self.codex.forget(file);
                 }
-            }
+                for line in lines {
+                    for event in self.codex.parse_line(file, &line) {
+                        let priced = price(prices, &event);
+                        batch.push((event, priced));
+                    }
+                }
+                if batch.len() >= 1000 {
+                    inserted += db::insert_events(connection, kind, &batch, now)?;
+                    batch.clear();
+                }
+                Ok(())
+            })?;
         }
-        let inserted = db::insert_events(connection, kind, &batch, now)?;
+        inserted += db::insert_events(connection, kind, &batch, now)?;
         db::save_offset(connection, kind, &store.cursor())?;
         Ok(inserted)
     }
@@ -217,8 +221,9 @@ impl Collector {
         self.refresh_grok_config();
         let mut store = OffsetStore::from_cursor(db::offset(connection, kind)?.as_deref());
         let mut batch = vec![];
+        let mut inserted = 0;
         let file = self.paths.grok_log.clone();
-        if let Some((_, lines, rotated)) = read_new_bytes(&mut store, &file, |_, _| {})? {
+        read_new_chunks(&mut store, &file, |lines, rotated| {
             if rotated {
                 // Single-file source: rotation invalidates every `sid -> model`
                 // mapping, since the new file describes new sessions.
@@ -230,8 +235,13 @@ impl Collector {
                     batch.push((event, priced));
                 }
             }
-        }
-        let inserted = db::insert_events(connection, kind, &batch, now)?;
+            if batch.len() >= 1000 {
+                inserted += db::insert_events(connection, kind, &batch, now)?;
+                batch.clear();
+            }
+            Ok(())
+        })?;
+        inserted += db::insert_events(connection, kind, &batch, now)?;
         db::save_offset(connection, kind, &store.cursor())?;
         Ok(inserted)
     }
@@ -370,16 +380,12 @@ fn price(prices: &PriceTable, event: &ParsedEvent) -> Priced {
 ///   read from zero instead — harmless even if some bytes were somehow already
 ///   consumed, because every insert is `INSERT OR IGNORE` over the primary key.
 ///
-/// A file untouched for longer than `SEED_PREFIX_IDLE` is not seeded on
-/// baseline; it will be seeded normally if it starts growing again.
-const SEED_PREFIX_IDLE: Duration = Duration::from_secs(3600);
-
 /// How recent a write makes an unseen file "live". One collection round plus
 /// change: a file seen in an earlier round holds a watermark and never reaches
 /// the baseline branch at all.
 const SEED_ACTIVE: Duration = Duration::from_secs(120);
 
-/// Whether the file's mtime is recent enough to justify reading its prefix.
+/// Whether the file's mtime is recent enough to treat it as live.
 fn is_recent(path: &Path, within: Duration) -> bool {
     std::fs::metadata(path)
         .and_then(|metadata| metadata.modified())
@@ -388,22 +394,18 @@ fn is_recent(path: &Path, within: Duration) -> bool {
         .is_some_and(|age| age <= within)
 }
 
-/// `on_baseline` runs once for a file with no watermark, with the bytes that the
-/// baseline is about to skip. Sources whose parsing is stateful (codex) use it to
-/// recover the state that the skipped prefix establishes.
-///
 /// Returns `None` when the file vanished, is not a regular file, or fails to
 /// stat; the round then simply skips it.
-fn read_new_bytes(
+fn read_new_chunks(
     store: &mut OffsetStore,
     path: &Path,
-    mut on_baseline: impl FnMut(&Path, &[u8]),
-) -> rusqlite::Result<Option<(u64, Vec<tail::TailLine>, bool)>> {
+    mut consume: impl FnMut(Vec<tail::TailLine>, bool) -> rusqlite::Result<()>,
+) -> rusqlite::Result<()> {
     let Ok(metadata) = std::fs::metadata(path) else {
-        return Ok(None);
+        return Ok(());
     };
     if !metadata.is_file() {
-        return Ok(None);
+        return Ok(());
     }
     let size = metadata.len();
     let size = if store.is_known(path) {
@@ -413,40 +415,29 @@ fn read_new_bytes(
         // at offset zero so the events it was born with are collected. omp
         // writes session logs lazily, so a newly listed file may already hold
         // inference records — baselining at its current size used to drop them
-        // permanently. The codex `turn_context` seed still runs over the head
-        // chunk; nothing is skipped, so the model state the skipped prefix
+        // permanently. Nothing is skipped, so the model state the skipped prefix
         // would have established is established by the read itself. A cold
         // start (no cursor) keeps the baseline: its unseen corpus is history by
         // definition, not a log that a running session is still filling.
         store.baseline(path, 0);
         size
     } else {
-        // Reading the whole prefix is exactly what baselining must avoid, so the
-        // callback gets a bounded tail of it: the last `SEED_PREFIX` bytes are
-        // where the live session's `turn_context` sits, and truncating the prefix
-        // can only lose a model that a later `turn_context` restores.
-        //
-        // The scan is skipped for files that were not written recently. Inactive
-        // rollouts are the overwhelming majority (measured 5101 files, of which
-        // one was touched in the last hour), and their model is never needed
-        // until a later round reads new bytes from them.
-        if is_recent(path, SEED_PREFIX_IDLE) {
-            const SEED_PREFIX: u64 = 1 << 20;
-            let from = size.saturating_sub(SEED_PREFIX);
-            if let Ok(prefix) = tail::read_range(path, from, size) {
-                on_baseline(path, &prefix);
-            }
-        } else {
-            on_baseline(path, &[]);
-        }
+        // Recover source metadata only when new usage actually needs it.
         store.baseline(path, size)
     };
-    let tail = store.tail(path);
-    match tail::read_appended(path, tail, size) {
-        Ok(outcome) => Ok(Some((outcome.offset, outcome.lines, outcome.rotated))),
-        Err(error) => {
-            eprintln!("[warn] 读取 {} 失败：{error}", path.display());
-            Ok(None)
+    loop {
+        match tail::read_appended(path, store.tail(path), size) {
+            Ok(outcome) => {
+                let done = outcome.offset >= size;
+                consume(outcome.lines, outcome.rotated)?;
+                if done {
+                    return Ok(());
+                }
+            }
+            Err(error) => {
+                eprintln!("[warn] 读取 {} 失败：{error}", path.display());
+                return Ok(());
+            }
         }
     }
 }

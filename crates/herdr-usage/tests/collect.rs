@@ -125,6 +125,22 @@ fn the_first_round_records_the_baseline_and_backfills_nothing() {
 }
 
 #[test]
+fn a_large_backlog_is_batched_without_losing_events_at_chunk_boundaries() {
+    let fixture = Fixture::new("chunked-backlog");
+    let file = fixture.paths.codex.join("rollout-backlog.jsonl");
+    fs::write(&file, format!("{CODEX_SESSION_META}\n{CODEX_TURN}\n")).unwrap();
+    let mut connection = fixture.connection();
+    let mut collector = sources::Collector::new(fixture.paths.clone());
+    collector.run_round(&mut connection, 1_000).unwrap();
+
+    fixture.append(&file, &format!("{CODEX_COUNT}\n").repeat(2_000));
+    let report = collector.run_round(&mut connection, 2_000).unwrap();
+    assert_eq!(report.inserted, 2_000);
+    assert_eq!(count(&connection, "codex"), 2_000);
+    assert_eq!(collector.run_round(&mut connection, 3_000).unwrap().inserted, 0);
+}
+
+#[test]
 fn a_live_file_seen_for_the_first_time_is_read_from_zero() {
     // Regression: omp buffers session writes, so a log can be created minutes
     // after its session started and already hold inference records. The old

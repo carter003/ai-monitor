@@ -13,6 +13,13 @@ function requestId(source) {
 
 export const DEFAULT_METADATA_TIMEOUT_MS = 2_000;
 const HERDR_TPS_METADATA_SOURCE = 'herdr:tps';
+
+// OMP renders the working-row rate with one decimal (`rate.toFixed(1)`); match
+// that precision so the herdr agents bar reads the same value.
+function formatTpsRate(rate) {
+  if (rate === undefined || rate === null || !Number.isFinite(rate)) return '';
+  return rate.toFixed(1);
+}
 const HERDR_TPS_LEGACY_METADATA_SOURCES = ['herdr:tps:codex', 'herdr:tps:omp'];
 
 function responseError(response) {
@@ -66,7 +73,7 @@ export class HerdrMetadataPublisher {
   }
 
   publishRate(rate, ttlMs) {
-    return this.#publishTokens({ tps: String(rate) }, ttlMs);
+    return this.#publishTokens({ tps: formatTpsRate(rate) }, ttlMs);
   }
 
   publishDisplayAgent(displayAgent, ttlMs) {
@@ -84,7 +91,7 @@ export class HerdrMetadataPublisher {
     }
     const tokens = {
       ...(model === undefined ? {} : { model: String(model) }),
-      ...(rate === undefined ? {} : { tps: String(rate) }),
+      ...(rate === undefined ? {} : { tps: formatTpsRate(rate) }),
     };
     const fields = {
       ...(hasDisplayAgent ? { display_agent: String(displayAgent) } : {}),

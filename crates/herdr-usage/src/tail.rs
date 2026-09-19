@@ -38,7 +38,7 @@ pub struct TailLine {
 #[derive(Debug, Default)]
 pub struct TailOutcome {
     pub lines: Vec<TailLine>,
-    /// New offset to persist. Equals the file size when the pass succeeded.
+    /// New offset to persist. A pass reads at most one chunk.
     pub offset: u64,
     /// Set when the file shrank: the caller must clear per-file derived state
     /// (codex `turn_context`, grok per-`sid` model cache) because the file was
@@ -52,6 +52,7 @@ pub struct TailOutcome {
 /// be split mid-write, and parsing a truncated JSON object would either fail
 /// loudly or (worse) succeed with missing fields.
 pub fn read_appended(path: &Path, tail: &mut FileTail, size: u64) -> std::io::Result<TailOutcome> {
+    const READ_CHUNK: u64 = 256 * 1024;
     let mut outcome = TailOutcome::default();
     if size < tail.offset {
         // Rotation or truncation: discard the watermark and the residue.
@@ -64,9 +65,10 @@ pub fn read_appended(path: &Path, tail: &mut FileTail, size: u64) -> std::io::Re
         outcome.offset = tail.offset;
         return Ok(outcome);
     }
+    let end = size.min(tail.offset.saturating_add(READ_CHUNK));
+    let bytes = read_range(path, tail.offset, end)?;
     let prefix = std::mem::take(&mut tail.residue);
     let start = tail.residue_start;
-    let bytes = read_range(path, tail.offset, size)?;
     tail.residue_start = start;
     split_lines(
         start,
@@ -76,8 +78,8 @@ pub fn read_appended(path: &Path, tail: &mut FileTail, size: u64) -> std::io::Re
         &mut tail.residue_start,
         &mut outcome.lines,
     );
-    tail.offset = size;
-    outcome.offset = size;
+    tail.offset = end;
+    outcome.offset = end;
     Ok(outcome)
 }
 
@@ -261,4 +263,35 @@ pub fn read_range(path: &Path, from: u64, to: u64) -> std::io::Result<Vec<u8>> {
     let mut buffer = vec![0u8; (to - from) as usize];
     file.read_exact(&mut buffer)?;
     Ok(buffer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn large_backlog_is_read_in_chunks_and_keeps_cross_chunk_line_offsets() {
+        let path = std::env::temp_dir().join(format!("herdr-tail-{}.jsonl", std::process::id()));
+        let first = vec![b'x'; 256 * 1024 + 17];
+        let mut contents = first.clone();
+        contents.extend_from_slice(b"\nsecond\npartial");
+        std::fs::write(&path, &contents).unwrap();
+        let mut tail = FileTail::default();
+        let mut lines = Vec::new();
+        let mut chunks = 0;
+        while tail.offset < contents.len() as u64 {
+            let outcome = read_appended(&path, &mut tail, contents.len() as u64).unwrap();
+            assert!(outcome.offset <= contents.len() as u64);
+            chunks += 1;
+            lines.extend(outcome.lines);
+        }
+        assert!(chunks > 1);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].start, 0);
+        assert_eq!(lines[0].bytes, first);
+        assert_eq!(lines[1].start, first.len() as u64 + 1);
+        assert_eq!(lines[1].bytes, b"second");
+        assert_eq!(tail.residue, b"partial");
+        let _ = std::fs::remove_file(path);
+    }
 }

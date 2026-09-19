@@ -16,7 +16,7 @@ gpt-5.6
 [Config reference](https://herdr.dev/docs/config-reference/)；颜色映射见
 [0.9.0 `src/ui/status.rs`](https://github.com/herdrdev/herdr/blob/v0.9.0/src/ui/status.rs)。
 
-目前接入 Codex 和 OMP。生产环境采用 OMP 18.2.4 移植的 `TokenRateMeter` 多尺度指数衰减算法（5s/20s/80s 半衰期桶与 250ms 词边界分块），并在轮次间持续保留已显示速率（rate retention），不再在轮次结束后 1 秒突兀归零；侧栏数字平滑展示，最多每秒更新一次。会话重置或模型切换时清理。它不是会话全局平均值，也不包含输入、历史上下文、工具调用参数和工具输出。
+目前接入 Codex 和 OMP。生产环境采用 OMP 18.2.5 移植的 `TokenRateMeter` 多尺度指数衰减算法（5s/20s/80s 半衰期桶与 250ms 词边界分块），并在轮次间持续保留已显示速率（rate retention），不再在轮次结束后 1 秒突兀归零；侧栏数字平滑展示，最多每秒更新一次。会话重置或模型切换时清理。它不是会话全局平均值，也不包含输入、历史上下文、工具调用参数和工具输出。
 现代 OpenAI 模型使用 `o200k_base` tokenizer，旧 GPT 模型使用 `cl100k_base`；未知模型
 回退到 UTF-8 字节估算。Codex 同时采集回答、reasoning summary 与可用的 raw reasoning，
 OMP 只采集 text 与 thinking。结束后的总 output usage 可能混入工具调用参数，因此不参与
@@ -26,7 +26,7 @@ OMP 只采集 text 与 thinking。结束后的总 output usage 可能混入工�
 最终速度帧按已观测的 text/thinking token 与消息生成时长计算；工具调用内容仍会排除。
 显示区域只输出速度数字，不附加单位文字；数字语义仍为 `t/s`。模型、空闲速度和 OMP
 显示名使用 5 秒 TTL，并每 2 秒刷新一次；wrapper 即使被强制终止，遗留 metadata 也会自动
-过期。空闲心跳会把模型、零速度和 OMP 显示名合并为一次 snapshot，非零速度仍使用更短的
+过期。心跳会把模型、当前速度和 OMP 显示名合并为一次 snapshot；非零速度使用更短的
 2.5 秒 TTL（覆盖 2 秒心跳并留出调度余量）。`herdr:tps` 是所有 Agent 的唯一生产 source，调用方不能覆盖；Codex/OMP 每次启动
 都会先清除两个旧 metadata source，再由统一 owner 发布新值，因此同一 pane 在不同 Agent
 间复用不会带回旧模型。

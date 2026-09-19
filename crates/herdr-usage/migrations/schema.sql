@@ -35,6 +35,11 @@ CREATE INDEX IF NOT EXISTS idx_usage_provider_time ON usage_event(provider, occu
 -- without assuming that one session belongs to only one credential.
 CREATE INDEX IF NOT EXISTS idx_usage_session_time ON usage_event(session_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_usage_account_time ON usage_event(provider, account_key, started_at);
+-- Match the recent-request ORDER BY and predicate so LIMIT can stop after 3000 rows.
+CREATE INDEX IF NOT EXISTS idx_usage_recent_request
+  ON usage_event(COALESCE(started_at, occurred_at) DESC)
+  WHERE source IN ('omp', 'codex', 'grok', 'opencode')
+    AND session_id IS NOT NULL AND session_id <> '';
 -- One ordered index feeds the account rollup used by /api/requests. The
 -- partial predicate excludes rows that can never participate in the report.
 CREATE INDEX IF NOT EXISTS idx_usage_provider_session_account

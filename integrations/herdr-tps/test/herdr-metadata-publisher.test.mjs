@@ -42,7 +42,7 @@ test('sends a pane.report_metadata request with a compact numeric speed', async 
     assert.equal(await publisher.publishRate(37, 2_500), true);
     const request = await received;
     assert.equal(request.method, 'pane.report_metadata');
-    assert.deepEqual(request.params.tokens, { tps: '37' });
+    assert.deepEqual(request.params.tokens, { tps: '37.0' });
     assert.ok(request.params.ttl_ms > 0 && request.params.ttl_ms <= 2_500);
   } finally {
     if (previousHerdrEnv === undefined) {
@@ -193,7 +193,7 @@ test('publishes one guarded heartbeat snapshot for idle OMP metadata', async () 
     );
 
     assert.equal(requests.length, 1);
-    assert.deepEqual(requests[0].params.tokens, { model: 'gemini-3.7-flash', tps: '0' });
+    assert.deepEqual(requests[0].params.tokens, { model: 'gemini-3.7-flash', tps: '0.0' });
     assert.equal(requests[0].params.display_agent, 'omp2');
     assert.equal(requests[0].params.agent, 'omp');
     assert.ok(requests[0].params.ttl_ms > 0 && requests[0].params.ttl_ms <= 5_000);
@@ -336,7 +336,7 @@ test('drops expired queued metadata and survives a throwing diagnostic callback'
     release();
     assert.deepEqual(await Promise.all([first, expired, fresh]), [false, false, true]);
     assert.equal(sent.length, 2);
-    assert.equal(sent.at(-1).params.tokens.tps, '0');
+    assert.equal(sent.at(-1).params.tokens.tps, '0.0');
   } finally {
     if (previous === undefined) delete process.env.HERDR_ENV;
     else process.env.HERDR_ENV = previous;
@@ -376,7 +376,7 @@ test('deletes the model token after queued snapshots without clearing display na
     assert.ok(
       sent.slice(deletion + 1).every((request) => request.params.tokens?.model === undefined),
     );
-    assert.equal(sent.at(-1).params.tokens.tps, '0');
+    assert.equal(sent.at(-1).params.tokens.tps, '0.0');
   } finally {
     if (previous === undefined) delete process.env.HERDR_ENV;
     else process.env.HERDR_ENV = previous;

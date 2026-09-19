@@ -31,7 +31,7 @@
 //!   most recent preceding `turn_context` **in the same file**, so it is
 //!   tracked per path and the tracking must be dropped when the file rotates.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Substring test used to skip a line before parsing it as JSON.
@@ -43,10 +43,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 
 use crate::event::{normalize_codex, CodexLastUsage, ModelSource, ParsedEvent};
 use crate::tail::TailLine;
-/// Upper bound for the head scan in `recover_model_from_head`, as a safety cap
-/// over the file size: a pathologically large rollout without any
-/// `turn_context` would otherwise be read in full on every first event after
-/// a restart.
+/// Upper bound for the one-time head scan after a restart.
 const RECOVER_SCAN_LIMIT: u64 = 16 * 1024 * 1024;
 
 /// Per-file derived state that must survive across incremental read passes.
@@ -56,6 +53,8 @@ pub struct CodexState {
     models: HashMap<PathBuf, String>,
     /// Stable thread/session id from `session_meta` or `token_usage_record`.
     sessions: HashMap<PathBuf, String>,
+    /// A successful head scan need not be repeated when metadata is absent.
+    scanned_heads: HashSet<PathBuf>,
 }
 
 impl CodexState {
@@ -71,26 +70,7 @@ impl CodexState {
     pub fn forget(&mut self, path: &Path) {
         self.models.remove(path);
         self.sessions.remove(path);
-    }
-
-    /// Recover the tracked model from a range of the file that will not be
-    /// collected as events.
-    ///
-    /// The first round baselines a file at its current size and reads nothing,
-    /// and a restart on a large rollout starts at the persisted watermark. Both
-    /// cases would otherwise leave every later `token_count` without a model:
-    /// the baseline passes the skipped tail prefix here, and a restart falls
-    /// through to `recover_model_from_head`.
-    pub fn seed_model(&mut self, path: &Path, bytes: &[u8]) {
-        if let Some(model) = extract_latest_model(bytes) {
-            self.models.insert(path.to_path_buf(), model);
-        }
-        if let Some(session) = extract_session_id(bytes) {
-            self.sessions.insert(path.to_path_buf(), session);
-        }
-        if !self.models.contains_key(path) || !self.sessions.contains_key(path) {
-            self.recover_metadata_from_head(path);
-        }
+        self.scanned_heads.remove(path);
     }
 
     /// Rebuild the tracked model after a restart by replaying the file prefix.
@@ -102,19 +82,16 @@ impl CodexState {
     /// would have held. The old 64 KB cap missed even the first hit in the
     /// wild (measured rollouts carry it at ~85 KB); the window now reaches
     /// `RECOVER_SCAN_LIMIT`, and a rollout with no `turn_context` at all pays
-    /// the bounded scan exactly once per process.
-    fn recover_metadata_from_head(&mut self, path: &Path) {
-        let size = match std::fs::metadata(path) {
-            Ok(meta) => meta.len(),
-            Err(_) => return,
-        };
-        let to = size.min(RECOVER_SCAN_LIMIT);
+    /// the bounded scan exactly once per file until rotation.
+    fn recover_metadata_from_head(&mut self, path: &Path, before: u64) {
+        let to = before.min(RECOVER_SCAN_LIMIT);
         if to == 0 {
             return;
         }
         let Ok(head_bytes) = crate::tail::read_range(path, 0, to) else {
             return;
         };
+        self.scanned_heads.insert(path.to_path_buf());
         if let Some(model) = extract_latest_model(&head_bytes) {
             self.models.insert(path.to_path_buf(), model);
         }
@@ -221,8 +198,10 @@ impl CodexState {
             reasoning_output_tokens: int_at(usage, "reasoning_output_tokens"),
         };
 
-        if !self.models.contains_key(path) || !self.sessions.contains_key(path) {
-            self.recover_metadata_from_head(path);
+        if (!self.models.contains_key(path) || !self.sessions.contains_key(path))
+            && !self.scanned_heads.contains(path)
+        {
+            self.recover_metadata_from_head(path, line.start);
         }
         let (model, model_source) = match self.model_for(path) {
             Some(model) => (Some(model.to_string()), Some(ModelSource::Context)),
@@ -417,19 +396,33 @@ mod tests {
         assert_eq!(events[0].model.as_deref(), Some("gpt-6-astra"));
     }
     #[test]
-    fn seed_model_recovers_from_file_head_when_tail_has_no_turn_context() {
+    fn missing_metadata_is_scanned_once_until_rotation() {
         let temp = std::env::temp_dir().join(format!("test-rollout-{}.jsonl", std::process::id()));
-        // Write turn_context at the start of the file
-        let mut content = TURN_CONTEXT.to_vec();
-        content.push(b'\n');
-        content.extend_from_slice(b"{\"type\":\"other\"}\n".repeat(100).as_slice());
+        let content = b"{\"type\":\"other\"}\n".repeat(100);
         std::fs::write(&temp, &content).expect("write");
 
         let mut state = CodexState::new();
-        // Tail bytes passed to seed_model do not contain turn_context
-        let tail_bytes = b"{\"type\":\"other\"}\n";
-        state.seed_model(&temp, tail_bytes);
-        assert_eq!(state.model_for(&temp), Some("gpt-5.5"));
+        assert_eq!(
+            state.parse_line(&temp, &line(TOKEN_COUNT, content.len() as u64))[0].model,
+            None
+        );
+        assert!(state.scanned_heads.contains(&temp));
+        let mut replacement = TURN_CONTEXT.to_vec();
+        replacement.push(b'\n');
+        replacement.resize(content.len(), b' ');
+        std::fs::write(&temp, replacement).expect("replace head");
+        assert_eq!(
+            state.parse_line(&temp, &line(TOKEN_COUNT, content.len() as u64))[0].model,
+            None
+        );
+        state.forget(&temp);
+        assert!(!state.scanned_heads.contains(&temp));
+        assert_eq!(
+            state.parse_line(&temp, &line(TOKEN_COUNT, content.len() as u64))[0]
+                .model
+                .as_deref(),
+            Some("gpt-5.5")
+        );
 
         let _ = std::fs::remove_file(&temp);
     }

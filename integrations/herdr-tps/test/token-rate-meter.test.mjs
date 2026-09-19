@@ -64,6 +64,62 @@ test('TokenRateMeter calculates smoothed rate across multi-scale decay buckets',
   assert.ok(Math.abs(rate - 100) < 15, `expected near 100 tok/s, got ${rate}`);
 });
 
+test('TokenRateMeter matches the OMP 18.2.5 reference trace', () => {
+  const meter = new TokenRateMeter({ countTokens: (text) => text.length });
+  const samples = [];
+
+  meter.begin(0);
+  for (let t = 0; t <= 8000; t += 250) {
+    meter.push('x'.repeat(25), t);
+    if (t === 4000 || t === 6000 || t === 8000) {
+      samples.push(meter.sample(t));
+    }
+  }
+  meter.end(800, 8000);
+  samples.push(meter.sample(8000));
+
+  meter.begin(10000);
+  for (let t = 10000; t <= 14000; t += 250) {
+    meter.push('x'.repeat(15), t);
+  }
+  samples.push(meter.sample(14000));
+
+  assert.deepEqual(samples, [undefined, 106, 104, 101, 87]);
+});
+
+test('TokenRateMeter reuses pending token counts across samples and full flushes', () => {
+  let countCalls = 0;
+  const meter = new TokenRateMeter({
+    countTokens: (text) => {
+      countCalls++;
+      return text.length;
+    },
+    minTokens: 1,
+    minTimeMs: 1,
+  });
+
+  meter.begin(0);
+  meter.push('x'.repeat(1024), 0);
+  for (let t = 250; t <= 5000; t += 250) {
+    meter.sample(t);
+  }
+
+  assert.equal(countCalls, 1);
+  meter.push('y', 5250);
+  meter.sample(5250);
+  assert.equal(countCalls, 2);
+
+  meter.configure({
+    countTokens: (text) => {
+      countCalls++;
+      return text.length;
+    },
+  });
+  meter.sample(5500);
+  meter.sample(5750);
+  assert.equal(countCalls, 3);
+});
+
 test('TokenRateMeter keeps rate visible between turns', () => {
   const meter = new TokenRateMeter({
     countTokens: (text) => text.length,
@@ -138,7 +194,7 @@ test('TokenRateMeter reconciles output tokens and updates residual decay', () =>
 });
 
 test('TokenRateMeter releases completed stream routing state', () => {
-  const meter = new TokenRateMeter({ countTokens: (text) => text.length });
+  const meter = new TokenRateMeter({ countTokens: (text) => text.length, minTokens: 200, minTimeMs: 4_000 });
   meter.start('turn-1', 0);
   meter.append('turn-1', 'answer', 'completed output', 250);
   assert.equal(meter.streams.size, 1);
@@ -151,16 +207,16 @@ test('LiveTpsReporter does not flash zero between deltas on an active stream', a
   const events = [];
   const reporter = new LiveTpsReporter({
     publisher: ratePublisher(events),
-    rateEngine: 'token-rate-meter',
     tokenCounterFactory: () => (text) => text.length,
     autoStart: false,
   });
 
-  // Steady 100 tok/s stream with the default 250ms sample cadence. Every
-  // append must look active to the reporter; zero may only appear when the
-  // stream goes stale or a new generation begins.
+  // Steady 100 tok/s stream long enough to clear OMP's evidence gate
+  // (200 tokens / 4_000ms). Every append must look active to the
+  // reporter; zero may only appear when the stream goes stale or a new
+  // generation begins.
   reporter.start('turn-1', 'gpt-5.6', 0);
-  for (let t = 250; t <= 4000; t += 250) {
+  for (let t = 250; t <= 8000; t += 250) {
     reporter.append('turn-1', 'answer', 'x'.repeat(25), 'gpt-5.6', t);
     reporter.tick(t);
   }
@@ -174,18 +230,18 @@ test('LiveTpsReporter does not flash zero between deltas on an active stream', a
 
   await reporter.close();
 });
-
 test('LiveTpsReporter with token-rate-meter keeps rate visible in Herdr metadata between turns', async () => {
   const events = [];
   const reporter = new LiveTpsReporter({
     publisher: ratePublisher(events),
-    rateEngine: 'token-rate-meter',
     tokenCounterFactory: () => (text) => text.length,
     autoStart: false,
   });
 
+  // Stream long enough to clear OMP's evidence gate (200 tokens / 4_000ms):
+  // 800 tokens over 8s = 100 tok/s.
   reporter.start('turn-1', 'gpt-5.6', 0);
-  for (let t = 0; t <= 2000; t += 250) {
+  for (let t = 0; t <= 8000; t += 250) {
     reporter.append('turn-1', 'answer', 'x'.repeat(25), 'gpt-5.6', t);
     reporter.tick(t);
   }
@@ -193,23 +249,23 @@ test('LiveTpsReporter with token-rate-meter keeps rate visible in Herdr metadata
   const rateEventsBeforeEnd = events.filter((e) => e.rate !== undefined && e.rate > 0);
   assert.ok(rateEventsBeforeEnd.length > 0);
 
-  // Turn completes at t=2000
-  reporter.pause(2000, undefined, 200);
+  // Turn completes at t=8000
+  reporter.pause(8000, undefined, 800);
 
-  // Between turns at t=3000, 4000, 5000:
-  reporter.tick(3000);
-  reporter.tick(4000);
-  reporter.tick(5000);
+  // Between turns at t=9000, 10000, 11000:
+  reporter.tick(9000);
+  reporter.tick(10000);
+  reporter.tick(11000);
 
   // Rate must stay visible (non-zero) between turns
   const latestRate = events.filter((e) => e.rate !== undefined).at(-1)?.rate;
   assert.ok(latestRate > 0, `expected non-zero rate between turns, got ${latestRate}`);
 
-  // Heartbeat metadata refresh must also report the non-zero active rate
+  // One heartbeat request refreshes model, display name, and active rate together.
   events.length = 0;
   reporter.refreshMetadata();
-  const snapshotRate = events.find((e) => e.rate !== undefined)?.rate;
-  assert.equal(snapshotRate, latestRate);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].snapshot.rate, latestRate);
 
   // When session resets, rate is cleanly zeroed
   reporter.resetSession();
@@ -222,7 +278,6 @@ test('LiveTpsReporter seed populates rate immediately for Herdr metadata', async
   const events = [];
   const reporter = new LiveTpsReporter({
     publisher: ratePublisher(events),
-    rateEngine: 'token-rate-meter',
     tokenCounterFactory: () => (text) => text.length,
     autoStart: false,
   });

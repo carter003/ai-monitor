@@ -5,8 +5,8 @@ export const DEFAULT_CHUNK_INTERVAL_MS = 250;
 export const DEFAULT_WORD_BOUNDARY_MAX_CHARS = 32;
 export const DEFAULT_RESIDUAL_DECAY = 0.8;
 export const DEFAULT_BACKGROUND_RATE_OFFSET_MS = 10000;
-export const DEFAULT_MIN_TOKENS = 5;
-export const DEFAULT_MIN_TIME_MS = 250;
+export const DEFAULT_MIN_TOKENS = 200;
+export const DEFAULT_MIN_TIME_MS = 4_000;
 
 export class ExponentialBucket {
   constructor(halfLifeMs) {
@@ -34,7 +34,7 @@ export class ExponentialBucket {
 }
 
 /**
- * TokenRateMeter ported from OMP 18.2.4 / 18.2.5 (packages/coding-agent/src/utils/token-rate.ts).
+ * TokenRateMeter ported from OMP 18.2.5 (packages/coding-agent/src/utils/token-rate.ts).
  *
  * Implements multi-scale exponential decay with half-lives [5s, 20s, 80s], word-boundary
  * chunking, provider output token reconciliation with decaying residual smoothing,
@@ -61,6 +61,7 @@ export class TokenRateMeter {
   #pendingBuffer = '';
   #residualTokens = 0;
   #residualTime = 0;
+  #pendingTokenCount = undefined;
 
   constructor({
     countTokens = estimateFallbackTokens,
@@ -94,14 +95,15 @@ export class TokenRateMeter {
 
   set countTokens(fn) {
     this.#countTokens = fn;
+    this.#pendingTokenCount = undefined;
   }
 
   get totalStreamTokens() {
     return this.#totalStreamTokens;
   }
 
-  // Timestamp of the most recent stream delta, mirroring RollingTokenRate so
-  // LiveTpsReporter can distinguish an active stream from a stale one.
+  // Timestamp of the most recent stream delta, used by LiveTpsReporter to
+  // distinguish an active stream from a stale one.
   get lastDeltaAt() {
     return this.#lastDeltaAt;
   }
@@ -132,6 +134,7 @@ export class TokenRateMeter {
       this.#lastChunkIndex = chunkIndex;
     }
     this.#pendingBuffer += chunk;
+    this.#pendingTokenCount = undefined;
   }
 
   end(outputTokens, now = Date.now(), fallbackDurationMs) {
@@ -219,7 +222,7 @@ export class TokenRateMeter {
   }
 
   configure({ countTokens = this.#countTokens } = {}) {
-    this.#countTokens = countTokens;
+    this.countTokens = countTokens;
   }
 
   observationDuration(now = Date.now()) {
@@ -246,7 +249,8 @@ export class TokenRateMeter {
   rate(now = Date.now()) {
     const elapsed = this.#streamStartedAt === null ? 0 : now - this.#lastAdvanceAt;
     const pendingTokens =
-      this.#pendingBuffer.length > 0 ? this.#countTokens(this.#pendingBuffer) : 0;
+      this.#pendingTokenCount ??=
+        this.#pendingBuffer.length > 0 ? this.#countTokens(this.#pendingBuffer) : 0;
     let totalTokens = 0;
     let totalTime = 0;
     let lastBucketTokens = 0;
@@ -290,10 +294,12 @@ export class TokenRateMeter {
     this.#lastDeltaAt = undefined;
     this.#lastChunkIndex = -1;
     this.#pendingBuffer = '';
+    this.#pendingTokenCount = undefined;
   }
 
   #flush(isIncremental, now) {
     if (this.#lastChunkIndex < 0 || this.#pendingBuffer.length === 0) return;
+    const cachedTokenCount = this.#pendingTokenCount;
     let textToCount = this.#pendingBuffer;
     let leftover = '';
     if (isIncremental) {
@@ -304,9 +310,13 @@ export class TokenRateMeter {
       }
     }
     this.#pendingBuffer = leftover;
+    this.#pendingTokenCount = undefined;
     if (textToCount.length === 0) return;
     this.#advanceTime(now);
-    const tokens = this.#countTokens(textToCount);
+    const tokens =
+      leftover.length === 0 && cachedTokenCount !== undefined
+        ? cachedTokenCount
+        : this.#countTokens(textToCount);
     for (const bucket of this.#streamBuckets) {
       bucket.tokens += tokens;
     }

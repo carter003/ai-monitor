@@ -174,15 +174,22 @@ if (initial.get('group') === 'model') $('group').value = 'model';
 }
 if (isRequests) {
   $('refresh').addEventListener('click', loadRequests);
-  $('request-filters').addEventListener('submit', event => { event.preventDefault(); renderRequests(); });
-  $('request-session').addEventListener('input', renderRequests);
+  let searchTimer;
+  $('request-filters').addEventListener('submit', event => { event.preventDefault(); clearTimeout(searchTimer); requestPage = 0; renderRequests(); });
+  $('request-session').addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => { requestPage = 0; renderRequests(); }, 200);
+  });
   for (const id of ['request-client', 'request-provider', 'request-model', 'request-account']) {
-    $(id).addEventListener('change', renderRequests);
+    $(id).addEventListener('change', () => { requestPage = 0; renderRequests(); });
   }
   $('request-clear').addEventListener('click', () => {
     for (const id of ['request-session', 'request-client', 'request-provider', 'request-model', 'request-account']) $(id).value = '';
-    renderRequests();
+    clearTimeout(searchTimer);
+    requestPage = 0; renderRequests();
   });
+  $('request-prev').addEventListener('click', () => { requestPage--; renderRequests(); });
+  $('request-next').addEventListener('click', () => { requestPage++; renderRequests(); });
   loadRequests();
 } else if (isPlans) {
   $('metric').addEventListener('change',renderLineCharts);
@@ -199,6 +206,8 @@ if (isRequests) {
 const duration = value => value == null ? '未记录' : value < 1000 ? `${value} ms` : `${(value / 1000).toFixed(2)} s`;
 const unknownFilter = '__unknown__';
 let requestReport;
+let requestPage = 0;
+const requestPageSize = 100;
 function simpleTable(columns, rows) {
   if (!rows.length) return node('div', '暂无记录', 'empty');
   const table = node('table'), head = node('thead'), hr = node('tr'), body = node('tbody');
@@ -240,7 +249,12 @@ function renderRequests() {
     (!session || row.session_id.toLocaleLowerCase().includes(session)) &&
     filters.every(([key, value]) => !value || requestField(row, key) === value)
   );
+  const pages = Math.max(1, Math.ceil(rows.length / requestPageSize));
+  requestPage = Math.max(0, Math.min(requestPage, pages - 1));
   $('request-filter-summary').textContent = `显示 ${number(rows.length)} / ${number(requestReport.recent.length)} 条 · 最近窗口最多 ${number(requestReport.recent_limit || 3000)} 条，SQLite 保存全部历史`;
+  $('request-page-info').textContent = `${requestPage + 1} / ${pages} 页`;
+  $('request-prev').disabled = requestPage === 0;
+  $('request-next').disabled = requestPage >= pages - 1;
   $('request-table').replaceChildren(simpleTable([
     {label:'开始时间', value:r => r.local_time},
     {label:'耗时', value:r => duration(r.duration_ms)},
@@ -249,7 +263,7 @@ function renderRequests() {
     {label:'模型', value:r => modelName(r.model)},
     {label:'账户', value:r => r.account || '未解析'},
     {label:'Session', value:r => r.session_id},
-  ], rows));
+  ], rows.slice(requestPage * requestPageSize, (requestPage + 1) * requestPageSize)));
 }
 async function loadRequests() {
   const current = ++request;
@@ -261,6 +275,7 @@ async function loadRequests() {
     if (!response.ok) throw new Error(data.error || '查询失败');
     if (current !== request) return;
     requestReport = data;
+    requestPage = 0;
     $('error').hidden = true;
     $('context').textContent = `按 request 统计 · ${data.timezone} · OMP / Codex / Grok / OpenCode`;
     const rate = data.requests ? data.resolved / data.requests * 100 : 0;

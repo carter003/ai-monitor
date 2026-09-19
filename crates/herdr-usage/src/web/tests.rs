@@ -113,3 +113,39 @@ fn missing_database_is_not_created() {
     assert!(load(&path, Query::default()).is_err());
     assert!(!path.exists());
 }
+
+#[test]
+fn global_cache_refreshes_after_writer_commit_and_range_uses_time_index() {
+    let path = std::env::temp_dir().join(format!(
+        "usage-web-cache-{}-{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let writer = crate::db::open(&path).unwrap();
+    let at = Local::now().timestamp_millis();
+    writer.execute("INSERT INTO usage_event(source,event_id,model,input_total,cache_read,cache_write,output_total,reasoning,cost_usd,occurred_at)
+        VALUES('codex','one','m',10,0,0,2,0,0.1,?1)", [at]).unwrap();
+    assert_eq!(
+        load(&path, Query::default()).unwrap().overview["all"].events,
+        1
+    );
+    writer.execute("INSERT INTO usage_event(source,event_id,model,input_total,cache_read,cache_write,output_total,reasoning,cost_usd,occurred_at)
+        VALUES('codex','two','m',10,0,0,2,0,0.1,?1)", [at]).unwrap();
+    let report = load(&path, Query::default()).unwrap();
+    assert_eq!(report.overview["all"].events, 2);
+    assert_eq!(report.total.events, 2);
+    let plan: String = writer
+        .query_row(
+            "EXPLAIN QUERY PLAN SELECT date(e.occurred_at / 1000, 'unixepoch', 'localtime')
+         FROM usage_event e LEFT JOIN model_alias a ON a.raw_model = e.model
+         WHERE e.occurred_at >= ?1 AND e.occurred_at < ?2
+         GROUP BY 1",
+            rusqlite::params![at - 1, at + 1],
+            |row| row.get(3),
+        )
+        .unwrap();
+    assert!(plan.contains("idx_usage_time"), "{plan}");
+}

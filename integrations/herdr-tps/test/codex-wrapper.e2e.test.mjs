@@ -90,8 +90,12 @@ if (args[0] === 'app-server') {
       socket.send(JSON.stringify({ id: request.id, result: { thread: { id: 'placeholder', parentThreadId: null }, model: 'gpt-5.6-luna' } }));
       socket.send(JSON.stringify({ method: 'thread/settings/updated', params: { threadId: 'active', threadSettings: { model: 'gpt-5.6-luna', collaborationMode: { settings: { model: 'gpt-6-astra' } } } } }));
       socket.send(JSON.stringify({ method: 'turn/started', emittedAtMs: 100, params: { threadId: 'active', turn: { id: 'turn-e2e' } } }));
-      socket.send(JSON.stringify({ method: 'item/agentMessage/delta', emittedAtMs: 200, params: { threadId: 'active', itemId: 'message-e2e', delta: 'deterministic wrapper output for rate sampling' } }));
-      socket.send(JSON.stringify({ method: 'turn/completed', emittedAtMs: 600, params: { threadId: 'active', turn: { id: 'turn-e2e', status: 'completed' } } }));
+      // OMP evidence gate: 200 tokens / 4_000ms before a rate is shown. Stream
+      // ~290 tokens across 4s of event time so the wrapper publishes a rate.
+      for (let emittedAtMs = 500; emittedAtMs <= 4_000; emittedAtMs += 500) {
+        socket.send(JSON.stringify({ method: 'item/agentMessage/delta', emittedAtMs, params: { threadId: 'active', itemId: 'message-e2e', delta: 'the quick brown fox jumps over the lazy dog '.repeat(4) } }));
+      }
+      socket.send(JSON.stringify({ method: 'turn/completed', emittedAtMs: 4_500, params: { threadId: 'active', turn: { id: 'turn-e2e', status: 'completed' } } }));
     });
   });
   server.listen(Number(address.port), address.hostname);

@@ -30,7 +30,6 @@ use std::{
 
 #[derive(Default)]
 pub struct OmpState {
-    seen: HashSet<String>,
     sessions: HashMap<PathBuf, String>,
     pins: HashMap<(PathBuf, String), String>,
     api_key_pins: HashMap<(PathBuf, String), String>,
@@ -219,8 +218,7 @@ impl OmpState {
         Self::default()
     }
 
-    /// omp keeps one event per envelope id, so nothing is derived per file.
-    /// The seen-set is retained for the lifetime of the process.
+    /// Drop metadata tied to a rotated session file.
     pub fn forget(&mut self, path: &Path) {
         self.sessions.remove(path);
         self.pins.retain(|(file, _), _| file != path);
@@ -389,8 +387,6 @@ impl OmpState {
             .get("completedAt")
             .and_then(timestamp_ms)
             .or_else(|| duration_ms.map(|duration| occurred_at.saturating_add(duration)));
-        self.seen.insert(event_id.to_owned());
-
         vec![ParsedEvent {
             event_id: event_id.to_owned(),
             usage,

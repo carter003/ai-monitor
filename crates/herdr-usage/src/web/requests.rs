@@ -77,18 +77,29 @@ fn report(connection: &Connection) -> Result<RequestReport, String> {
         )
         .map_err(|error| error.to_string())?;
 
-    let mut statement = connection
-        .prepare(
-            "SELECT event_id, source, COALESCE(session_id, ''),
+    let recent_sql = "SELECT event_id, source, COALESCE(session_id, ''),
                 COALESCE(provider, source), model,
                 account_key, account_label, account_source,
                 COALESCE(started_at, occurred_at), completed_at, duration_ms
-         FROM usage_event
+         FROM usage_event INDEXED BY idx_usage_recent_request
          WHERE source IN ('omp', 'codex', 'grok', 'opencode')
            AND session_id IS NOT NULL AND session_id <> ''
          ORDER BY COALESCE(started_at, occurred_at) DESC
-         LIMIT ?1",
-        )
+         LIMIT ?1";
+    let mut statement = connection
+        .prepare(recent_sql)
+        .or_else(|error| {
+            // usage-web can start against a database that the updated collector
+            // has not migrated yet. Preserve the page until the index exists.
+            if error
+                .to_string()
+                .contains("no such index: idx_usage_recent_request")
+            {
+                connection.prepare(&recent_sql.replace(" INDEXED BY idx_usage_recent_request", ""))
+            } else {
+                Err(error)
+            }
+        })
         .map_err(|error| error.to_string())?;
     let mapped = statement
         .query_map([RECENT_REQUEST_LIMIT as i64], |row| {
@@ -214,12 +225,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn recent_request_query_uses_ordered_index() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!("../../migrations/schema.sql"))
+            .unwrap();
+        let plan: String = connection.query_row(
+            "EXPLAIN QUERY PLAN SELECT event_id FROM usage_event INDEXED BY idx_usage_recent_request
+             WHERE source IN ('omp', 'codex', 'grok', 'opencode')
+               AND session_id IS NOT NULL AND session_id <> ''
+             ORDER BY COALESCE(started_at, occurred_at) DESC LIMIT 3000",
+            [], |row| row.get(3),
+        ).unwrap();
+        assert!(plan.contains("idx_usage_recent_request"), "{plan}");
+        connection
+            .execute_batch("DROP INDEX idx_usage_recent_request")
+            .unwrap();
+        assert!(
+            report(&connection).is_ok(),
+            "older databases remain readable before migration"
+        );
+    }
+
+    #[test]
     fn one_session_can_be_reported_under_two_accounts() {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch(
             "CREATE TABLE usage_event(event_id TEXT, source TEXT, session_id TEXT, provider TEXT, model TEXT,
              account_key TEXT, account_label TEXT, account_source TEXT, started_at INTEGER,
-             completed_at INTEGER, duration_ms INTEGER, occurred_at INTEGER);",
+             completed_at INTEGER, duration_ms INTEGER, occurred_at INTEGER);
+             CREATE INDEX idx_usage_recent_request ON usage_event(COALESCE(started_at, occurred_at) DESC)
+               WHERE source IN ('omp', 'codex', 'grok', 'opencode')
+                 AND session_id IS NOT NULL AND session_id <> '';",
         ).unwrap();
         for (id, account, label, at) in [
             ("1", "a", "A", 1000),
@@ -255,6 +292,9 @@ mod tests {
             "CREATE TABLE usage_event(event_id TEXT, source TEXT, session_id TEXT, provider TEXT, model TEXT,
              account_key TEXT, account_label TEXT, account_source TEXT, started_at INTEGER,
              completed_at INTEGER, duration_ms INTEGER, occurred_at INTEGER);
+             CREATE INDEX idx_usage_recent_request ON usage_event(COALESCE(started_at, occurred_at) DESC)
+               WHERE source IN ('omp', 'codex', 'grok', 'opencode')
+                 AND session_id IS NOT NULL AND session_id <> '';
              WITH RECURSIVE sequence(value) AS (
                SELECT 1 UNION ALL SELECT value + 1 FROM sequence WHERE value < 3005
              )
