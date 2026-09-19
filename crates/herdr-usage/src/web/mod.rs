@@ -141,7 +141,6 @@ pub fn load(path: &Path, query: Query) -> Result<Report, String> {
         .busy_timeout(std::time::Duration::from_secs(3))
         .map_err(|e| e.to_string())?;
     let today = Local::now().date_naive();
-    validated_bounds(&query, today)?;
     let global = cached_global(path, today)?;
     report_with_global(&connection, query, today, global)
 }
