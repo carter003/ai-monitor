@@ -11,15 +11,14 @@ OMP 运行时保持原始可执行文件不变。`omp-extension.mjs` 加载两�
 
 ## Antigravity 新会话路由
 
-仅当 session 尚无 user/assistant transcript，并且首次请求选择
-`google-antigravity/gemini-*` 时执行一次：
+仅当 session 尚无 user/assistant transcript 时执行一次账号预选：
 
-1. 读取全部可用 Antigravity OAuth 账号的 Gemini 5H usage；
+1. `session_start` 读取全部可用 Antigravity OAuth 账号的 Gemini 5H usage；
 2. 排除当前存在 credential block 的账号；
-3. 选择 5H `remainingFraction` 最大的账号；
-4. 最大值严格小于 `0.15` 时，将整个 session 切到
-   `opencode-go/deepseek-v4.1-flash`，thinking level 设为 `high`；
-5. 否则把该 session 固定到选中的 Antigravity credential。
+3. 选择 5H `remainingFraction` 最大的账号，并立即把 session 固定到该 credential；
+4. OMP 随后创建标题生成子 session 时，会从父 session 继承同一个 credential，不再并发选中另一账号；
+5. 首次请求选择 `google-antigravity/gemini-*` 且最大值严格小于 `0.15` 时，将整个
+   session 切到 `opencode-go/deepseek-v4.1-flash`，thinking level 设为 `high`。
 
 正好 15% 保持 Antigravity。任何可用账号缺少可匹配的 5H usage 时 fail-open：保持
 Antigravity，不基于不完整数据 fallback。

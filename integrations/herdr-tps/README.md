@@ -213,11 +213,11 @@ collector 按 append-only pin/release entry 给每次 request 绑定账户并写
 显式释放、删除或禁用后才重新选择。OMP 原生修复后可设置
 `HERDR_TPS_OMP_API_KEY_STICKINESS=0` 单独关闭粘性策略，账户采集不受影响。
 
-Antigravity 账号平衡与 15% fallback 也合并为扩展层的单次新会话路由：新 session 首次使用
-Antigravity Gemini 时，选择 Gemini 5H 剩余最多的可用 OAuth 账号；若所有可用且额度已知的
-账号中最高值仍低于 15%，则把该 session 切到 `opencode-go/deepseek-v4.1-flash:high`。
-路由完成或 transcript 已存在后，扩展跳过 OMP 每个 request 的主动额度 preflight；真实 429
-仍走 OMP 独立的错误恢复和 fallback 路径。
+Antigravity 账号平衡与 15% fallback 也合并为扩展层的单次新会话路由：`session_start`
+先选择并固定 Gemini 5H 剩余最多的可用 OAuth 账号，使 OMP 标题生成子 session 与主请求继承
+同一 credential；首次使用 Antigravity Gemini 时，若最高值仍低于 15%，则把该 session 切到
+`opencode-go/deepseek-v4.1-flash:high`。路由完成或 transcript 已存在后，扩展跳过 OMP 每个
+request 的主动额度 preflight；真实 429 仍走 OMP 独立的错误恢复和 fallback 路径。
 
 ## 生命周期与性能维护约束
 

@@ -21,13 +21,17 @@ function fixture({ remaining = [0.2, 0.1], existing = false, modelProvider = 'go
   const pinned = [];
   const modelChanges = [];
   const thinking = [];
+  const activeCredentials = new Map();
   let healthCalls = 0;
   const accounts = [
     { credentialId: 7, email: 'a@example.test', projectId: 'project-a' },
     { credentialId: 11, email: 'b@example.test', projectId: 'project-b' },
   ];
   const auth = {
-    listOAuthAccounts: () => accounts,
+    listOAuthAccounts: (_provider, session) => accounts.map((account) => ({
+      ...account,
+      active: activeCredentials.get(session) === account.credentialId,
+    })),
     listCredentialBlocks: () => [],
     fetchUsageReports: async () => [
       report(accounts[0].email, accounts[0].projectId, remaining[0]),
@@ -35,6 +39,7 @@ function fixture({ remaining = [0.2, 0.1], existing = false, modelProvider = 'go
     ],
     pinSessionOAuthAccount: (...args) => {
       pinned.push(args);
+      activeCredentials.set(args[1], args[2]);
       return true;
     },
     getModelUsageHealth: async () => {
@@ -66,8 +71,18 @@ function fixture({ remaining = [0.2, 0.1], existing = false, modelProvider = 'go
     setThinkingLevel: (level) => thinking.push(level),
   };
   registerOmpAntigravitySessionRouter(pi);
-  handlers.get('session_start')({}, context);
-  return { auth, handlers, context, appended, pinned, modelChanges, thinking, healthCalls: () => healthCalls };
+  const started = handlers.get('session_start')({}, context);
+  return {
+    auth,
+    handlers,
+    context,
+    appended,
+    pinned,
+    modelChanges,
+    thinking,
+    started,
+    healthCalls: () => healthCalls,
+  };
 }
 
 test('pins the Antigravity account with the most Gemini 5h quota once', async () => {
@@ -84,11 +99,25 @@ test('pins the Antigravity account with the most Gemini 5h quota once', async ()
   );
   assert.equal(f.healthCalls(), 0);
 });
+test('preselects the highest-quota account before title generation starts', async () => {
+  const f = fixture({ remaining: [0.2, 0.4], modelProvider: 'openai-codex' });
+  await f.started;
+
+  const active = f.auth
+    .listOAuthAccounts('google-antigravity', 'session-1')
+    .find((account) => account.active);
+  assert.equal(active?.credentialId, 11);
+
+  f.context.model = { provider: 'google-antigravity', id: 'gemini-3.8-flash' };
+  await f.handlers.get('before_agent_start')({}, f.context);
+  assert.deepEqual(f.pinned, [['google-antigravity', 'session-1', 11]]);
+  assert.equal(f.appended[0].data.action, 'pin-antigravity');
+});
 
 test('falls back a new session when every usable Antigravity account is below 15 percent', async () => {
   const f = fixture({ remaining: [0.14, 0.09] });
   await f.handlers.get('before_agent_start')({}, f.context);
-  assert.deepEqual(f.pinned, []);
+  assert.deepEqual(f.pinned, [['google-antigravity', 'session-1', 7]]);
   assert.deepEqual(f.modelChanges, [{ provider: 'opencode-go', id: 'deepseek-v4.1-flash' }]);
   assert.deepEqual(f.thinking, ['high']);
   assert.equal(f.appended[0].data.action, 'fallback');
@@ -121,10 +150,10 @@ test('never reroutes an existing conversation and suppresses its proactive prefl
   assert.equal(f.healthCalls(), 0);
 });
 
-test('does not apply Antigravity routing to a new session using another provider', async () => {
+test('preselects Antigravity without rerouting a session using another provider', async () => {
   const f = fixture({ modelProvider: 'openai-codex' });
   await f.handlers.get('before_agent_start')({}, f.context);
-  assert.deepEqual(f.pinned, []);
+  assert.deepEqual(f.pinned, [['google-antigravity', 'session-1', 7]]);
   assert.deepEqual(f.modelChanges, []);
   assert.deepEqual(
     await f.auth.getModelUsageHealth('openai-codex', { sessionId: 'session-1' }),

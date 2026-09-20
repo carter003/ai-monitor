@@ -131,90 +131,98 @@ function installUsagePreflightGuard(auth, state) {
   return state;
 }
 
-async function routeFirstTurn(state, context) {
-  const id = sessionId(context);
-  if (!id || state.settledSessions.has(id)) return;
-  const pending = state.pending.get(id);
-  if (pending) return pending;
+function selectSessionAccount(state, id) {
+  const selected = state.selections.get(id);
+  if (selected) return selected;
 
-  const task = (async () => {
-    const model = context?.model;
-    const base = {
-      sessionId: id,
-      sourceProvider: model?.provider,
-      sourceModel: model?.id,
-      at: Date.now(),
-    };
+  const selection = (async () => {
     try {
-      if (!isAntigravityGemini(model)) {
-        return;
-      }
       const reports = await state.auth.fetchUsageReports?.();
       const { ranked, hasUnknown } = rankedAccounts(state.auth, id, reports);
       const best = ranked[0];
-      if (!best || hasUnknown) {
-        appendRoute(state, { ...base, action: 'keep-antigravity', reason: 'usage-unknown' });
-        return;
-      }
-
-      if (best.remainingFraction < state.reserveFraction) {
-        const fallback = context.modelRegistry?.find?.(FALLBACK_PROVIDER, FALLBACK_MODEL);
-        if (!fallback) {
-          appendRoute(state, {
-            ...base,
-            action: 'keep-antigravity',
-            reason: 'fallback-unavailable',
-            remainingFraction: best.remainingFraction,
-          });
-          return;
-        }
-        const changed = await state.pi.setModel(fallback);
-        if (changed === false) {
-          appendRoute(state, {
-            ...base,
-            action: 'keep-antigravity',
-            reason: 'fallback-rejected',
-            remainingFraction: best.remainingFraction,
-          });
-          return;
-        }
-        state.pi.setThinkingLevel?.('high');
-        appendRoute(state, {
-          ...base,
-          action: 'fallback',
-          targetProvider: FALLBACK_PROVIDER,
-          targetModel: FALLBACK_MODEL,
-          remainingFraction: best.remainingFraction,
-        });
-        return;
-      }
-
+      if (!best || hasUnknown) return { best, hasUnknown, pinned: false };
       const pinned = state.auth.pinSessionOAuthAccount(
         PROVIDER,
         id,
         best.account.credentialId,
       );
-      appendRoute(state, {
-        ...base,
-        action: pinned ? 'pin-antigravity' : 'keep-antigravity',
-        reason: pinned ? undefined : 'pin-rejected',
-        credentialId: pinned ? best.account.credentialId : undefined,
-        remainingFraction: best.remainingFraction,
-      });
+      return { best, hasUnknown: false, pinned };
     } catch (error) {
-      appendRoute(state, { ...base, action: 'keep-antigravity', reason: 'routing-error' });
-      debug(state.pi, `Antigravity first-turn routing failed open: ${error?.message ?? error}`);
-    } finally {
-      // From this point onward OMP's per-request usage preflight is suppressed
-      // for this exact session. Hard-error/429 recovery uses a separate path.
-      state.settledSessions.add(id);
+      debug(state.pi,         `Antigravity session account selection failed open: ${error?.message ?? error}`);
+      return { best: undefined, hasUnknown: true, pinned: false, error };
     }
   })();
-  state.pending.set(id, task);
+  state.selections.set(id, selection);
+  return selection;
+}
+
+async function routeFirstTurn(state, context) {
+  const id = sessionId(context);
+  if (!id || state.settledSessions.has(id)) return;
+
+  const model = context?.model;
+  const base = {
+    sessionId: id,
+    sourceProvider: model?.provider,
+    sourceModel: model?.id,
+    at: Date.now(),
+  };
   try {
-    await task;
+    if (!isAntigravityGemini(model)) return;
+
+    const { best, hasUnknown, pinned, error } = await selectSessionAccount(state, id);
+    if (error) {
+      appendRoute(state, { ...base, action: 'keep-antigravity', reason: 'routing-error' });
+      return;
+    }
+    if (!best || hasUnknown) {
+      appendRoute(state, { ...base, action: 'keep-antigravity', reason: 'usage-unknown' });
+      return;
+    }
+
+    if (best.remainingFraction < state.reserveFraction) {
+      const fallback = context.modelRegistry?.find?.(FALLBACK_PROVIDER, FALLBACK_MODEL);
+      if (!fallback) {
+        appendRoute(state, {
+          ...base,
+          action: 'keep-antigravity',
+          reason: 'fallback-unavailable',
+          remainingFraction: best.remainingFraction,
+        });
+        return;
+      }
+      const changed = await state.pi.setModel(fallback);
+      if (changed === false) {
+        appendRoute(state, {
+          ...base,
+          action: 'keep-antigravity',
+          reason: 'fallback-rejected',
+          remainingFraction: best.remainingFraction,
+        });
+        return;
+      }
+      state.pi.setThinkingLevel?.('high');
+      appendRoute(state, {
+        ...base,
+        action: 'fallback',
+        targetProvider: FALLBACK_PROVIDER,
+        targetModel: FALLBACK_MODEL,
+        remainingFraction: best.remainingFraction,
+      });
+      return;
+    }
+
+    appendRoute(state, {
+      ...base,
+      action: pinned ? 'pin-antigravity' : 'keep-antigravity',
+      reason: pinned ? undefined : 'pin-rejected',
+      credentialId: pinned ? best.account.credentialId : undefined,
+      remainingFraction: best.remainingFraction,
+    });
   } finally {
-    if (state.pending.get(id) === task) state.pending.delete(id);
+    // From this point onward OMP's per-request usage preflight is suppressed
+    // for this exact session. Hard-error/429 recovery uses a separate path.
+    state.settledSessions.add(id);
   }
 }
 
@@ -226,23 +234,31 @@ export function registerOmpAntigravitySessionRouter(
     pi,
     reserveFraction,
     settledSessions: new Set(),
-    pending: new Map(),
+    selections: new Map(),
     auth: undefined,
   };
   let activeState = state;
 
   const activate = (_event, context) => {
     const auth = context?.modelRegistry?.authStorage;
-    if (!auth) return;
+    if (!auth) return {};
     const active = installUsagePreflightGuard(auth, state);
     activeState = active;
     const id = sessionId(context);
     if (id && (hasConversation(context) || hasRouteEntry(context, id))) {
       active.settledSessions.add(id);
     }
+    return { active, id };
   };
 
-  pi.on('session_start', activate);
+  pi.on('session_start', async (event, context) => {
+    const { active, id } = activate(event, context);
+    if (active && id && !active.settledSessions.has(id)) {
+      // Title generation starts before before_agent_start. Pre-pin the chosen
+      // account now so OMP's title child session inherits the same credential.
+      await selectSessionAccount(active, id);
+    }
+  });
   pi.on('session_switch', activate);
   pi.on('session_branch', activate);
   pi.on('session_tree', activate);
