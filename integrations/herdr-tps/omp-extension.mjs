@@ -1,5 +1,6 @@
 import { HerdrMetadataPublisher } from './lib/herdr-metadata-publisher.mjs';
 import { LiveTpsReporter } from './lib/live-tps-reporter.mjs';
+import { registerOmpAntigravityRequestWorkaround } from './lib/omp-antigravity-request-workaround.mjs';
 import { registerOmpAntigravitySessionRouter } from './lib/omp-antigravity-session-router.mjs';
 import { registerOmpApiKeyObserver } from './lib/omp-api-key-observer.mjs';
 import { registerOmpApiKeyStickiness } from './lib/omp-api-key-stickiness.mjs';
@@ -298,6 +299,7 @@ export function createOmpMetadataPublisher(pi) {
 }
 
 export default function herdrTpsExtension(pi) {
+  registerOmpAntigravityRequestWorkaround(pi);
   registerOmpAntigravitySessionRouter(pi);
   // Selection observation is permanent collection infrastructure. The
   // stickiness wrapper is only a compatibility policy and can be disabled once
