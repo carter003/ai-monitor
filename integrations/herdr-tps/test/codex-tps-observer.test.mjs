@@ -87,6 +87,68 @@ for (const discovery of ['response', 'notification', 'read']) {
   }
 }
 
+for (const discovery of ['response', 'notification', 'read']) {
+  for (const activeTurn of [false, true]) {
+    for (const helperModel of ['gpt-5.6-luna', undefined]) {
+      test(
+        `ignores parentless thread-title helper via ${discovery} ${helperModel ? 'with' : 'without'} a model while the user is ${activeTurn ? 'working' : 'idle'}`,
+        async () => {
+          // Codex 0.156 names the conversation with a parentless helper thread.
+          const helper = {
+            id: 'title-helper',
+            parentThreadId: null,
+            threadSource: 'thread_title',
+            model: helperModel,
+          };
+          const { observer, events, client, server } = observerFixture(async () => helper);
+          client({ id: 1, method: 'thread/start', params: { model: 'gpt-6-astra' } });
+          observer.observeServerEvent({
+            id: 1,
+            result: {
+              thread: { id: 'user', parentThreadId: null, threadSource: 'user' },
+              model: 'gpt-6-astra',
+            },
+          });
+          if (activeTurn) server('turn/started', { threadId: 'user', turn: { id: 'user-turn' } });
+          const beforeHelper = events.slice();
+
+          if (discovery === 'response') {
+            client({ id: 2, method: 'thread/start', params: { model: helper.model } });
+            observer.observeServerEvent({
+              id: 2,
+              result: { thread: helper, model: helper.model },
+            });
+          } else if (discovery === 'notification') {
+            server('thread/started', { thread: helper });
+          }
+          server('turn/started', { threadId: helper.id, turn: { id: 'title-turn' } });
+          server('item/agentMessage/delta', {
+            threadId: helper.id,
+            turnId: 'title-turn',
+            itemId: 'hidden',
+            delta: 'hidden title output',
+          });
+          server('turn/completed', { threadId: helper.id, turn: { id: 'title-turn' } });
+          await nextMicrotasks();
+
+          assert.equal(observer.rootThreadId, 'user');
+          assert.equal(observer.model, 'gpt-6-astra');
+          assert.equal(observer.currentTurnId, activeTurn ? 'user-turn' : undefined);
+          assert.deepEqual(events, beforeHelper, 'title-helper output must not steal the user root');
+          if (!activeTurn) server('turn/started', { threadId: 'user', turn: { id: 'user-turn' } });
+          server('item/agentMessage/delta', {
+            threadId: 'user',
+            turnId: 'user-turn',
+            itemId: 'answer',
+            delta: 'visible output',
+          });
+          assert.deepEqual(events.at(-1), ['delta', 'user-turn']);
+        },
+      );
+    }
+  }
+}
+
 test('still accepts ephemeral user threads', () => {
   const { observer, server } = observerFixture();
   server('thread/started', {

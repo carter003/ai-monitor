@@ -275,6 +275,9 @@ export class CodexTpsObserver {
       thread.parentThreadId != null ||
       // Internal system threads can be parentless too; they never own the TUI model.
       thread.threadSource === 'system' ||
+      // Codex 0.156 creates a parentless helper thread to name the conversation.
+      // It is not the TUI root and must not replace its model or output stream.
+      thread.threadSource === 'thread_title' ||
       (typeof thread.source === 'object' && thread.source?.subAgent) ||
       sequence < this.activeSequence
     ) {

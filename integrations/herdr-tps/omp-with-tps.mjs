@@ -43,6 +43,48 @@ function childPath(binary) {
   }
 }
 
+// Pane identity a nested agent must never see or report as. Mirrors the
+// runtime env herdr scrubs before spawning plugins.
+const NESTED_STRIPPED_ENV = [
+  'HERDR_ENV',
+  'HERDR_SOCKET_PATH',
+  'HERDR_CLIENT_SOCKET_PATH',
+  'HERDR_SESSION',
+  'HERDR_PANE_ID',
+  'HERDR_TAB_ID',
+  'HERDR_WORKSPACE_ID',
+  'HERDR_BIN_PATH',
+];
+
+function childEnvironment(binary) {
+  const env = {
+    ...process.env,
+    PATH: childPath(binary),
+  };
+  // OMPCODE marks an OMP-spawned shell; NESTED marks a wrapper that already
+  // detected nesting; TOPLEVEL catches an `omp` OMP spawns directly from a
+  // wrapper-launched parent (no shell, so no OMPCODE) — it inherits TOPLEVEL
+  // and is therefore not this pane's root agent either.
+  const nestedOmp =
+    process.env.OMPCODE === '1' ||
+    process.env.HERDR_TPS_OMP_NESTED === '1' ||
+    process.env.HERDR_TPS_OMP_TOPLEVEL === '1';
+  if (nestedOmp) {
+    env.HERDR_TPS_OMP_NESTED = '1';
+    // The child is no longer the pane's top-level agent; NESTED now carries
+    // that fact to any process it spawns.
+    delete env.HERDR_TPS_OMP_TOPLEVEL;
+    // Strip the pane identity the nested agent must not report as, mirroring
+    // the runtime env herdr scrubs for plugins.
+    for (const name of NESTED_STRIPPED_ENV) {
+      delete env[name];
+    }
+  } else {
+    env.HERDR_TPS_OMP_TOPLEVEL = '1';
+  }
+  return env;
+}
+
 if (
   !existsSync(ompBinary) ||
   realpathSync(ompBinary) === realpathSync(fileURLToPath(import.meta.url))
@@ -79,10 +121,7 @@ if (
 
 const child = spawn(ompBinary, ['--extension', extensionPath, ...args], {
   stdio: 'inherit',
-  env: {
-    ...process.env,
-    PATH: childPath(ompBinary),
-  },
+  env: childEnvironment(ompBinary),
 });
 
 child.once('error', (error) => {

@@ -123,7 +123,8 @@ rows = [
 
 - `parentThreadId != null` 的子代理；
 - `source.subAgent` 标识的子代理；
-- `threadSource === "system"` 的内部系统会话。
+- `threadSource === "system"` 的内部系统会话；
+- `threadSource === "thread_title"` 的命名 helper 会话（Codex 0.156 起无父会话）。
 
 **没有父会话不等于用户会话。** 系统会话可能同时是 `parentThreadId: null`、
 `source: "vscode"`、`ephemeral: true`，仍必须排除。不要按 `ephemeral` 过滤，临时用户会话也合法。
@@ -318,7 +319,7 @@ Codex 应同时存在 Node wrapper、`app-server --listen ws://127.0.0.1:...` �
 
 | 症状 | 优先核对 |
 | --- | --- |
-| 模型起初正确，随后变为 Luna | 是否误接纳 `threadSource: "system"`；进程是否已加载修复 |
+| 模型起初正确，随后变为 Luna 或消失 | 是否误接纳 `threadSource: "system"` / `"thread_title"`；进程是否已加载修复 |
 | 模型错误且生成期间 TPS 为 0 | 活动 root ID、分类元数据和异步 thread/read；不能只看 publisher 心跳 |
 | TUI 换模型后标签不变 | `thread/settings/updated`、collaboration 模型优先级、当前 turn 的 reroute |
 | TPS 为 0，但模型正确 | 是否确有可见回答/推理 delta；idle、工具执行、未公开推理时为 0 合理 |
@@ -375,7 +376,7 @@ git diff --check
 
 | 改动面 | 必须保留的回归 |
 | --- | --- |
-| Codex 会话/模型 | 不同 ID 的占位与活动 root；system、subagent 隔离；response/notification/read；早到模型、迟到响应、关闭清理；用户 delta 仍能产生非零 TPS |
+| Codex 会话/模型 | 不同 ID 的占位与活动 root；system、thread_title、subagent 隔离；response/notification/read；早到模型、迟到响应、关闭清理；用户 delta 仍能产生非零 TPS |
 | OMP | 无界面子代理不发布；profile 恢复；原生 tokenizer、工具参数 delta、上游速率 trace、小数和 usage 校正；shutdown |
 | 采样/显示 | 多 stream、token 边界、停顿、新 generation、平滑、短响应 hold、新输出取消归零 |
 | Publisher | 唯一 source、guard、队列合并/过期、TTL 覆盖心跳、错误收敛、退出清理 |

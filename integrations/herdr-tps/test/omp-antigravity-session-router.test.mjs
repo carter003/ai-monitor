@@ -23,6 +23,7 @@ function fixture({ remaining = [0.2, 0.1], existing = false, modelProvider = 'go
   const thinking = [];
   const activeCredentials = new Map();
   let healthCalls = 0;
+  let usageFetches = 0;
   const accounts = [
     { credentialId: 7, email: 'a@example.test', projectId: 'project-a' },
     { credentialId: 11, email: 'b@example.test', projectId: 'project-b' },
@@ -33,10 +34,13 @@ function fixture({ remaining = [0.2, 0.1], existing = false, modelProvider = 'go
       active: activeCredentials.get(session) === account.credentialId,
     })),
     listCredentialBlocks: () => [],
-    fetchUsageReports: async () => [
-      report(accounts[0].email, accounts[0].projectId, remaining[0]),
-      report(accounts[1].email, accounts[1].projectId, remaining[1]),
-    ],
+    fetchUsageReports: async () => {
+      usageFetches += 1;
+      return [
+        report(accounts[0].email, accounts[0].projectId, remaining[0]),
+        report(accounts[1].email, accounts[1].projectId, remaining[1]),
+      ];
+    },
     pinSessionOAuthAccount: (...args) => {
       pinned.push(args);
       activeCredentials.set(args[1], args[2]);
@@ -81,6 +85,7 @@ function fixture({ remaining = [0.2, 0.1], existing = false, modelProvider = 'go
     modelChanges,
     thinking,
     started,
+    usageFetches: () => usageFetches,
     healthCalls: () => healthCalls,
   };
 }
@@ -100,7 +105,7 @@ test('pins the Antigravity account with the most Gemini 5h quota once', async ()
   assert.equal(f.healthCalls(), 0);
 });
 test('preselects the highest-quota account before title generation starts', async () => {
-  const f = fixture({ remaining: [0.2, 0.4], modelProvider: 'openai-codex' });
+  const f = fixture({ remaining: [0.2, 0.4] });
   await f.started;
 
   const active = f.auth
@@ -150,9 +155,15 @@ test('never reroutes an existing conversation and suppresses its proactive prefl
   assert.equal(f.healthCalls(), 0);
 });
 
-test('preselects Antigravity without rerouting a session using another provider', async () => {
+test('does not preselect Antigravity for a non-Antigravity startup', async () => {
   const f = fixture({ modelProvider: 'openai-codex' });
+  await f.started;
+  assert.equal(f.usageFetches(), 0);
+  assert.deepEqual(f.pinned, []);
+
+  f.context.model = { provider: 'google-antigravity', id: 'gemini-3.8-flash' };
   await f.handlers.get('before_agent_start')({}, f.context);
+  assert.equal(f.usageFetches(), 1);
   assert.deepEqual(f.pinned, [['google-antigravity', 'session-1', 7]]);
   assert.deepEqual(f.modelChanges, []);
   assert.deepEqual(

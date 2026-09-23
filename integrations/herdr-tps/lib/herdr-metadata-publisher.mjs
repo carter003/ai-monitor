@@ -13,6 +13,11 @@ function requestId(source) {
 
 export const DEFAULT_METADATA_TIMEOUT_MS = 2_000;
 const HERDR_TPS_METADATA_SOURCE = 'herdr:tps';
+const NESTED_OMP_MARKERS = ['OMPCODE', 'HERDR_TPS_OMP_NESTED'];
+
+function isNestedOmpProcess() {
+  return NESTED_OMP_MARKERS.some((name) => process.env[name] === '1');
+}
 
 // OMP renders the working-row rate with one decimal (`rate.toFixed(1)`); match
 // that precision so the herdr agents bar reads the same value.
@@ -58,7 +63,12 @@ export class HerdrMetadataPublisher {
   }
 
   get enabled() {
-    return process.env.HERDR_ENV === '1' && Boolean(this.paneId && this.socketPath);
+    const nestedOmp = isNestedOmpProcess() && this.agent === 'omp';
+    return (
+      process.env.HERDR_ENV === '1' &&
+      Boolean(this.paneId && this.socketPath) &&
+      !nestedOmp
+    );
   }
 
   publishModel(model, ttlMs) {

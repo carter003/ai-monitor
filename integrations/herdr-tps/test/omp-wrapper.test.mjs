@@ -18,6 +18,9 @@ test('OMP wrapper injects TPS, restores profiles, and isolates its update target
     XDG_STATE_HOME: '',
     HERDR_TPS_OMP_BIN: fakeOmp,
     HERDR_TPS_TEST_ARGUMENTS: observedArguments,
+    OMPCODE: '',
+    HERDR_TPS_OMP_TOPLEVEL: '',
+    HERDR_TPS_OMP_NESTED: '',
   };
 
   await writeFile(
@@ -27,6 +30,17 @@ import { writeFileSync } from 'node:fs';
 writeFileSync(process.env.HERDR_TPS_TEST_ARGUMENTS, JSON.stringify({
   args: process.argv.slice(2),
   path: process.env.PATH,
+  env: {
+    HERDR_ENV: process.env.HERDR_ENV,
+    HERDR_PANE_ID: process.env.HERDR_PANE_ID,
+    HERDR_SOCKET_PATH: process.env.HERDR_SOCKET_PATH,
+    HERDR_SESSION: process.env.HERDR_SESSION,
+    HERDR_TAB_ID: process.env.HERDR_TAB_ID,
+    HERDR_WORKSPACE_ID: process.env.HERDR_WORKSPACE_ID,
+    HERDR_BIN_PATH: process.env.HERDR_BIN_PATH,
+    HERDR_TPS_OMP_TOPLEVEL: process.env.HERDR_TPS_OMP_TOPLEVEL,
+    HERDR_TPS_OMP_NESTED: process.env.HERDR_TPS_OMP_NESTED,
+  },
 }));
 `,
     'utf8',
@@ -48,6 +62,8 @@ writeFileSync(process.env.HERDR_TPS_TEST_ARGUMENTS, JSON.stringify({
     assert.equal(args[1], fileURLToPath(new URL('../omp-extension.mjs', import.meta.url)));
     assert.deepEqual(args.slice(2), ['--profile=pro2', `--resume=${restoredSession}`]);
     assert.equal(observed.path.split(path.delimiter)[0], directory);
+    assert.equal(observed.env.HERDR_TPS_OMP_TOPLEVEL, '1');
+    assert.notEqual(observed.env.HERDR_TPS_OMP_NESTED, '1');
     assert.equal(
       await realpath(path.join(configRoot, 'profiles/pro2/run/daemons')),
       await realpath(path.join(configRoot, 'run/daemons')),
@@ -67,6 +83,33 @@ writeFileSync(process.env.HERDR_TPS_TEST_ARGUMENTS, JSON.stringify({
       '--profile=pro2',
       '--resume=/tmp/pro2-session.jsonl',
     ]);
+
+    // Each nesting marker must classify the child alone: OMPCODE marks an
+    // OMP-spawned shell, TOPLEVEL a parent launched by this wrapper, NESTED an
+    // already-nested wrapper.
+    const paneIdentity = {
+      HERDR_ENV: '1',
+      HERDR_SOCKET_PATH: '/tmp/herdr.sock',
+      HERDR_CLIENT_SOCKET_PATH: '/tmp/herdr-client.sock',
+      HERDR_SESSION: 'work',
+      HERDR_PANE_ID: 'pane-1',
+      HERDR_TAB_ID: 'w8:t6',
+      HERDR_WORKSPACE_ID: 'w8',
+      HERDR_BIN_PATH: '/home/user/.local/bin/herdr',
+    };
+    for (const marker of ['OMPCODE', 'HERDR_TPS_OMP_TOPLEVEL', 'HERDR_TPS_OMP_NESTED']) {
+      const result = spawnSync(process.execPath, [wrapper], {
+        encoding: 'utf8',
+        env: { ...isolatedEnv, [marker]: '1', ...paneIdentity },
+      });
+      assert.equal(result.status, 0, result.stderr);
+      const nested = JSON.parse(await readFile(observedArguments, 'utf8'));
+      assert.equal(nested.env.HERDR_TPS_OMP_NESTED, '1', `${marker} must mark the child nested`);
+      assert.notEqual(nested.env.HERDR_TPS_OMP_TOPLEVEL, '1');
+      for (const name of Object.keys(paneIdentity)) {
+        assert.equal(nested.env[name], undefined, `${marker} must scrub ${name}`);
+      }
+    }
   } finally {
     await rm(directory, { recursive: true });
   }

@@ -55,6 +55,73 @@ test('sends a pane.report_metadata request with a compact numeric speed', async 
   }
 });
 
+// OMPCODE marks a shell OMP spawned; HERDR_TPS_OMP_NESTED marks a wrapper that
+// already detected nesting. Both are set by different paths, so each must
+// suppress publishing on its own.
+for (const marker of ['OMPCODE', 'HERDR_TPS_OMP_NESTED']) {
+  test(`does not publish metadata from an OMP process nested via ${marker}`, async () => {
+    const previous = {
+      HERDR_ENV: process.env.HERDR_ENV,
+      OMPCODE: process.env.OMPCODE,
+      HERDR_TPS_OMP_NESTED: process.env.HERDR_TPS_OMP_NESTED,
+    };
+    process.env.HERDR_ENV = '1';
+    delete process.env.OMPCODE;
+    delete process.env.HERDR_TPS_OMP_NESTED;
+    process.env[marker] = '1';
+    try {
+      const requests = [];
+      const publisher = new HerdrMetadataPublisher({
+        paneId: 'pane-1',
+        socketPath: '/unused/test.sock',
+        agent: 'omp',
+      });
+      publisher.send = async (request) => requests.push(request);
+
+      assert.equal(publisher.enabled, false);
+      assert.equal(await publisher.publishRate(12, 2_000), undefined);
+      assert.equal(requests.length, 0);
+    } finally {
+      for (const [name, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+}
+
+test('nesting markers do not suppress a non-OMP agent', async () => {
+  const previous = {
+    HERDR_ENV: process.env.HERDR_ENV,
+    OMPCODE: process.env.OMPCODE,
+    HERDR_TPS_OMP_NESTED: process.env.HERDR_TPS_OMP_NESTED,
+  };
+  process.env.HERDR_ENV = '1';
+  process.env.OMPCODE = '1';
+  delete process.env.HERDR_TPS_OMP_NESTED;
+  try {
+    const requests = [];
+    const publisher = new HerdrMetadataPublisher({
+      paneId: 'pane-1',
+      socketPath: '/unused/test.sock',
+      agent: 'codex',
+    });
+    publisher.send = async (request) => {
+      requests.push(request);
+      return true;
+    };
+
+    assert.equal(publisher.enabled, true);
+    await publisher.publishRate(12, 2_000);
+    assert.equal(requests.length, 1);
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
 test('clears legacy sources before claiming canonical model and rate tokens', async () => {
   const previousHerdrEnv = process.env.HERDR_ENV;
   process.env.HERDR_ENV = '1';
@@ -144,6 +211,8 @@ test('surfaces Herdr API errors without breaking the publisher queue', async () 
 
 test('keeps the canonical source when publishing a guarded OMP display name', async () => {
   const previousHerdrEnv = process.env.HERDR_ENV;
+  const previousOmpCode = process.env.OMPCODE;
+  delete process.env.OMPCODE;
   process.env.HERDR_ENV = '1';
   try {
     const requests = [];
@@ -171,11 +240,15 @@ test('keeps the canonical source when publishing a guarded OMP display name', as
     } else {
       process.env.HERDR_ENV = previousHerdrEnv;
     }
+    if (previousOmpCode === undefined) delete process.env.OMPCODE;
+    else process.env.OMPCODE = previousOmpCode;
   }
 });
 
 test('publishes one guarded heartbeat snapshot for idle OMP metadata', async () => {
   const previousHerdrEnv = process.env.HERDR_ENV;
+  const previousOmpCode = process.env.OMPCODE;
+  delete process.env.OMPCODE;
   process.env.HERDR_ENV = '1';
   try {
     const requests = [];
@@ -203,6 +276,8 @@ test('publishes one guarded heartbeat snapshot for idle OMP metadata', async () 
     } else {
       process.env.HERDR_ENV = previousHerdrEnv;
     }
+    if (previousOmpCode === undefined) delete process.env.OMPCODE;
+    else process.env.OMPCODE = previousOmpCode;
   }
 });
 

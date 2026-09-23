@@ -35,9 +35,14 @@ Codex 从首个 delta 开始计时，最短观测 500ms 即可显示短输出的
 在最后一个 delta 处结束当前采样片段并保留速度，后续输出开启新片段，避免把工具等待时间计入生成耗时。
 `0` 表示尚无足够的有效采样或采样已重置；等待期间的非零值表示最近一次输出速度。
 
-Codex 只展示当前用户主会话，排除子代理与 `threadSource: "system"` 的内部系统会话。
-系统会话也可能没有父会话；旧扩展因此可能在启动后把正确模型覆盖成 Luna。更新此修复后，
+Codex 只展示当前用户主会话，排除子代理、`threadSource: "system"` 的内部系统会话，
+以及 `threadSource: "thread_title"` 的命名 helper 会话（Codex 0.156 起无父会话）。
+这两种会话都可能没有父会话；旧扩展因此可能在启动后把正确模型覆盖成 Luna
+或把 pane 的模型清空。更新此修复后，
 需退出并重新运行对应 Codex，运行中的 wrapper 不会热加载代码。
+嵌套 `omp`（OMP 自己 spawn 的 shell 或子 CLI）不再上报 pane 元数据：wrapper 会剥离
+`HERDR_ENV`、`HERDR_PANE_ID`、`HERDR_SOCKET_PATH` 以及 workspace/tab 等 pane 身份变量，
+并标记 `HERDR_TPS_OMP_NESTED=1`；扩展侧同时按 `OMPCODE` 判定，两条路径缺一不可。
 
 会话分类规则与验证边界见
 [维护指南：会话归属](./MAINTENANCE.md#会话归属)。

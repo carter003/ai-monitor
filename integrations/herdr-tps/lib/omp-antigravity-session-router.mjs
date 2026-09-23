@@ -253,7 +253,12 @@ export function registerOmpAntigravitySessionRouter(
 
   pi.on('session_start', async (event, context) => {
     const { active, id } = activate(event, context);
-    if (active && id && !active.settledSessions.has(id)) {
+    if (
+      active &&
+      id &&
+      isAntigravityGemini(context?.model) &&
+      !active.settledSessions.has(id)
+    ) {
       // Title generation starts before before_agent_start. Pre-pin the chosen
       // account now so OMP's title child session inherits the same credential.
       await selectSessionAccount(active, id);
