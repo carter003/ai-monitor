@@ -2,6 +2,24 @@ use super::*;
 use crate::model::{Bucketed, Card, FetchError, Meter, ModelUsage, Source, UsageTotal};
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 use std::time::{Duration, Instant};
+fn draw(
+    frame: &mut Frame,
+    system: &SystemStats,
+    states: &[SourceState],
+    usage: &UsageStats,
+    view: &mut View,
+    now: i64,
+) {
+    super::draw(
+        frame,
+        system,
+        states,
+        usage,
+        &crate::network::NetworkState::new(false, Duration::from_secs(10)),
+        view,
+        now,
+    );
+}
 
 fn buffer_text(buffer: &Buffer) -> String {
     (0..buffer.area.height)

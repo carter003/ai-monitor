@@ -256,7 +256,7 @@ async function main() {
   }
 
   const { LiveTpsReporter } = await import('./lib/live-tps-reporter.mjs');
-  reporter = new LiveTpsReporter({ publisher });
+  reporter = new LiveTpsReporter({ publisher, streamingOnly: true });
   const [upstreamPort, proxyPort] = await Promise.all([freePort(), freePort()]);
   const upstreamUrl = `ws://${host}:${upstreamPort}`;
   const proxyUrl = `ws://${host}:${proxyPort}`;

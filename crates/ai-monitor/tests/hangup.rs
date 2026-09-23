@@ -84,7 +84,8 @@ fn isolated_config(dir: &Path) -> PathBuf {
     fs::write(
         &config,
         format!(
-            "web_port = {port}\n\
+            "network_enabled = false\n\
+             web_port = {port}\n\
              codex_home = \"{}\"\n\
              agy_home = \"{}\"\n\
              agy2_home = \"{}\"\n\
@@ -126,6 +127,14 @@ fn start_ui(socket: &str, config: &Path, home: &Path, binary: &Path) -> i32 {
             "30",
             binary.to_str().expect("utf-8 binary path"),
         ])
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                home.join("bin").display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
         .env("AI_MONITOR_CONFIG", config)
         .env("HOME", home)
         .env_remove("CODEX_HOME")
@@ -308,6 +317,76 @@ fn signals_and_quit_keys_close_the_web_even_with_an_unfinished_request() {
         }
         assert_web_closed(dir.path());
         println!("{action}: UI exited and web port released");
+        teardown(&socket);
+    }
+}
+
+#[test]
+fn unfinished_network_children_end_with_ui() {
+    use std::os::unix::fs::PermissionsExt;
+    if !tmux_or_skip() {
+        return;
+    }
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_ai-monitor"));
+    for action in ["q", "SIGKILL", "hangup"] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = isolated_config(dir.path());
+        fs::write(
+            &config,
+            fs::read_to_string(&config)
+                .unwrap()
+                .replace("network_enabled = false", "network_enabled = true"),
+        )
+        .unwrap();
+        fs::create_dir(dir.path().join("bin")).unwrap();
+        let curl = dir.path().join("bin/curl");
+        // An exec keeps the fake curl as a single child, just like real curl.
+        fs::write(
+            &curl,
+            "#!/bin/sh\necho $$ >> \"$HOME/probe-pids\"\nexec /bin/sleep 30\n",
+        )
+        .unwrap();
+        fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
+        let socket = format!("ai-monitor-test-network-{action}");
+        let pid = start_ui(&socket, &config, dir.path(), &binary);
+        let pids: Vec<u32> = fs::read_to_string(dir.path().join("probe-pids"))
+            .expect("curl started immediately")
+            .lines()
+            .map(|s| s.parse().unwrap())
+            .collect();
+        assert_eq!(pids.len(), 4, "exactly one in-flight probe per route");
+        match action {
+            "q" => {
+                tmux(&socket, &["send-keys", "-t", "ui", "q"]);
+            }
+            "hangup" => {
+                tmux(&socket, &["kill-session", "-t", "ui"]);
+            }
+            _ => unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            },
+        }
+        if wait_gone(pid, &binary).is_err() {
+            kill_ui(pid);
+            teardown(&socket);
+            panic!("UI survived {action}");
+        }
+        for child in pids {
+            let started = Instant::now();
+            while fs::read_link(format!("/proc/{child}/exe")).is_ok() {
+                assert!(
+                    started.elapsed() < Duration::from_secs(2),
+                    "probe {child} survived {action}"
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+            if action == "q" {
+                assert!(
+                    !Path::new(&format!("/proc/{child}")).exists(),
+                    "normal exit must reap child"
+                );
+            }
+        }
         teardown(&socket);
     }
 }

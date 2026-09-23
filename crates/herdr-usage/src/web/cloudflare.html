@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cloudflare 资源用量看板 · AI Monitor</title>
+<link rel="stylesheet" href="/style.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<header>
+  <div>
+    <span class="eyebrow">AI MONITOR / CLOUDFLARE</span>
+    <h1>Cloudflare 资源用量与额度看板</h1>
+    <p>实时统计 Workers、D1 与 R2 在当前套餐周期内的用量消耗、占比与月度配额。</p>
+  </div>
+  <div class="status">
+    <span class="dot" id="status-dot"></span>
+    <span id="sync-status">本地缓存</span>
+    <button id="refresh" type="button" class="btn-refresh">🔄 强制刷新</button>
+    <small id="updated">正在连接…</small>
+  </div>
+</header>
+<nav aria-label="页面">
+  <a href="/">总览</a>
+  <a href="/hourly">小时用量</a>
+  <a href="/plans">套餐额度</a>
+  <a href="/requests">Request 追踪</a>
+  <a href="/query">每日查询</a>
+  <a href="/cloudflare" aria-current="page">Cloudflare</a>
+</nav>
+<main>
+  <div id="error" role="alert" hidden></div>
+  <div id="stale-banner" class="alert-banner" hidden></div>
+
+  <!-- 未配置引导 -->
+  <div id="unconfigured-guide" class="panel" hidden>
+    <div class="section-title">
+      <h2>未配置 Cloudflare 凭据</h2>
+    </div>
+    <p>请在配置文件 <code>~/.config/ai-monitor/config.toml</code> 中添加您的凭据以开启用量监控：</p>
+    <ul class="notes">
+      <li><code>cloudflare_account_id = "3aae92fbe9fdd0d6c7a6943be5d37a77"</code></li>
+      <li><code>cloudflare_api_token = "..."</code> (需具备 <code>Account Analytics: Read</code> 权限；若需自动读取账单起止日需 <code>Billing: Read</code>)</li>
+      <li><code>cloudflare_plan = "paid"</code> (默认 <code>paid</code>，支持 <code>free</code>)</li>
+      <li><code>cloudflare_billing_day = 11</code> (可选：自定义套餐每月账单重置日，例如 11 号重置)</li>
+    </ul>
+  </div>
+
+  <div id="cf-content">
+    <!-- 顶部计费周期英雄卡片 -->
+    <section class="cf-cycle-hero" aria-label="套餐计费周期">
+      <div class="cf-cycle-header">
+        <div class="cf-cycle-badge-group">
+          <span class="badge badge-primary" id="cf-plan-badge">Workers Paid Plan</span>
+          <span class="badge badge-outline" id="cf-cycle-type">套餐订阅周期</span>
+        </div>
+        <div class="cf-cycle-days">
+          <span class="days-num" id="cf-days-remaining">--</span>
+          <span class="days-label">天后重置</span>
+        </div>
+      </div>
+      <div class="cf-cycle-body">
+        <div class="cf-cycle-info">
+          <div>
+            <span class="meta-label">当前计费周期区间</span>
+            <strong class="meta-value" id="cf-cycle-range">-- 至 --</strong>
+          </div>
+          <div>
+            <span class="meta-label">周期时间进度</span>
+            <span class="meta-value" id="cf-cycle-progress-text">已过 -- 天 / 共 -- 天</span>
+          </div>
+        </div>
+        <div class="cf-timeline">
+          <div class="cf-timeline-bar" id="cf-cycle-progress-bar" style="width: 0%"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 核心指标板块 1: Cloudflare Workers -->
+    <section class="cf-section" aria-label="Workers 用量指标">
+      <div class="cf-section-title">
+        <div class="service-tag service-workers">⚡ Cloudflare Workers</div>
+        <span class="muted">含 1000 万次请求 与 3000 万毫秒（30,000 秒）CPU 基础配额</span>
+      </div>
+      <div class="cf-metrics-grid" id="cf-workers-cards"></div>
+    </section>
+
+    <!-- 核心指标板块 2: Cloudflare D1 数据库 -->
+    <section class="cf-section" aria-label="D1 用量指标">
+      <div class="cf-section-title">
+        <div class="service-tag service-d1">🗄️ Cloudflare D1 关系型数据库</div>
+        <span class="muted">含 250 亿行读（25B）、5000 万行写（50M）与 5 GB 存储容量</span>
+      </div>
+      <div class="cf-metrics-grid" id="cf-d1-cards"></div>
+    </section>
+
+    <!-- 核心指标板块 3: Cloudflare R2 对象存储 -->
+    <section class="cf-section" aria-label="R2 用量指标">
+      <div class="cf-section-title">
+        <div class="service-tag service-r2">📦 Cloudflare R2 对象存储</div>
+        <span class="muted">含 100 万次 Class A 操作、1000 万次 Class B 操作 与 10 GB 存储容量</span>
+      </div>
+      <div class="cf-metrics-grid" id="cf-r2-cards"></div>
+    </section>
+
+    <!-- 核心指标板块 4: Cloudflare Workers KV -->
+    <section class="cf-section" aria-label="Workers KV 用量指标">
+      <div class="cf-section-title">
+        <div class="service-tag service-kv">🔑 Cloudflare Workers KV 键值存储</div>
+        <span class="muted">含 1000 万次读取、100 万次写入/删除/列举 与 1 GB 存储容量</span>
+      </div>
+      <div class="cf-metrics-grid" id="cf-kv-cards"></div>
+    </section>
+
+    <!-- 核心指标板块 5: 可观测性与日志配额 -->
+    <section class="cf-section" aria-label="可观测性与日志监控">
+      <div class="cf-section-title">
+        <div class="service-tag service-observability">🔭 可观测性、分析引擎与系统限额</div>
+        <span class="muted">含 1000 万 Analytics Engine 数据点 与 调试/推送并发限额</span>
+      </div>
+      <div class="cf-metrics-grid" id="cf-observability-cards"></div>
+    </section>
+
+    <!-- 图表 1: 近 30 天日用量趋势 -->
+    <section class="panel" aria-label="近 30 天日用量趋势">
+      <div class="section-title">
+        <div>
+          <h2>近 30 天日用量趋势</h2>
+          <p class="muted">按日归档的历史变化</p>
+        </div>
+        <div class="cf-metric-selector">
+          <label for="cf-metric">查看指标：</label>
+          <select id="cf-metric">
+            <option value="workers_requests" selected>Workers 请求数 (次)</option>
+            <option value="workers_cpu_time_us">Workers CPU 耗时 (秒)</option>
+            <option value="d1_rows_read">D1 读行数 (行)</option>
+            <option value="d1_rows_written">D1 写行数 (行)</option>
+            <option value="r2_operations">R2 操作数 (次)</option>
+          </select>
+        </div>
+      </div>
+      <div id="cf-chart" class="chart-host"></div>
+    </section>
+
+    <!-- 表格: 历史按月汇总表 -->
+    <section class="panel" aria-label="历史按月用量明细">
+      <div class="section-title">
+        <div>
+          <h2>历史月份汇总明细</h2>
+          <p class="muted">持久化保存在本地 SQLite 数据库中的各月统计</p>
+        </div>
+      </div>
+      <div id="monthly-history" class="table-wrap"></div>
+    </section>
+  </div>
+
+  <footer>
+    统计数据由本地 ai-monitor 通过 Cloudflare Subscriptions REST API 与 GraphQL Analytics API 采集并持久化至本地 SQLite。支持通过 <code>cloudflare_billing_day</code> 配置每月重置锚定日。
+  </footer>
+</main>
+</body>
+</html>

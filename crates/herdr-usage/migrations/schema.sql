@@ -76,3 +76,36 @@ CREATE TABLE IF NOT EXISTS unresolved_model(
   PRIMARY KEY(source, raw_model));
 
 CREATE INDEX IF NOT EXISTS idx_unresolved_recent ON unresolved_model(last_seen);
+
+CREATE TABLE IF NOT EXISTS usage_hourly (
+  day          TEXT NOT NULL,    -- 本地日期 'YYYY-MM-DD'
+  hour         INTEGER NOT NULL, -- 本地小时 0..23
+  model        TEXT NOT NULL DEFAULT '', -- 模型 ID，'' 代表该小时全模型汇总
+  input_total  INTEGER NOT NULL,
+  output_total INTEGER NOT NULL,
+  tokens       INTEGER NOT NULL,
+  cache_read   INTEGER NOT NULL,
+  cost_usd     REAL,
+  events       INTEGER NOT NULL,
+  PRIMARY KEY(day, hour, model)
+);
+
+CREATE INDEX IF NOT EXISTS idx_hourly_day ON usage_hourly(day);
+
+CREATE TABLE IF NOT EXISTS cf_daily_usage(
+  account_id   TEXT NOT NULL,
+  date         TEXT NOT NULL, -- YYYY-MM-DD
+  service      TEXT NOT NULL, -- workers | d1 | r2
+  metric       TEXT NOT NULL, -- requests | cpu_time_us | errors | rows_read | rows_written | operations
+  value        REAL NOT NULL,
+  updated_at   INTEGER NOT NULL,
+  PRIMARY KEY(account_id, date, service, metric)) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS idx_cf_daily_account_date ON cf_daily_usage(account_id, date);
+
+CREATE TABLE IF NOT EXISTS cf_sync_state(
+  account_id           TEXT PRIMARY KEY,
+  period_start         TEXT NOT NULL,
+  period_end           TEXT NOT NULL,
+  last_synced_at       INTEGER NOT NULL,
+  cached_summary_json  TEXT NOT NULL);

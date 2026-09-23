@@ -12,6 +12,7 @@ use ratatui::{
     },
 };
 
+mod network;
 mod quota;
 mod resources;
 #[cfg(test)]
@@ -77,6 +78,7 @@ pub fn draw(
     system: &SystemStats,
     states: &[SourceState],
     usage: &UsageStats,
+    network: &crate::network::NetworkState,
     view: &mut View,
     now: i64,
 ) {
@@ -104,12 +106,39 @@ pub fn draw(
         Constraint::Min(0),
     ])
     .split(body);
-    let system_height = resources::height(body.height, columns[0].width, system.cores.len());
-    let sidebar =
-        Layout::vertical([Constraint::Length(system_height), Constraint::Min(0)]).split(columns[0]);
+    let network_rows = if network.enabled {
+        network::lines(
+            network,
+            columns[0].width.saturating_sub(2),
+            std::time::Instant::now(),
+        )
+    } else {
+        vec![]
+    };
+    let network_height = if network.enabled {
+        network_rows.len() as u16 + 2
+    } else {
+        0
+    };
+    let fixed_network = network.enabled && body.height >= 12 + 8 + network_height;
+    let reserved = if fixed_network { network_height } else { 0 };
+    let system_height = resources::height(
+        body.height.saturating_sub(reserved),
+        columns[0].width,
+        system.cores.len(),
+    );
+    let sidebar = Layout::vertical([
+        Constraint::Length(system_height),
+        Constraint::Length(reserved),
+        Constraint::Min(0),
+    ])
+    .split(columns[0]);
     draw_system(frame, sidebar[0], system);
-
-    let quota_area = sidebar[1];
+    if fixed_network {
+        let inner = panel(frame, sidebar[1], " AI 线路 ");
+        frame.render_widget(Paragraph::new(network_rows.clone()), inner);
+    }
+    let quota_area = sidebar[2];
     let token_area = columns[1];
     let quota_inner = quota::panel(frame, quota_area, states, now);
     // Only the model ranking is rolling 24H. The charts and summary identify
@@ -118,7 +147,13 @@ pub fn draw(
     let (token_parts, charts_drawn) = token_rects(token_inner, usage);
     let token_top = token_parts[0];
 
-    let quota = quota_panel_lines(states, quota_inner, now);
+    let mut quota = vec![];
+    if network.enabled && !fixed_network {
+        quota.push(Line::styled("AI 线路", Style::default().fg(CYAN)));
+        quota.extend(network_rows);
+        quota.push(Line::raw(""));
+    }
+    quota.extend(quota_panel_lines(states, quota_inner, now));
     let token = token_panel_lines(usage, token_top);
     let quota_max = quota.len().saturating_sub(quota_inner.height as usize);
     let token_max = token.len().saturating_sub(token_top.height as usize);

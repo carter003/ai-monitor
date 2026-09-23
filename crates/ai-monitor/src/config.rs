@@ -1,13 +1,15 @@
+use chrono::NaiveDate;
 use std::{
     env, fs,
     path::{Path, PathBuf},
     time::Duration,
 };
-use chrono::NaiveDate;
 /// 配置文件里出现的键。声明为常量而不是结构体字段：解析器是手写的平面
 /// reader（见 `parse_config`），这个表既驱动解析也充当未知键守卫。
-const KEYS: [&str; 11] = [
+const KEYS: [&str; 17] = [
     "refresh_seconds",
+    "network_enabled",
+    "network_interval_seconds",
     "codex_home",
     "agy_home",
     "agy2_home",
@@ -18,11 +20,17 @@ const KEYS: [&str; 11] = [
     "usage_db",
     "usage_start",
     "web_port",
+    "cloudflare_account_id",
+    "cloudflare_api_token",
+    "cloudflare_plan",
+    "cloudflare_billing_day",
 ];
 
 #[derive(Default)]
 struct FileConfig {
     refresh_seconds: Option<u64>,
+    network_enabled: Option<bool>,
+    network_interval_seconds: Option<u64>,
     web_port: Option<u16>,
     codex_home: Option<String>,
     agy_home: Option<String>,
@@ -34,6 +42,10 @@ struct FileConfig {
     usage_db: Option<String>,
     /// YYYY-MM-DD，本地消耗累计天数的起始自然日（含）。
     usage_start: Option<String>,
+    cloudflare_account_id: Option<String>,
+    cloudflare_api_token: Option<String>,
+    cloudflare_plan: Option<String>,
+    cloudflare_billing_day: Option<u8>,
 }
 
 /// 解析扁平的 `key = value` 配置。值是带引号字符串或无符号整数；注释
@@ -59,6 +71,23 @@ fn parse_config(text: &str) -> Result<FileConfig, String> {
             .unwrap_or(value);
         let is_quoted = unquoted.len() != value.len();
         match key {
+            "network_enabled" => {
+                config.network_enabled = Some(
+                    value
+                        .parse()
+                        .map_err(|_| "network_enabled 必须是 true 或 false")?,
+                )
+            }
+            "network_interval_seconds" => {
+                let seconds = value
+                    .parse()
+                    .map_err(|_| "network_interval_seconds 必须是整数")?;
+                if !(5..=300).contains(&seconds) {
+                    return Err("network_interval_seconds 必须在 5 到 300 之间".into());
+                }
+                config.network_interval_seconds = Some(seconds);
+            }
+
             "web_port" => {
                 config.web_port = Some(
                     unquoted
@@ -72,6 +101,15 @@ fn parse_config(text: &str) -> Result<FileConfig, String> {
                         format!("refresh_seconds 必须是无符号整数，当前为 {}", value)
                     })?);
             }
+            "cloudflare_billing_day" => {
+                let day = unquoted
+                    .parse::<u8>()
+                    .map_err(|_| "cloudflare_billing_day 必须是 1 到 31 之间的整数")?;
+                if !(1..=31).contains(&day) {
+                    return Err("cloudflare_billing_day 必须在 1 到 31 之间".into());
+                }
+                config.cloudflare_billing_day = Some(day);
+            }
             _ if is_quoted => match key {
                 "openrouter_key_file" => config.openrouter_key_file = Some(unquoted.to_owned()),
                 "go2_key_file" => config.go2_key_file = Some(unquoted.to_owned()),
@@ -82,6 +120,9 @@ fn parse_config(text: &str) -> Result<FileConfig, String> {
                 "grok_home" => config.grok_home = Some(unquoted.to_owned()),
                 "usage_db" => config.usage_db = Some(unquoted.to_owned()),
                 "usage_start" => config.usage_start = Some(unquoted.to_owned()),
+                "cloudflare_account_id" => config.cloudflare_account_id = Some(unquoted.to_owned()),
+                "cloudflare_api_token" => config.cloudflare_api_token = Some(unquoted.to_owned()),
+                "cloudflare_plan" => config.cloudflare_plan = Some(unquoted.to_owned()),
                 _ => unreachable!("KEYS 与 match 分支一一对应"),
             },
             _ => return Err(format!("{} 的值必须是带引号的字符串", key)),
@@ -93,6 +134,8 @@ fn parse_config(text: &str) -> Result<FileConfig, String> {
 #[derive(Clone)]
 pub struct Config {
     pub refresh: Duration,
+    pub network_enabled: bool,
+    pub network_interval: Duration,
     pub home: PathBuf,
     pub codex: PathBuf,
     pub agy: PathBuf,
@@ -107,6 +150,7 @@ pub struct Config {
     /// 本地消耗累计天数的起始自然日（含）。None 表示回退到查库最早记录。
     pub usage_start: Option<NaiveDate>,
     pub web_port: u16,
+    pub cloudflare: herdr_usage::cloudflare::CloudflareConfig,
 }
 
 impl Config {
@@ -135,6 +179,8 @@ impl Config {
         }
         Ok(Self {
             refresh: Duration::from_secs(seconds),
+            network_enabled: file.network_enabled.unwrap_or(true),
+            network_interval: Duration::from_secs(file.network_interval_seconds.unwrap_or(10)),
             web_port: file.web_port.unwrap_or(19999),
             codex: expand(
                 file.codex_home,
@@ -163,10 +209,20 @@ impl Config {
             ),
             go2_key: expand(file.go2_key_file, config_root.join("ai-monitor/go2.key")),
             usage_db: expand(file.usage_db, home.join(".local/share/herdr/usage.db")),
-            usage_start: file.usage_start.as_deref().map(|s| {
-                NaiveDate::parse_from_str(s, "%Y-%m-%d")
-                    .map_err(|_| format!("usage_start 格式错误，应为 YYYY-MM-DD：{}", s))
-            }).transpose()?,
+            usage_start: file
+                .usage_start
+                .as_deref()
+                .map(|s| {
+                    NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                        .map_err(|_| format!("usage_start 格式错误，应为 YYYY-MM-DD：{}", s))
+                })
+                .transpose()?,
+            cloudflare: herdr_usage::cloudflare::CloudflareConfig::from_env_or_config(
+                file.cloudflare_account_id,
+                file.cloudflare_api_token,
+                file.cloudflare_plan,
+                file.cloudflare_billing_day,
+            ),
             home,
         })
     }
@@ -209,11 +265,32 @@ grok_home = "/tmp/grok"
 openrouter_key_file = "/tmp/key"
 go2_key_file = "/tmp/go2.key"
 usage_db = "/tmp/usage.db"
+cloudflare_account_id = "test_acc"
+cloudflare_api_token = "test_token"
+cloudflare_plan = "paid"
+cloudflare_billing_day = 8
 "#;
         let parsed = parse_config(text).expect("all keys declared");
         assert_eq!(parsed.refresh_seconds, Some(120));
         assert_eq!(parsed.web_port, Some(8788));
         assert_eq!(parsed.usage_db.as_deref(), Some("/tmp/usage.db"));
+        assert_eq!(parsed.cloudflare_account_id.as_deref(), Some("test_acc"));
+        assert_eq!(parsed.cloudflare_api_token.as_deref(), Some("test_token"));
+        assert_eq!(parsed.cloudflare_plan.as_deref(), Some("paid"));
+        assert_eq!(parsed.cloudflare_billing_day, Some(8));
+    }
+
+    #[test]
+    fn cloudflare_config_resolves_env_or_config() {
+        let cfg = herdr_usage::cloudflare::CloudflareConfig::from_env_or_config(
+            Some("acc1".into()),
+            Some("tok1".into()),
+            Some("free".into()),
+            Some(8),
+        );
+        assert!(cfg.is_configured());
+        assert_eq!(cfg.plan, "free");
+        assert_eq!(cfg.billing_day, Some(8));
     }
 
     #[test]
@@ -249,5 +326,36 @@ usage_db = "/tmp/usage.db"
             assert!(parse_config(&format!("web_port = {port}")).is_err());
         }
         assert_eq!(parse_config("web_port = 0").unwrap().web_port, Some(0));
+    }
+}
+
+#[cfg(test)]
+mod network_tests {
+    use super::*;
+    #[test]
+    fn defaults_and_network_bounds() {
+        let old = parse_config("refresh_seconds = 60").unwrap();
+        assert!(old.network_enabled.unwrap_or(true));
+        assert_eq!(old.network_interval_seconds.unwrap_or(10), 10);
+        for seconds in [5, 10, 300] {
+            assert_eq!(
+                parse_config(&format!(
+                    "network_enabled = false\nnetwork_interval_seconds = {seconds}"
+                ))
+                .unwrap()
+                .network_interval_seconds,
+                Some(seconds)
+            );
+        }
+        for value in ["4", "301", "-1", "oops", "\"10\""] {
+            assert!(parse_config(&format!("network_interval_seconds = {value}")).is_err());
+        }
+        assert!(
+            !parse_config("network_enabled = false")
+                .unwrap()
+                .network_enabled
+                .unwrap()
+        );
+        assert!(parse_config("network_enabled = 1").is_err());
     }
 }

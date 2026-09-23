@@ -4,6 +4,8 @@ const number = value => new Intl.NumberFormat('zh-CN').format(value || 0);
 const isQuery = location.pathname === '/query';
 const isPlans = location.pathname === '/plans';
 const isRequests = location.pathname === '/requests';
+const isHourly = location.pathname === '/hourly';
+const isCloudflare = location.pathname === '/cloudflare';
 const initial = new URLSearchParams(location.search);
 const tokens = value => {
   value = value || 0;
@@ -14,6 +16,7 @@ const money = value => value == null ? '未计价' : '$' + value.toFixed(2);
 const modelName = model => model == null ? '未识别模型' : model;
 let reportLoaded = false;
 let report, page = 0, request = 0, controller;
+let hourlyReport = null, hourlyRequest = 0, hourlyController = null;
 const pageSize = 50;
 function node(tag, text, className) {
   const element = document.createElement(tag);
@@ -196,6 +199,15 @@ if (isRequests) {
   $('weeks').addEventListener('change',renderLineCharts);
   $('refresh').addEventListener('click',loadPlans);
   loadPlans();
+} else if (isHourly) {
+  $('hourly-month').addEventListener('change', () => loadHourly($('hourly-month').value));
+  $('hourly-metric').addEventListener('change', renderHourlyContent);
+  $('refresh').addEventListener('click', () => loadHourly($('hourly-month').value));
+  loadHourly(initial.get('month') || '');
+} else if (isCloudflare) {
+  $('refresh').addEventListener('click', () => loadCloudflare(true));
+  $('cf-metric').addEventListener('change', renderCloudflareChart);
+  loadCloudflare(false);
 } else {
   $('refresh').addEventListener('click',load);
   $('metric').addEventListener('change',renderChart);
@@ -475,4 +487,485 @@ function drawLineChart(host, series, metric, kind) {
     legend.append(item);
   }
   host.append(svg, legend);
+}
+
+// ---- Hourly token usage & monthly aggregation ------------------------------
+
+
+async function loadHourly(month) {
+  const current = ++hourlyRequest;
+  hourlyController?.abort();
+  hourlyController = new AbortController();
+  $('refresh').disabled = true;
+  $('updated').textContent = '正在更新…';
+  try {
+    const url = '/api/hourly' + (month ? '?month=' + encodeURIComponent(month) : '');
+    const response = await fetch(url, {signal: hourlyController.signal});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '查询失败');
+    if (current !== hourlyRequest) return;
+    hourlyReport = data;
+    $('error').hidden = true;
+
+    const monthSelect = $('hourly-month');
+    const existingMonths = [...monthSelect.options].map(o => o.value);
+    if (JSON.stringify(existingMonths) !== JSON.stringify(data.available_months)) {
+      monthSelect.replaceChildren();
+      for (const m of data.available_months) {
+        monthSelect.add(new Option(m, m));
+      }
+    }
+    monthSelect.value = data.month;
+
+    const currentParams = new URLSearchParams(location.search);
+    if (data.month) {
+      currentParams.set('month', data.month);
+    }
+    history.replaceState(null, '', '/hourly?' + currentParams.toString());
+
+    $('context').textContent = `按服务器本地时间统计 · 归档粒度：已闭合整点（不含进行中当前小时）`;
+    renderHourlyContent();
+    $('updated').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN');
+  } catch (error) {
+    if (current !== hourlyRequest || error.name === 'AbortError') return;
+    $('error').textContent = error.message + (hourlyReport ? '（下方保留上次成功查询的结果）' : '');
+    $('error').hidden = false;
+    $('updated').textContent = '更新失败';
+  } finally {
+    if (current === hourlyRequest) $('refresh').disabled = false;
+  }
+}
+
+function renderHourlyContent() {
+  if (!hourlyReport) return;
+  renderHourlySummary(hourlyReport);
+  renderDailyChartsList(hourlyReport);
+}
+
+function renderHourlySummary(report) {
+  const s = report.summary;
+  const totalEvents = report.days.reduce((acc, d) => acc + d.hours.reduce((ha, h) => ha + h.events, 0), 0);
+  const peakDesc = s.peak_tokens > 0
+    ? `${tokens(s.peak_tokens)} Token · 峰值小时`
+    : '当月暂无用量';
+  const peakVal = s.peak_tokens > 0
+    ? `${s.peak_day} ${String(s.peak_hour).padStart(2, '0')}:00`
+    : '—';
+
+  $('hourly-cards').replaceChildren(
+    card('当月总 Token', tokens(s.total_tokens), `${number(totalEvents)} 条用量记录`),
+    card('当月预估金额', money(s.total_cost), '已记录费用 · USD'),
+    card('月度峰值时段', peakVal, peakDesc),
+    card('活跃天数', `${s.active_days} 天`, `共 ${report.days.length} 个自然日`)
+  );
+}
+
+function renderDailyChartsList(report) {
+  const container = $('daily-charts');
+  container.replaceChildren();
+  if (!report.days.length) {
+    container.append(node('div', '所选月份暂无用量记录', 'empty'));
+    return;
+  }
+
+  const metric = $('hourly-metric').value; // 'tokens' or 'cost'
+  const maxVal = Math.max(1, ...report.days.flatMap(d => d.hours.map(h => metric === 'cost' ? (h.cost_usd || 0) : h.tokens)));
+
+  for (const day of report.days) {
+    const dayCard = node('div', null, 'day-chart-card');
+    const header = node('div', null, 'day-chart-header');
+    const title = node('div', null, 'day-chart-title');
+    title.append(
+      node('strong', day.day),
+      node('span', day.weekday, 'weekday')
+    );
+
+    const meta = node('div', null, 'day-chart-meta');
+    const dayCostStr = day.total_cost != null ? money(day.total_cost) : '$0.00';
+    meta.append(
+      node('span', 'Token: '),
+      node('b', tokens(day.total_tokens)),
+      node('span', '费用: '),
+      node('b', dayCostStr)
+    );
+
+    header.append(title, meta);
+    dayCard.append(header);
+
+    const barsContainer = node('div', null, 'hour-bars-container');
+    for (const h of day.hours) {
+      const col = node('div', null, 'hour-col');
+      const track = node('div', null, 'hour-bar-track');
+      const bar = node('div', null, 'hour-bar');
+
+      const val = metric === 'cost' ? (h.cost_usd || 0) : h.tokens;
+      const isZero = val <= 0;
+
+      if (isZero) {
+        bar.classList.add('zero');
+      } else {
+        const heightPercent = Math.max(4, Math.min(100, Math.round((val / maxVal) * 100)));
+        bar.style.height = `${heightPercent}%`;
+      }
+
+      if (h.closed) {
+        bar.classList.add('closed');
+      } else {
+        bar.classList.add('in-progress');
+      }
+
+      track.append(bar);
+
+      const tooltip = node('div', null, 'hour-tooltip');
+      const hourLabel = `${String(h.hour).padStart(2, '0')}:00 - ${String(h.hour).padStart(2, '0')}:59`;
+      const statusStr = h.closed ? '已闭合归档' : '进行中 / 未结束';
+      tooltip.innerHTML = `
+        <div style="font-weight:700;margin-bottom:4px">${day.day} ${hourLabel} <span style="opacity:0.75;font-size:10px">(${statusStr})</span></div>
+        <div>总 Token: <b>${tokens(h.tokens)}</b></div>
+        <div>输入: ${tokens(h.input)} (缓存命中 ${tokens(h.cache_read)})</div>
+        <div>输出: ${tokens(h.output)}</div>
+        <div>费用: <b>${money(h.cost_usd)}</b></div>
+        <div>请求数: <b>${number(h.events)}</b></div>
+      `;
+      col.append(track, tooltip);
+
+      const tick = node('span', String(h.hour).padStart(2, '0'), 'hour-tick');
+      col.append(tick);
+
+      barsContainer.append(col);
+    }
+
+    dayCard.append(barsContainer);
+    container.append(dayCard);
+  }
+}
+
+// ---- Cloudflare stats ----------------------------------------------------
+let cfReport = null;
+let cfRequest = 0;
+let cfController = null;
+
+async function loadCloudflare(force = false) {
+  const current = ++cfRequest;
+  cfController?.abort();
+  cfController = new AbortController();
+  $('refresh').disabled = true;
+  $('updated').textContent = force ? '正在远程拉取…' : '正在加载…';
+  $('error').hidden = true;
+
+  try {
+    const url = '/api/cloudflare' + (force ? '?refresh=1' : '');
+    const response = await fetch(url, { signal: cfController.signal });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '获取 Cloudflare 数据失败');
+    if (current !== cfRequest) return;
+    cfReport = data;
+    renderCloudflare(data);
+  } catch (err) {
+    if (err.name === 'AbortError') return;
+    $('error').hidden = false;
+    $('error').textContent = err.message;
+    $('updated').textContent = '加载失败';
+  } finally {
+    if (current === cfRequest) $('refresh').disabled = false;
+  }
+}
+
+function renderMetricCard(item, customFooter) {
+  const card = node('div', null, 'cf-metric-card');
+
+  // Header: Name + Badge
+  const head = node('div', null, 'cf-metric-head');
+  head.append(node('span', item.name, 'cf-metric-name'));
+  const badge = node('span', item.percent > 0 ? `${item.percent.toFixed(item.percent < 0.1 && item.percent > 0 ? 2 : 1)}%` : (item.quota > 0 ? '0%' : '正常'), `cf-badge ${item.status || 'normal'}`);
+  head.append(badge);
+  card.append(head);
+
+  // Main Value
+  const main = node('div', null, 'cf-metric-main');
+  main.append(
+    node('span', item.formatted_value, 'main-val'),
+    node('span', item.unit || '', 'main-unit')
+  );
+  card.append(main);
+
+  // Progress Bar
+  if (item.quota > 0) {
+    const meterWrap = node('div', null, 'cf-meter-wrap');
+    const meter = node('div', null, 'cf-meter');
+    const fill = node('div', null, `cf-meter-fill ${item.status || 'normal'}`);
+    fill.style.width = `${Math.min(100, Math.max(0, item.percent))}%`;
+    meter.append(fill);
+    meterWrap.append(meter);
+    card.append(meterWrap);
+  }
+
+  // Details Footer: 3 Essential Data Points (当前已用, Paid月配额, 周期剩余)
+  const details = node('div', null, 'cf-metric-details');
+  if (customFooter) {
+    for (const f of customFooter) {
+      const col = node('div', null, 'cf-detail-col');
+      col.append(
+        node('span', f.label, 'cf-detail-label'),
+        node('span', f.value, 'cf-detail-val')
+      );
+      details.append(col);
+    }
+  } else {
+    const col1 = node('div', null, 'cf-detail-col');
+    col1.append(
+      node('span', '当前已用量', 'cf-detail-label'),
+      node('span', `${item.formatted_value} ${item.unit}`, 'cf-detail-val')
+    );
+    const col2 = node('div', null, 'cf-detail-col');
+    col2.append(
+      node('span', 'Paid月度配额', 'cf-detail-label'),
+      node('span', `${item.formatted_quota} ${item.unit}`, 'cf-detail-val')
+    );
+    const col3 = node('div', null, 'cf-detail-col');
+    col3.append(
+      node('span', '周期剩余额度', 'cf-detail-label'),
+      node('span', `${item.formatted_remaining} ${item.unit}`, 'cf-detail-val')
+    );
+    details.append(col1, col2, col3);
+  }
+  card.append(details);
+
+  return card;
+}
+
+function renderCloudflare(data) {
+  if (!data.configured) {
+    $('status-dot').className = 'dot';
+    $('sync-status').textContent = '未配置';
+    $('updated').textContent = '等待配置';
+    $('unconfigured-guide').hidden = false;
+    $('cf-content').hidden = true;
+    return;
+  }
+
+  $('unconfigured-guide').hidden = true;
+  $('cf-content').hidden = false;
+
+  // Status and Stale banner
+  $('status-dot').className = data.stale ? 'dot warn' : 'dot';
+  $('sync-status').textContent = data.stale ? '缓存数据（网络重试中）' : '本地缓存';
+  if (data.synced_at) {
+    const syncDate = new Date(data.synced_at);
+    $('updated').textContent = `更新于 ${syncDate.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+  }
+  if (data.stale) {
+    $('stale-banner').hidden = false;
+    $('stale-banner').textContent = `数据远程拉取遇到异常：${data.error || '网络通信故障'}；已自动展示本地最近快照。`;
+  } else {
+    $('stale-banner').hidden = true;
+  }
+
+  // Top Billing Cycle Hero
+  const cycle = data.billing_cycle;
+  const isFree = (data.plan || '').toLowerCase() === 'free';
+  $('cf-plan-badge').textContent = isFree ? 'Workers Free Plan' : 'Workers Paid Plan ($5/mo)';
+  $('cf-cycle-type').textContent = cycle.cycle_type || (cycle.is_fallback ? '自然月周期' : '套餐订阅周期');
+  $('cf-days-remaining').textContent = cycle.days_remaining;
+  $('cf-cycle-range').textContent = `${cycle.start_date} 至 ${cycle.end_date}`;
+  $('cf-cycle-progress-text').textContent = `已过 ${cycle.elapsed_days} 天 / 共 ${cycle.total_days} 天 (${cycle.elapsed_percent.toFixed(1)}%)`;
+  $('cf-cycle-progress-bar').style.width = `${cycle.elapsed_percent.toFixed(1)}%`;
+
+  const curr = data.current_period;
+
+  // 1. Workers Grid
+  $('cf-workers-cards').replaceChildren(
+    renderMetricCard(curr.workers_requests),
+    renderMetricCard(curr.workers_cpu_time),
+    renderMetricCard(curr.workers_errors, [
+      { label: '错误次数', value: `${curr.workers_errors.formatted_value} 次` },
+      { label: '错误率占比', value: `${curr.workers_errors.percent.toFixed(2)}%` },
+      { label: '健康率', value: curr.workers_errors.formatted_remaining }
+    ])
+  );
+
+  // 2. D1 Grid
+  const d1QueryItem = {
+    name: 'D1 SQL 查询操作数',
+    value: (curr.d1_read_queries || 0) + (curr.d1_write_queries || 0),
+    quota: 0,
+    remaining: 0,
+    percent: 0,
+    formatted_value: number((curr.d1_read_queries || 0) + (curr.d1_write_queries || 0)),
+    unit: '次',
+    status: 'normal'
+  };
+  $('cf-d1-cards').replaceChildren(
+    renderMetricCard(curr.d1_rows_read),
+    renderMetricCard(curr.d1_rows_written),
+    renderMetricCard(curr.d1_storage, [
+      { label: '已存容量', value: curr.d1_storage.formatted_value },
+      { label: 'Paid包含配额', value: curr.d1_storage.formatted_quota },
+      { label: '数据库总数', value: `${curr.d1_databases_count || 0} 个 DB` }
+    ]),
+    renderMetricCard(d1QueryItem, [
+      { label: '总查询次数', value: `${number((curr.d1_read_queries || 0) + (curr.d1_write_queries || 0))} 次` },
+      { label: '读查询数', value: `${number(curr.d1_read_queries || 0)} 次` },
+      { label: '写查询数', value: `${number(curr.d1_write_queries || 0)} 次` }
+    ])
+  );
+
+  // 3. R2 Grid
+  $('cf-r2-cards').replaceChildren(
+    renderMetricCard(curr.r2_class_a_operations),
+    renderMetricCard(curr.r2_class_b_operations),
+    renderMetricCard(curr.r2_storage, [
+      { label: '已存容量', value: curr.r2_storage.formatted_value },
+      { label: '包含存储额度', value: curr.r2_storage.formatted_quota },
+      { label: '桶与对象数', value: `${curr.r2_buckets_count || 0} 桶 / ${curr.r2_objects_count || 0} 实体` }
+    ])
+  );
+
+  // 4. KV Grid
+  $('cf-kv-cards').replaceChildren(
+    renderMetricCard(curr.kv_read_operations),
+    renderMetricCard(curr.kv_write_operations),
+    renderMetricCard(curr.kv_storage, [
+      { label: '已存体积', value: curr.kv_storage.formatted_value },
+      { label: '包含存储额度', value: curr.kv_storage.formatted_quota },
+      { label: '命名空间数', value: `${curr.kv_namespaces_count || 0} 个` }
+    ])
+  );
+
+  // 5. Observability & Limits Grid
+  const subreqItem = {
+    name: '单请求子请求安全限额',
+    value: 50,
+    quota: 50,
+    percent: 0,
+    formatted_value: '50',
+    unit: '次 / 请求',
+    status: 'normal'
+  };
+  const tailItem = {
+    name: '实时日志追踪与外推限额',
+    value: 2,
+    quota: 2,
+    percent: 0,
+    formatted_value: '2 会话 / 4 作业',
+    unit: '',
+    status: 'normal'
+  };
+  $('cf-observability-cards').replaceChildren(
+    renderMetricCard(curr.observability_events),
+    renderMetricCard(curr.analytics_engine_points),
+    renderMetricCard(subreqItem, [
+      { label: '单请求硬上限', value: '50 次' },
+      { label: '健康状态', value: '正常' },
+      { label: '超限影响', value: '触发 1101 错误' }
+    ]),
+    renderMetricCard(tailItem, [
+      { label: '活跃 Tail 上限', value: '最多 2 个' },
+      { label: 'Logpush 任务', value: '最多 4 个' },
+      { label: 'Cron 调度上限', value: '每脚本 5 个' }
+    ])
+  );
+  // Chart & Monthly Table
+  renderCloudflareChart();
+  renderCloudflareMonthly(data.monthly_history || []);
+}
+
+function renderCloudflareChart() {
+  const container = $('cf-chart');
+  container.replaceChildren();
+
+  if (!cfReport || !cfReport.daily_trend || cfReport.daily_trend.length === 0) {
+    container.append(node('div', '近 30 天暂无每日记录（将在周期数据同步后按日归档）', 'empty'));
+    return;
+  }
+
+  const metric = $('cf-metric').value;
+  const days = cfReport.daily_trend;
+  const maxVal = Math.max(1, ...days.map(d => d[metric] || 0));
+
+  const metricNames = {
+    workers_requests: '请求数',
+    workers_cpu_time_us: 'CPU 耗时',
+    d1_rows_read: 'D1 读行',
+    d1_rows_written: 'D1 写行',
+    r2_operations: 'R2 操作'
+  };
+  const metricLabel = metricNames[metric] || '用量';
+
+  const chartWrap = node('div', null, 'cf-bars-container');
+
+  for (const day of days) {
+    const val = day[metric] || 0;
+    const col = node('div', null, 'cf-col');
+    const track = node('div', null, 'cf-bar-track');
+    const bar = node('div', null, 'cf-bar');
+
+    if (val <= 0) {
+      bar.classList.add('zero');
+    } else {
+      const heightPercent = Math.max(4, Math.min(100, Math.round((val / maxVal) * 100)));
+      bar.style.height = `${heightPercent}%`;
+    }
+    track.append(bar);
+
+    const valFormatted = metric === 'workers_cpu_time_us' ?
+      (val >= 1e6 ? `${(val / 1e6).toFixed(2)}s` : `${(val / 1e3).toFixed(1)}ms`) :
+      number(val);
+
+    const tooltip = node('div', null, 'cf-tooltip');
+    tooltip.innerHTML = `<strong>${day.date}</strong><br>${metricLabel}: ${valFormatted}`;
+    col.append(track, tooltip);
+
+    const tick = node('span', day.date.slice(5), 'cf-tick');
+    col.append(tick);
+
+    chartWrap.append(col);
+  }
+
+  container.append(chartWrap);
+}
+
+function renderCloudflareMonthly(history) {
+  const container = $('monthly-history');
+  container.replaceChildren();
+
+  if (!history || history.length === 0) {
+    container.append(node('div', '暂无历史月份数据', 'empty'));
+    return;
+  }
+
+  const columns = [
+    { key: 'month', label: '月份' },
+    { key: 'workers_requests', label: 'Workers 请求数' },
+    { key: 'workers_cpu_time_us', label: 'Workers CPU 耗时' },
+    { key: 'workers_errors', label: 'Workers 错误数' },
+    { key: 'd1_rows_read', label: 'D1 读行数' },
+    { key: 'd1_rows_written', label: 'D1 写行数' },
+    { key: 'r2_operations', label: 'R2 操作数' }
+  ];
+
+  const table = node('table');
+  const thead = node('thead');
+  const trHead = node('tr');
+  for (const col of columns) {
+    trHead.append(node('th', col.label));
+  }
+  thead.append(trHead);
+  table.append(thead);
+
+  const tbody = node('tbody');
+  for (const row of history) {
+    const tr = node('tr');
+    tr.append(node('td', row.month));
+    tr.append(node('td', number(row.workers_requests)));
+    tr.append(node('td', row.workers_cpu_time_us >= 1e6 ? `${(row.workers_cpu_time_us / 1e6).toFixed(1)}s` : `${(row.workers_cpu_time_us / 1e3).toFixed(0)}ms`));
+    tr.append(node('td', number(row.workers_errors)));
+    tr.append(node('td', number(row.d1_rows_read)));
+    tr.append(node('td', number(row.d1_rows_written)));
+    tr.append(node('td', number(row.r2_operations)));
+    tbody.append(tr);
+  }
+  table.append(tbody);
+
+  container.append(table);
 }

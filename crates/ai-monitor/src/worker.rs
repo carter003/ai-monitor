@@ -16,6 +16,7 @@ use std::{
 };
 
 pub enum Update {
+    Network(crate::network::NetworkUpdate),
     Started(Source, String),
     Finished(Source, Result<Vec<Card>, FetchError>, i64, Instant),
     /// Local token consumption, refreshed on its own cadence or on demand when
@@ -35,6 +36,7 @@ pub struct Workers {
     pub updates: Receiver<Update>,
     senders: Vec<SyncSender<()>>,
     stop: Arc<AtomicBool>,
+    network_handles: Vec<thread::JoinHandle<()>>,
 }
 
 impl Workers {
@@ -195,7 +197,16 @@ impl Workers {
                 }
             });
         }
+        let network_handles = if config.network_enabled {
+            let (triggers, handles) =
+                crate::network::start(config.network_interval, tx, stop.clone());
+            senders.extend(triggers);
+            handles
+        } else {
+            vec![]
+        };
         Self {
+            network_handles,
             updates,
             senders,
             stop,
@@ -212,6 +223,9 @@ impl Workers {
 impl Drop for Workers {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        for handle in self.network_handles.drain(..) {
+            let _ = handle.join();
+        }
     }
 }
 

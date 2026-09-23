@@ -1,5 +1,5 @@
 import { HerdrMetadataPublisher } from './lib/herdr-metadata-publisher.mjs';
-import { LiveTpsReporter } from './lib/live-tps-reporter.mjs';
+import { OmpTpsReporter } from './lib/omp-tps-reporter.mjs';
 import { registerOmpAntigravityRequestWorkaround } from './lib/omp-antigravity-request-workaround.mjs';
 import { registerOmpAntigravitySessionRouter } from './lib/omp-antigravity-session-router.mjs';
 import { registerOmpApiKeyObserver } from './lib/omp-api-key-observer.mjs';
@@ -79,6 +79,7 @@ class OmpTpsObserver {
     this.activeMessageKey = messageKey(message);
     this.seen.clear();
     this.ended = false;
+    this.reporter.configureTokenModel?.(context?.model);
     this.reporter.start(this.activeMessageKey, messageModel(message, context), message.timestamp);
   }
 
@@ -117,14 +118,22 @@ class OmpTpsObserver {
     }
     const contentIndex = assistantEvent.contentIndex;
     const model = messageModel(message, context);
-    const type = trackedEventType(assistantEvent);
+    const type =
+      this.reporter.usesOmpNativeSemantics && assistantEvent.type === 'toolcall_delta'
+        ? 'toolcall'
+        : trackedEventType(assistantEvent);
     if (type && typeof assistantEvent.delta === 'string' && assistantEvent.delta) {
       const key = streamKey(message, type, contentIndex);
-      this.seen.set(key, `${this.seen.get(key) ?? ''}${assistantEvent.delta}`);
+      if (!this.reporter.usesOmpNativeSemantics) {
+        this.seen.set(key, `${this.seen.get(key) ?? ''}${assistantEvent.delta}`);
+      }
       this.reporter.append(messageKey(message), key, assistantEvent.delta, model);
       return;
     }
 
+    // OMP's own meter consumes deltas only; snapshots would double-count or
+    // introduce output that its working row never observed.
+    if (this.reporter.usesOmpNativeSemantics) return;
     const endedType =
       assistantEvent.type === 'text_end'
         ? 'text'
@@ -151,7 +160,7 @@ class OmpTpsObserver {
 
     this.ensureStarted(message, context);
     const model = messageModel(message, context);
-    if (Array.isArray(message.content)) {
+    if (!this.reporter.usesOmpNativeSemantics && Array.isArray(message.content)) {
       message.content.forEach((content, contentIndex) => {
         const block = trackedBlock(content);
         if (block) {
@@ -226,6 +235,7 @@ export function registerOmpTpsHandlers(pi, reporterOrFactory, { requireUi = fals
     if (!activateRootSession(context)) {
       return;
     }
+    reporter.configureTokenModel?.(context?.model);
     reporter.setModel(messageModel(undefined, context));
     updateDisplayAgent(context);
     seedFromHistory(context);
@@ -235,6 +245,8 @@ export function registerOmpTpsHandlers(pi, reporterOrFactory, { requireUi = fals
     if (!activateRootSession(context)) {
       return;
     }
+    reporter.resetSession?.();
+    reporter.configureTokenModel?.(context?.model);
     reporter.setModel(messageModel(undefined, context));
     updateDisplayAgent(context);
     seedFromHistory(context);
@@ -298,7 +310,7 @@ export function createOmpMetadataPublisher(pi) {
   });
 }
 
-export default function herdrTpsExtension(pi) {
+export default async function herdrTpsExtension(pi) {
   registerOmpAntigravityRequestWorkaround(pi);
   registerOmpAntigravitySessionRouter(pi);
   // Selection observation is permanent collection infrastructure. The
@@ -313,9 +325,13 @@ export default function herdrTpsExtension(pi) {
     return;
   }
 
+  // OMP's extension loader resolves this to the running binary's own module,
+  // including its catalog-selected native tokenizers (DeepSeek, GLM, etc.).
+  const { Tokenizer } = await import('@oh-my-pi/pi-agent-core');
+
   registerOmpTpsHandlers(
     pi,
-    () => new LiveTpsReporter({ publisher }),
+    () => new OmpTpsReporter({ publisher, Tokenizer }),
     { requireUi: true },
   );
 }

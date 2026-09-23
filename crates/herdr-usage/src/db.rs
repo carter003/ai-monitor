@@ -5,6 +5,7 @@
 //! (which the primary key absorbs on replay).
 
 use crate::{cost::Priced, event::ParsedEvent};
+use chrono::{Local, Timelike, TimeZone};
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 
@@ -176,6 +177,111 @@ pub fn save_offset(connection: &Connection, kind: &str, cursor: &str) -> rusqlit
     Ok(())
 }
 
+pub const HOURLY_ROLLUP_KIND: &str = "hourly-rollup";
+
+pub fn compute_current_hour_start_ms(now_ms: i64) -> Option<i64> {
+    let dt = match Local.timestamp_millis_opt(now_ms) {
+        chrono::LocalResult::Single(dt) => dt,
+        chrono::LocalResult::Ambiguous(dt, _) => dt,
+        chrono::LocalResult::None => return None,
+    };
+    let hour_start = dt
+        .with_minute(0)?
+        .with_second(0)?
+        .with_nanosecond(0)?;
+    Some(hour_start.timestamp_millis())
+}
+
+/// Archive past closed hours into `usage_hourly` up to `current_hour_start_ms`.
+///
+/// Current in-progress hour (`occurred_at >= current_hour_start_ms`) is excluded.
+/// Closed past hours are never re-scanned or modified once archived.
+/// Watermark is persisted in `collect_offset` under `hourly-rollup`.
+pub fn rollup_closed_hours(connection: &mut Connection, now_ms: i64) -> rusqlite::Result<usize> {
+    let current_hour_start_ms = match compute_current_hour_start_ms(now_ms) {
+        Some(ms) => ms,
+        None => return Ok(0),
+    };
+
+    let cursor: i64 = offset(connection, HOURLY_ROLLUP_KIND)?
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0);
+
+    if cursor >= current_hour_start_ms {
+        return Ok(0);
+    }
+
+    let tx = connection.transaction()?;
+
+    let distinct_hours: usize = {
+        let mut stmt = tx.prepare(
+            "SELECT COUNT(DISTINCT day || '#' || hour) FROM (
+                SELECT date(occurred_at / 1000, 'unixepoch', 'localtime') AS day,
+                       CAST(strftime('%H', occurred_at / 1000, 'unixepoch', 'localtime') AS INTEGER) AS hour
+                FROM usage_event
+                WHERE occurred_at >= ?1 AND occurred_at < ?2
+            )",
+        )?;
+        stmt.query_row(rusqlite::params![cursor, current_hour_start_ms], |r| {
+            r.get(0)
+        })?
+    };
+
+    if distinct_hours > 0 {
+        tx.execute(
+            "INSERT INTO usage_hourly(day, hour, model, input_total, output_total, tokens, cache_read, cost_usd, events)
+             SELECT
+                 date(e.occurred_at / 1000, 'unixepoch', 'localtime') AS day,
+                 CAST(strftime('%H', e.occurred_at / 1000, 'unixepoch', 'localtime') AS INTEGER) AS hour,
+                 '' AS model,
+                 SUM(e.input_total) AS input_total,
+                 SUM(e.output_total) AS output_total,
+                 SUM(e.input_total + e.output_total) AS tokens,
+                 SUM(e.cache_read) AS cache_read,
+                 SUM(e.cost_usd) AS cost_usd,
+                 COUNT(*) AS events
+             FROM usage_event e
+             WHERE e.occurred_at >= ?1 AND e.occurred_at < ?2
+             GROUP BY 1, 2
+             UNION ALL
+             SELECT
+                 date(e.occurred_at / 1000, 'unixepoch', 'localtime') AS day,
+                 CAST(strftime('%H', e.occurred_at / 1000, 'unixepoch', 'localtime') AS INTEGER) AS hour,
+                 CASE WHEN COALESCE(a.model_id, e.model, '') = '' THEN '__unknown__' ELSE COALESCE(a.model_id, e.model) END AS model,
+                 SUM(e.input_total) AS input_total,
+                 SUM(e.output_total) AS output_total,
+                 SUM(e.input_total + e.output_total) AS tokens,
+                 SUM(e.cache_read) AS cache_read,
+                 SUM(e.cost_usd) AS cost_usd,
+                 COUNT(*) AS events
+             FROM usage_event e
+             LEFT JOIN model_alias a ON a.raw_model = e.model
+             WHERE e.occurred_at >= ?1 AND e.occurred_at < ?2
+             GROUP BY 1, 2, 3
+             ON CONFLICT(day, hour, model) DO UPDATE SET
+                 input_total = usage_hourly.input_total + excluded.input_total,
+                 output_total = usage_hourly.output_total + excluded.output_total,
+                 tokens = usage_hourly.tokens + excluded.tokens,
+                 cache_read = usage_hourly.cache_read + excluded.cache_read,
+                 cost_usd = CASE
+                     WHEN usage_hourly.cost_usd IS NULL AND excluded.cost_usd IS NULL THEN NULL
+                     ELSE COALESCE(usage_hourly.cost_usd, 0.0) + COALESCE(excluded.cost_usd, 0.0)
+                 END,
+                 events = usage_hourly.events + excluded.events",
+            rusqlite::params![cursor, current_hour_start_ms],
+        )?;
+    }
+
+    tx.execute(
+        "INSERT INTO collect_offset(kind, cursor) VALUES (?1, ?2)
+         ON CONFLICT(kind) DO UPDATE SET cursor = excluded.cursor",
+        rusqlite::params![HOURLY_ROLLUP_KIND, current_hour_start_ms.to_string()],
+    )?;
+
+    tx.commit()?;
+    Ok(distinct_hours)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,5 +439,84 @@ mod tests {
         let connection = memory();
         initialize(&connection).expect("second apply");
         initialize(&connection).expect("third apply");
+    }
+
+    #[test]
+    fn test_rollup_closed_hours_only_archives_past_hours() {
+        let mut connection = memory();
+        let now_ms = 1_774_971_000_000;
+        let current_hour_start = compute_current_hour_start_ms(now_ms).unwrap();
+
+        let yesterday_at = current_hour_start - 24 * 3600 * 1000 + 10_000;
+        let earlier_today_at = current_hour_start - 2 * 3600 * 1000 + 10_000;
+        let current_hour_at = current_hour_start + 10_000;
+        let later_current_at = current_hour_start + 25 * 60 * 1000;
+
+        let batch = [
+            (event("ev-yesterday", yesterday_at), Priced::Cost(0.1)),
+            (event("ev-earlier", earlier_today_at), Priced::Cost(0.2)),
+            (event("ev-current", current_hour_at), Priced::Cost(0.3)),
+            (event("ev-later", later_current_at), Priced::Cost(0.4)),
+        ];
+        insert_events(&mut connection, "omp", &batch, now_ms).expect("insert");
+
+        let affected = rollup_closed_hours(&mut connection, now_ms).expect("rollup");
+        assert_eq!(affected, 2, "must archive exactly the 2 closed hours");
+
+        let watermark = offset(&connection, HOURLY_ROLLUP_KIND).expect("offset").expect("present");
+        assert_eq!(watermark, current_hour_start.to_string());
+
+        let rows: Vec<(String, i64, String, i64, i64, Option<f64>, i64)> = {
+            let mut stmt = connection
+                .prepare("SELECT day, hour, model, tokens, events, cost_usd, input_total FROM usage_hourly ORDER BY day, hour, model")
+                .expect("prepare");
+            let mapped = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                })
+                .expect("query");
+            mapped.filter_map(Result::ok).collect()
+        };
+
+        assert_eq!(rows.len(), 4, "expected 2 hours x 2 entries (all-models + per-model)");
+
+        for (_day, _hour, model, tokens, events, cost, input) in &rows {
+            assert_eq!(*tokens, 110);
+            assert_eq!(*input, 100);
+            assert_eq!(*events, 1);
+            if model.is_empty() {
+                let c = cost.unwrap();
+                assert!((c - 0.1).abs() < 1e-4 || (c - 0.2).abs() < 1e-4);
+            }
+        }
+
+        let second_run = rollup_closed_hours(&mut connection, now_ms).expect("second rollup");
+        assert_eq!(second_run, 0, "must be idempotent when within the same hour");
+
+        let next_hour_now = now_ms + 3600 * 1000;
+        let third_run = rollup_closed_hours(&mut connection, next_hour_now).expect("third rollup");
+        assert_eq!(third_run, 1, "previous current hour should now be archived as 1 closed hour");
+
+        let total_hourly_rows: i64 = connection
+            .query_row("SELECT COUNT(*) FROM usage_hourly", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(total_hourly_rows, 6, "now 3 hours x 2 entries");
+
+        let current_hour_summary_events: i64 = connection
+            .query_row(
+                "SELECT events FROM usage_hourly WHERE model = '' ORDER BY day DESC, hour DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("events");
+        assert_eq!(current_hour_summary_events, 2);
     }
 }

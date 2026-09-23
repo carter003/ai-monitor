@@ -1,5 +1,6 @@
 //! Read-only local usage dashboard. Accounting matches input_total + output_total;
 //! cache and reasoning are subsets and must never be added to that total again.
+pub mod hourly;
 pub mod requests;
 pub mod server;
 

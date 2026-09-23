@@ -16,14 +16,13 @@ gpt-5.6
 [Config reference](https://herdr.dev/docs/config-reference/)；颜色映射见
 [0.9.0 `src/ui/status.rs`](https://github.com/herdrdev/herdr/blob/v0.9.0/src/ui/status.rs)。
 
-目前接入 Codex 和 OMP。生产环境采用 OMP 18.2.5 移植的 `TokenRateMeter` 多尺度指数衰减算法（5s/20s/80s 半衰期桶与 250ms 词边界分块），并在轮次间持续保留已显示速率（rate retention），不再在轮次结束后 1 秒突兀归零；侧栏数字平滑展示，最多每秒更新一次。会话重置或模型切换时清理。它不是会话全局平均值，也不包含输入、历史上下文、工具调用参数和工具输出。
-现代 OpenAI 模型使用 `o200k_base` tokenizer，旧 GPT 模型使用 `cl100k_base`；未知模型
-回退到 UTF-8 字节估算。Codex 同时采集回答、reasoning summary 与可用的 raw reasoning，
-OMP 只采集 text 与 thinking。结束后的总 output usage 可能混入工具调用参数，因此不参与
-校准。OMP 优先使用真实 text/thinking delta，避免 OMP 18 已被后续流更新改写的 partial
-快照把整段输出压成单次采样；若 provider 没有提供可用 delta，则在 message_end 从最终
-消息补齐缺失的 text/thinking。若 provider 将整段回复缓冲为单个事件，
-最终速度帧按已观测的 text/thinking token 与消息生成时长计算；工具调用内容仍会排除。
+目前接入 Codex 和 OMP，使用多尺度指数衰减速率计（5s/20s/80s 半衰期桶与 250ms 词边界分块），每 250ms 采样发布，保留一位小数。
+Codex 统计回答、reasoning summary 与可用的 raw reasoning；现代 OpenAI 模型使用
+`o200k_base`，旧 GPT 模型使用 `cl100k_base`，未知模型回退到 UTF-8 字节估算。
+OMP 与内部 working row 使用相同口径：统计 text、thinking、toolcall delta，调用运行中 OMP
+自带的 `Tokenizer`，根据 `context.model.tokenizer` 选择原生分词器；消息结束后以
+`usage.output` 校正，再立即发布校正后的速度。OMP 不补计最终消息快照，也不对短消息
+额外放大至显示门槛。工具执行期间保持结算后的值；两处界面独立刷新，流式阶段可能存在短暂刷新时差。
 显示区域只输出速度数字，不附加单位文字；数字语义仍为 `t/s`。模型、空闲速度和 OMP
 显示名使用 5 秒 TTL，并每 2 秒刷新一次；wrapper 即使被强制终止，遗留 metadata 也会自动
 过期。心跳会把模型、当前速度和 OMP 显示名合并为一次 snapshot；非零速度使用更短的
@@ -31,9 +30,10 @@ OMP 只采集 text 与 thinking。结束后的总 output usage 可能混入工�
 都会先清除两个旧 metadata source，再由统一 owner 发布新值，因此同一 pane 在不同 Agent
 间复用不会带回旧模型。
 
-总 usage 只在响应阶段结束后可用，并可能包含本工具明确排除的其它 token，因此不用于
-计数。运行中的数字只来自可观测的 thinking/reasoning 与正常回答流；`0` 表示当前没有
-这两类 token 流，模型未公开的隐藏推理无法实时反映。
+Codex 的实时数字来自可观测的 thinking/reasoning 与正常回答流，模型未公开的隐藏推理无法实时反映。
+Codex 从首个 delta 开始计时，最短观测 500ms 即可显示短输出的速度；连续 1.5 秒无 delta 时，
+在最后一个 delta 处结束当前采样片段并保留速度，后续输出开启新片段，避免把工具等待时间计入生成耗时。
+`0` 表示尚无足够的有效采样或采样已重置；等待期间的非零值表示最近一次输出速度。
 
 Codex 只展示当前用户主会话，排除子代理与 `threadSource: "system"` 的内部系统会话。
 系统会话也可能没有父会话；旧扩展因此可能在启动后把正确模型覆盖成 Luna。更新此修复后，
@@ -179,25 +179,16 @@ WebSocket transport 目前属于 Codex experimental 接口，只建议本机使�
 
 ## 速度口径与稳定显示
 
-侧栏速度是**近似可见输出吞吐**：仅统计当前主会话的回答与可观测推理文本，不包含输入、
-历史、工具参数/输出或未公开的隐藏推理。网络缓冲、分批送达和文本分词方法都会影响数值；
+Codex 侧栏速度是**近似可见输出吞吐**，不含工具参数。OMP 则与其内部速度口径一致，
+包含工具参数 delta，并使用实际 output usage 校正。两者都不统计工具执行结果和输入。网络缓冲、分批送达和文本分词方法都会影响数值；
 它不适合作为服务端真实解码速度、账单 token 或跨供应商性能排名。
 当前模型映射尚未覆盖 GPT-6，`gpt-6-astra` 与其它未知模型使用 UTF-8 字节数 / 4 估算。
 在取得匹配 tokenizer 的依据前，不把另一模型的 tokenizer 宣称为 GPT-6 的精确计数器。
 
-Codex 与 OMP 复用以下显示规则：
+两种采样策略分别验证：Codex 按可见输出片段计时，OMP 按原生消息生命周期计时。
+OMP 使用与上游一致的 200 tokens / 4000ms 证据门槛；消息结束后立即显示 usage 校正结果，
+工具执行期间保留该值。侧栏每 250ms 采样一次，以一位小数发布，不再先取整、加额外平滑或沿用校正前的末帧。
 
-- 原始吞吐仍按 2 秒滚动窗口、250ms 采样计算；首个实时数值等待至少 500ms 观察时间。
-- 显示层采用时间常数 1 秒的指数平滑，正数最多每秒变化一次。
-- 相对当前显示值，小于 `max(2 t/s, 5%)` 的变化暂不更新；因而稳定显示允许少量偏差。
-- 连续 1.5 秒无可见输出时，在下一个采样点归零，不用平滑拖出虚假的持续输出。
-- 新一轮、恢复输出、模型切换清空平滑状态；模型切换也清空上一模型的文本统计。
-- 完成时保留最近已显示值 1 秒，不额外闪出末尾突发峰值；没有已显示值时，只有至少一个
-  采样周期的观测时长才计算末帧。OMP 提供有效响应时长时，仍可用其可见输出 / 时长作回退。
-- 完成保留期间若出现新输出，取消归零计时；metadata 心跳和 TTL 独立于数字变化频率。
-
-这套配置优先稳定易读，持续加速/减速会有几秒的收敛时间。整条输出流重新分词仍保留，
-避免逐 delta 独立分词造成边界误差；超长单流的 CPU 开销仍随累计文本长度增长。
 更改脚本后需退出并重新启动相应 Codex/OMP 进程，运行中的 wrapper/extension 不会热加载。
 
 ## OMP 会话路由扩展

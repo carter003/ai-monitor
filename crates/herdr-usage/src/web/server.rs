@@ -1,5 +1,6 @@
 //! Embedded HTTP service: all workers belong to the caller's process.
 use super::{self as web, Query};
+use crate::cloudflare::CloudflareConfig;
 use crate::plans::{self, PlanOptions};
 use std::{
     io::{self, BufRead, BufReader, Read, Write},
@@ -22,8 +23,14 @@ pub struct Server {
     workers: Vec<JoinHandle<()>>,
 }
 impl Server {
-    pub fn start(database: PathBuf, port: u16, plans: PlanOptions) -> io::Result<Self> {
+    pub fn start(
+        database: PathBuf,
+        port: u16,
+        plans: PlanOptions,
+        cloudflare: CloudflareConfig,
+    ) -> io::Result<Self> {
         let plans = Arc::new(plans);
+        let cloudflare = Arc::new(cloudflare);
         let listener = Arc::new(TcpListener::bind((Ipv4Addr::LOCALHOST, port))?);
         listener.set_nonblocking(true)?;
         let mut server = Self {
@@ -37,6 +44,7 @@ impl Server {
             let stopped = Arc::clone(&server.stopped);
             let database = database.clone();
             let plans = Arc::clone(&plans);
+            let cloudflare = Arc::clone(&cloudflare);
             let active = Arc::new(Mutex::new(None));
             server.active.push(Arc::clone(&active));
             let worker = thread::Builder::new()
@@ -56,7 +64,7 @@ impl Server {
                                     *slot = Some(socket);
                                 }
                                 // A browser disconnect is routine. Do not write into the TUI.
-                                let _ = handle(stream, &database, &plans);
+                                let _ = handle(stream, &database, &plans, &cloudflare);
                                 active.lock().unwrap_or_else(|e| e.into_inner()).take();
                             }
                             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -93,7 +101,12 @@ fn respond(stream: &mut TcpStream, status: &str, mime: &str, body: &[u8]) -> std
     write!(stream, "HTTP/1.1 {status}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'\r\n\r\n", body.len())?;
     stream.write_all(body)
 }
-fn handle(mut stream: TcpStream, database: &Path, plans: &PlanOptions) -> std::io::Result<()> {
+fn handle(
+    mut stream: TcpStream,
+    database: &Path,
+    plans: &PlanOptions,
+    cloudflare: &CloudflareConfig,
+) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let mut line = String::new();
@@ -139,9 +152,11 @@ fn handle(mut stream: TcpStream, database: &Path, plans: &PlanOptions) -> std::i
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     let asset: Option<(&str, &[u8])> = match path {
         "/" => Some(("text/html; charset=utf-8", include_bytes!("index.html"))),
+        "/hourly" => Some(("text/html; charset=utf-8", include_bytes!("hourly.html"))),
         "/query" => Some(("text/html; charset=utf-8", include_bytes!("query.html"))),
         "/plans" => Some(("text/html; charset=utf-8", include_bytes!("plans.html"))),
         "/requests" => Some(("text/html; charset=utf-8", include_bytes!("requests.html"))),
+        "/cloudflare" => Some(("text/html; charset=utf-8", include_bytes!("cloudflare.html"))),
         "/app.js" => Some(("text/javascript; charset=utf-8", include_bytes!("app.js"))),
         "/style.css" => Some(("text/css; charset=utf-8", include_bytes!("style.css"))),
         _ => None,
@@ -167,6 +182,59 @@ fn handle(mut stream: TcpStream, database: &Path, plans: &PlanOptions) -> std::i
     }
     if path == "/api/requests" {
         return match web::requests::load(database) {
+            Ok(report) => respond(
+                &mut stream,
+                "200 OK",
+                "application/json; charset=utf-8",
+                &serde_json::to_vec(&report)?,
+            ),
+            Err(error) => respond(
+                &mut stream,
+                "400 Bad Request",
+                "application/json; charset=utf-8",
+                serde_json::json!({"error": error}).to_string().as_bytes(),
+            ),
+        };
+    }
+    if path == "/api/cloudflare" {
+        if !cloudflare.is_configured() {
+            let body = serde_json::json!({
+                "configured": false,
+                "message": "未配置 Cloudflare Account ID 或 API Token"
+            });
+            return respond(
+                &mut stream,
+                "200 OK",
+                "application/json; charset=utf-8",
+                body.to_string().as_bytes(),
+            );
+        }
+        let force = query.split('&').any(|pair| pair == "refresh=1" || pair == "refresh=true");
+        return match crate::cloudflare::report(database, cloudflare, force) {
+            Ok(report) => respond(
+                &mut stream,
+                "200 OK",
+                "application/json; charset=utf-8",
+                &serde_json::to_vec(&report)?,
+            ),
+            Err(error) => respond(
+                &mut stream,
+                "400 Bad Request",
+                "application/json; charset=utf-8",
+                serde_json::json!({"error": error}).to_string().as_bytes(),
+            ),
+        };
+    }
+    if path == "/api/hourly" {
+        let mut month = None;
+        for pair in query.split('&').filter(|s| !s.is_empty()) {
+            if let Some((k, v)) = pair.split_once('=') {
+                if k == "month" && !v.is_empty() {
+                    month = Some(v);
+                }
+            }
+        }
+        return match web::hourly::load(database, month) {
             Ok(report) => respond(
                 &mut stream,
                 "200 OK",
@@ -217,7 +285,7 @@ mod tests {
 
     #[test]
     fn dropping_server_cancels_partial_requests_and_releases_listener() {
-        let server = Server::start(PathBuf::from("/unused.db"), 0, PlanOptions::default()).unwrap();
+        let server = Server::start(PathBuf::from("/unused.db"), 0, PlanOptions::default(), CloudflareConfig::default()).unwrap();
         let address = server.address();
         let mut clients: Vec<_> = (0..4)
             .map(|_| {
@@ -250,6 +318,7 @@ mod tests {
             PathBuf::from("/unused.db"),
             address.port(),
             PlanOptions::default(),
+            CloudflareConfig::default(),
         )
         .err()
         .unwrap();

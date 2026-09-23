@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>小时用量 - Token 用量统计</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+<header>
+  <div>
+    <span class="eyebrow">AI MONITOR / LOCAL</span>
+    <h1>小时用量趋势</h1>
+    <p>每天 24 小时 Token 用量分布与月度聚合统计，已结束小时自动归档。</p>
+  </div>
+  <div class="status">
+    <span class="dot"></span>本地数据 <button id="refresh" type="button">刷新</button>
+    <small id="updated">正在连接…</small>
+  </div>
+</header>
+<nav aria-label="页面">
+  <a href="/">总览</a>
+  <a href="/hourly" aria-current="page">小时用量</a>
+  <a href="/plans">套餐额度</a>
+  <a href="/requests">Request 追踪</a>
+  <a href="/query">每日查询</a>
+  <a href="/cloudflare">Cloudflare</a>
+</nav>
+<main>
+  <div id="error" role="alert" hidden></div>
+  <p id="context" class="muted"></p>
+  <section class="panel filters" aria-label="筛选">
+    <div class="filter-row">
+      <label>选择月份
+        <select id="hourly-month"></select>
+      </label>
+      <label>统计指标
+        <select id="hourly-metric">
+          <option value="tokens">Token 数</option>
+          <option value="cost">金额（USD）</option>
+        </select>
+      </label>
+    </div>
+  </section>
+  <section aria-label="月度总览">
+    <div id="hourly-cards" class="cards"></div>
+  </section>
+  <section class="panel" aria-label="每日 24 小时分布">
+    <div class="section-title">
+      <div>
+        <h2>每日 24 小时分布</h2>
+        <p class="muted">实心柱为已闭合固化小时，灰色镂空为进行中或未来小时；悬停查看明细</p>
+      </div>
+    </div>
+    <div id="daily-charts" class="daily-charts-list"></div>
+  </section>
+  <footer>小时统计在整点后归档上一小时用量；进行中小时的临时数据以镂空条呈现，闭合后冻结。金额为已记录的美元估算费用。</footer>
+</main>
+</body>
+</html>

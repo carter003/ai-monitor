@@ -91,6 +91,14 @@ fn main() {
                         }
                     }
                 }
+                match db::rollup_closed_hours(&mut connection, now) {
+                    Ok(hours) => {
+                        if hours > 0 {
+                            println!("  hourly rollup: {hours} 小时已归档");
+                        }
+                    }
+                    Err(error) => eprintln!("[warn] hourly rollup 失败：{error}"),
+                }
             }
             Err(error) => eprintln!("round 失败：{error}"),
         }

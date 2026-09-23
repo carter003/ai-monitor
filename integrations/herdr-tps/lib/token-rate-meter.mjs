@@ -49,6 +49,7 @@ export class TokenRateMeter {
   #wordBoundaryMaxChars;
   #residualDecay;
   #backgroundRateOffsetMs;
+  #scaleShortResponses;
 
   #historyBuckets;
   #streamBuckets;
@@ -72,6 +73,7 @@ export class TokenRateMeter {
     wordBoundaryMaxChars = DEFAULT_WORD_BOUNDARY_MAX_CHARS,
     residualDecay = DEFAULT_RESIDUAL_DECAY,
     backgroundRateOffsetMs = DEFAULT_BACKGROUND_RATE_OFFSET_MS,
+    scaleShortResponses = true,
   } = {}) {
     this.#countTokens = countTokens;
     this.#halfLives = halfLives;
@@ -81,6 +83,7 @@ export class TokenRateMeter {
     this.#wordBoundaryMaxChars = wordBoundaryMaxChars;
     this.#residualDecay = residualDecay;
     this.#backgroundRateOffsetMs = backgroundRateOffsetMs;
+    this.#scaleShortResponses = scaleShortResponses;
 
     this.#historyBuckets = halfLives.map((hl) => new ExponentialBucket(hl));
     this.#streamBuckets = halfLives.map((hl) => new ExponentialBucket(hl));
@@ -164,7 +167,7 @@ export class TokenRateMeter {
     // Short-response scaling: ensure that if the turn was short, history is scaled
     // so rate() is visible and smoothly retained between turns:
     const totalTokens = hasOutput ? outputTokens : this.#totalStreamTokens;
-    if (totalTokens > 0 && duration > 0) {
+    if (this.#scaleShortResponses && totalTokens > 0 && duration > 0) {
       const longest = this.#historyBuckets[this.#historyBuckets.length - 1];
       if (longest.tokens < this.#minTokens || longest.time < this.#minTimeMs) {
         const scale = Math.max(1, this.#minTokens / totalTokens, this.#minTimeMs / duration);

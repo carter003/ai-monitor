@@ -7,6 +7,8 @@
 
 它同时整合了 **系统资源监测**、**云端 AI 额度追踪** 以及 **多 Coding Agent 本地 Token 消耗审计（基于 SQLite WAL 架构）**。
 
+TUI 新增四条 AI 线路的 HTTPS 建连、响应时间和近 5 分钟连通率，依赖系统 `curl`，使用无凭据 HEAD，不消耗模型 token。详见 [AI 线路与配置](crates/ai-monitor/README.md#ai-线路)。
+
 ## 本地网页
 
 运行 `ai-monitor`（源码运行：`cargo run --offline -p ai-monitor`），网页同步启动，浏览器打开 **http://127.0.0.1:19999**。

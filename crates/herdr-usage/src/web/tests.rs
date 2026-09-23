@@ -1,5 +1,8 @@
 use super::*;
+use crate::plans::PlanOptions;
 use chrono::TimeZone;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 
 fn fixture() -> Connection {
     let db = Connection::open_in_memory().unwrap();
@@ -148,4 +151,199 @@ fn global_cache_refreshes_after_writer_commit_and_range_uses_time_index() {
         )
         .unwrap();
     assert!(plan.contains("idx_usage_time"), "{plan}");
+}
+
+#[test]
+fn test_hourly_report_loads_and_reconciles() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("usage.db");
+    let mut db = crate::db::open(&db_path).unwrap();
+
+    let dt = Local.with_ymd_and_hms(2026, 9, 12, 14, 30, 0).earliest().unwrap();
+    let at = dt.timestamp_millis();
+
+    db.execute(
+        "INSERT INTO usage_event(source, event_id, model, model_source, input_total, cache_read, cache_write, output_total, reasoning, cost_usd, occurred_at)
+         VALUES ('codex', 'ev-1', 'openai/gpt-4o', 'event', 1000, 200, 0, 500, 0, 0.05, ?1)",
+        rusqlite::params![at],
+    ).unwrap();
+
+    let later = at + 2 * 3600 * 1000;
+    crate::db::rollup_closed_hours(&mut db, later).unwrap();
+    drop(db);
+
+    let report = super::hourly::load(&db_path, Some("2026-09")).unwrap();
+    assert_eq!(report.month, "2026-09");
+    assert!(report.available_months.contains(&"2026-09".to_string()));
+    assert_eq!(report.summary.total_tokens, 1500);
+    assert_eq!(report.summary.total_cost, Some(0.05));
+    assert_eq!(report.summary.active_days, 1);
+    assert_eq!(report.summary.peak_day, "2026-09-12");
+    assert_eq!(report.summary.peak_hour, 14);
+    assert_eq!(report.summary.peak_tokens, 1500);
+
+    let day_row = report.days.iter().find(|d| d.day == "2026-09-12").expect("day row");
+    assert_eq!(day_row.weekday, "周六");
+    assert_eq!(day_row.total_tokens, 1500);
+    assert_eq!(day_row.total_cost, Some(0.05));
+    assert_eq!(day_row.hours.len(), 24);
+
+    let hour_14 = &day_row.hours[14];
+    assert_eq!(hour_14.hour, 14);
+    assert_eq!(hour_14.input, 1000);
+    assert_eq!(hour_14.output, 500);
+    assert_eq!(hour_14.tokens, 1500);
+    assert_eq!(hour_14.cache_read, 200);
+    assert_eq!(hour_14.cost_usd, Some(0.05));
+    assert_eq!(hour_14.events, 1);
+    assert!(hour_14.closed);
+
+    let hour_13 = &day_row.hours[13];
+    assert_eq!(hour_13.tokens, 0);
+    assert_eq!(hour_13.events, 0);
+    assert_eq!(hour_13.cost_usd, None);
+
+    assert!(super::hourly::load(&db_path, Some("2026-9")).is_err());
+    assert!(super::hourly::load(&db_path, Some("invalid")).is_err());
+}
+
+#[test]
+fn test_cloudflare_routes_and_navigation() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let db_path = tmp.path().to_path_buf();
+    let _conn = crate::db::open(&db_path).unwrap();
+
+    let server = server::Server::start(
+        db_path.clone(),
+        0,
+        PlanOptions::default(),
+        crate::cloudflare::CloudflareConfig::default(),
+    )
+    .unwrap();
+    let addr = server.address();
+
+    // 1. GET /cloudflare
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream
+        .write_all(b"GET /cloudflare HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    let mut resp = String::new();
+    stream.read_to_string(&mut resp).unwrap();
+    assert!(resp.starts_with("HTTP/1.1 200 OK"));
+    assert!(resp.contains("Cloudflare 资源用量与额度看板"));
+    assert!(resp.contains("Workers Paid Plan"));
+
+    // 2. GET /api/cloudflare (unconfigured)
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream
+        .write_all(b"GET /api/cloudflare HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    let mut resp = String::new();
+    stream.read_to_string(&mut resp).unwrap();
+    assert!(resp.starts_with("HTTP/1.1 200 OK"));
+    assert!(resp.contains(r#""configured":false"#));
+
+    // 3. Navigation links in all HTML files
+    for path in ["/", "/hourly", "/plans", "/requests", "/query", "/cloudflare"] {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        write!(stream, "GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        let mut resp = String::new();
+        stream.read_to_string(&mut resp).unwrap();
+        assert!(resp.starts_with("HTTP/1.1 200 OK"), "Failed on path {path}");
+        assert!(
+            resp.contains(r#"href="/cloudflare""#),
+            "Path {path} missing cloudflare nav link"
+        );
+    }
+}
+
+#[test]
+fn test_cloudflare_api_with_cached_data() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let db_path = tmp.path().to_path_buf();
+    let conn = crate::db::open(&db_path).unwrap();
+
+    let account_id = "test_account_123";
+    let now_ms = chrono::Utc::now().timestamp_millis();
+
+    let summary = crate::cloudflare::build_current_period_summary(
+        &crate::cloudflare::CloudflareQuotas::for_plan("paid"),
+        3_240_000,
+        48_200_000,
+        1_203,
+        8_720_000_000,
+        11_300_000,
+        1000,
+        200,
+        50_000_000,
+        5,
+        284_000,
+        5000,
+        289_000,
+        800_000,
+        2,
+        8,
+        1000,
+        100,
+        0,
+        0,
+    );
+    let ascii_card = crate::cloudflare::generate_ascii_card(&summary);
+    let cached_report = crate::cloudflare::CloudflareReport {
+        configured: true,
+        plan: "paid".into(),
+        billing_cycle: crate::cloudflare::BillingCycleInfo {
+            start: "2026-09-08T00:00:00Z".into(),
+            end: "2026-10-08T00:00:00Z".into(),
+            start_date: "2026-09-08".into(),
+            end_date: "2026-10-08".into(),
+            total_days: 30,
+            elapsed_days: 12,
+            days_remaining: 18,
+            elapsed_percent: 40.0,
+            cycle_type: "套餐订阅周期".into(),
+            is_fallback: false,
+        },
+        current_period: summary,
+        ascii_card,
+        daily_trend: vec![],
+        monthly_history: vec![],
+        stale: false,
+        error: None,
+        synced_at: now_ms,
+    };
+    let json = serde_json::to_string(&cached_report).unwrap();
+    conn.execute(
+        "INSERT INTO cf_sync_state(account_id, period_start, period_end, last_synced_at, cached_summary_json)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![account_id, "2026-09-08T00:00:00Z", "2026-10-08T00:00:00Z", now_ms, json],
+    ).unwrap();
+
+    let cf_config = crate::cloudflare::CloudflareConfig {
+        account_id: Some(account_id.into()),
+        api_token: Some("dummy_token".into()),
+        plan: "paid".into(),
+        billing_day: Some(8),
+    };
+    let server = server::Server::start(
+        db_path,
+        0,
+        PlanOptions::default(),
+        cf_config,
+    ).unwrap();
+    let addr = server.address();
+
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream
+        .write_all(b"GET /api/cloudflare HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    let mut resp = String::new();
+    stream.read_to_string(&mut resp).unwrap();
+
+    assert!(resp.starts_with("HTTP/1.1 200 OK"));
+    assert!(resp.contains(r#""configured":true"#));
+    assert!(resp.contains("3.24M"));
+    assert!(resp.contains("32.4%"));
+    assert!(resp.contains("WORKERS"));
+    assert!(resp.contains("8.72B"));
 }

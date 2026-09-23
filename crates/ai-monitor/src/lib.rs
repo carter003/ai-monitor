@@ -1,6 +1,7 @@
 pub mod config;
 pub mod http;
 pub mod model;
+pub mod network;
 pub mod providers;
 pub mod system;
 pub mod ui;

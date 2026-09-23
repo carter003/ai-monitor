@@ -3,7 +3,7 @@
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Request 追踪 · AI Monitor</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
 <body>
 <header><div><span class="eyebrow">AI MONITOR / LOCAL</span><h1>Request 与账户追踪</h1><p>每个 request 一行，仅保存时间、模型、耗时、session 和账户标识，不保存对话上下文。</p></div><div class="status"><span class="dot"></span>本地数据 <button id="refresh" type="button">刷新</button><small id="updated">正在连接…</small></div></header>
-<nav aria-label="页面"><a href="/">总览</a><a href="/plans">套餐额度</a><a href="/requests" aria-current="page">Request 追踪</a><a href="/query">每日查询</a></nav>
+<nav aria-label="页面"><a href="/">总览</a><a href="/hourly">小时用量</a><a href="/plans">套餐额度</a><a href="/requests" aria-current="page">Request 追踪</a><a href="/query">每日查询</a><a href="/cloudflare">Cloudflare</a></nav>
 <main><div id="error" role="alert" hidden></div><p id="context" class="muted"></p>
 <section><div id="request-cards" class="cards"></div></section>
 <section class="panel"><div class="section-title"><div><h2>跨账户 Session</h2><p class="muted">同一客户端 + session + 通道实际出现两个或以上账户</p></div></div><div id="cross-sessions" class="table-wrap"></div></section>

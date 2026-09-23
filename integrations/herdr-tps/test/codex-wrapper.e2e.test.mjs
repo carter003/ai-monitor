@@ -90,12 +90,12 @@ if (args[0] === 'app-server') {
       socket.send(JSON.stringify({ id: request.id, result: { thread: { id: 'placeholder', parentThreadId: null }, model: 'gpt-5.6-luna' } }));
       socket.send(JSON.stringify({ method: 'thread/settings/updated', params: { threadId: 'active', threadSettings: { model: 'gpt-5.6-luna', collaborationMode: { settings: { model: 'gpt-6-astra' } } } } }));
       socket.send(JSON.stringify({ method: 'turn/started', emittedAtMs: 100, params: { threadId: 'active', turn: { id: 'turn-e2e' } } }));
-      // OMP evidence gate: 200 tokens / 4_000ms before a rate is shown. Stream
-      // ~290 tokens across 4s of event time so the wrapper publishes a rate.
-      for (let emittedAtMs = 500; emittedAtMs <= 4_000; emittedAtMs += 500) {
-        socket.send(JSON.stringify({ method: 'item/agentMessage/delta', emittedAtMs, params: { threadId: 'active', itemId: 'message-e2e', delta: 'the quick brown fox jumps over the lazy dog '.repeat(4) } }));
+      // A short Codex inference after a long tool wait must publish a rate
+      // without requiring OMP's 200-token / 4-second evidence gate.
+      for (let emittedAtMs = 30_000; emittedAtMs <= 31_000; emittedAtMs += 250) {
+        socket.send(JSON.stringify({ method: 'item/agentMessage/delta', emittedAtMs, params: { threadId: 'active', itemId: 'message-e2e', delta: 'the quick brown fox ' } }));
       }
-      socket.send(JSON.stringify({ method: 'turn/completed', emittedAtMs: 4_500, params: { threadId: 'active', turn: { id: 'turn-e2e', status: 'completed' } } }));
+      socket.send(JSON.stringify({ method: 'turn/completed', emittedAtMs: 32_000, params: { threadId: 'active', turn: { id: 'turn-e2e', status: 'completed' } } }));
     });
   });
   server.listen(Number(address.port), address.hostname);

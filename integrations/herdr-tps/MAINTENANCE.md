@@ -8,8 +8,8 @@
 ## 快速入口
 
 本扩展给 Herdr Agents 栏发布 `model` 和 `tps`，并为 OMP 补充显示名。
-`model` 来自当前用户会话的模型设置及可观测 reroute；`tps` 是可见回答和推理输出的速率估计。
-它不包含输入、历史、工具参数、工具输出或未公开推理，也不是账单 usage、会话平均速度或服务端解码速度。
+`model` 来自当前用户会话的模型设置及可观测 reroute。Codex 的 `tps` 估计可见回答和推理输出；
+OMP 的 `tps` 对齐内部 working row，包含工具参数 delta 和 output usage 校正，但不包含工具执行结果或输入。
 
 | 要处理的问题 | 先读本节 | 实现 owner（路径相对当前目录） |
 | --- | --- | --- |
@@ -205,15 +205,15 @@ OMP 的生命周期状态（working/idle/blocked）由 Herdr 官方集成
 | --- | --- |
 | `session_start`、`session_switch` | 确认 UI root，更新 context 模型和显示名 |
 | `message_start` | 仅 assistant message 建立 generation |
-| `message_update` | 优先消费 `text_delta` / `thinking_delta`；end 事件尝试补差量 |
-| `message_end` | 从最终 text/thinking 补齐缺失片段，再按结束时间和可用 duration pause |
+| `message_update` | 消费 `text_delta` / `thinking_delta` / `toolcall_delta`，不补计快照 |
+| `message_end` | 以 timestamp + duration 结束采样，用 usage.output 校正后立即发布 |
 | `agent_end` | pause |
 | `session_shutdown` | 清除显示刷新 timer、observer 状态并等待 reporter.close |
 
 模型优先级是 `message.model ?? context.model.id ?? context.model.name`。
-`seen` 按 message、类型和 contentIndex 记录已消费前缀；只有 snapshot 以此前缀开头时才补差量。
-不能在 delta 阶段反复计入 partial 全文，因为 partial 对象可能已被后续流改写。
-仅接受 text/thinking block，排除工具调用；message_end 之后忽略迟到 update。
+生产 reporter 为 `OmpTpsReporter`，通过 OMP 自身模块导入 `Tokenizer`，按 context.model.tokenizer 选择分词器。
+按与上游相同的消息边界计算，不把旧的 streaming 值保留到 usage 校正之后，不预先取整或放大短响应。
+生产路径只处理 delta，不保留全文；message_end 之后忽略迟到 update。observer 的旧 snapshot 路径只保留给兼容 reporter。
 
 显示名优先级：`HERDR_TPS_OMP_DISPLAY_AGENT` → `--profile` → session file 中的
 `.omp/profiles/<profile>/agent/sessions/`。`pro2` 显示为 `omp2`，其余为 `omp`。
@@ -224,13 +224,19 @@ profile 参数与路径解析统一由 `lib/omp-profile.mjs` 提供，wrapper �
 
 ### 采样、平滑和结束
 
+Codex wrapper 启用 `streamingOnly`：以首个可见 delta 作为片段起点，证据门槛为
+1 token / 500ms（OMP 默认仍为 200 tokens / 4000ms）。无 delta 达 1500ms 后，
+以最后一个 delta 的时间暂停采样并保留速度；同一 turn 的后续输出重新开启片段。
+因此工具执行和等待不会持续稀释速率，短推理/回答也不会长期被默认门槛压成零。
+运行中的 wrapper 不会热加载修改，须在任务结束后退出并重新运行 Codex 才生效。
+
 | 默认参数 | 值 | owner |
 | --- | ---: | --- |
 | 衰减半衰期 (TokenRateMeter) | 5s / 20s / 80s | `token-rate-meter.mjs` |
 | 采样分块与词边界保留 | 250ms / 32 字符 | `token-rate-meter.mjs` |
 | 轮次间残差衰减因子 | 0.8 | `token-rate-meter.mjs` |
-| 常规非零显示最短观测 / 更新间隔 | 500ms / 1000ms | `live-tps-reporter.mjs` |
-| 指数平滑时间常数 | 1000ms | `live-tps-reporter.mjs` |
+| Codex 最短观测 / 更新间隔 | 500ms / 250ms | `live-tps-reporter.mjs` |
+| OMP 证据门槛 / 更新间隔 | 200 tokens、4000ms / 250ms | `omp-tps-reporter.mjs` |
 | metadata 心跳 / 持久 TTL | 2000ms / 5000ms | `live-tps-reporter.mjs` |
 | 非零 TPS TTL | 2500ms | `max(stale, heartbeat) + 2 × sampleInterval` |
 
@@ -243,7 +249,10 @@ profile 参数与路径解析统一由 `lib/omp-profile.mjs` 提供，wrapper �
 5. **历史会话预热（Seeding）**：会话启动/切换时，若历史中已有含耗时的 assistant 消息，自动以其 usage output 与 duration 预热速率计，实现平滑无缝显示。
 ### Tokenizer 边界
 
-模型名先去掉供应商路径前缀，再由 `model-token-counter.mjs` 的正则选择：
+OMP 使用宿主 `@oh-my-pi/pi-agent-core` 的 `Tokenizer`，由 context.model.tokenizer 决定编码，
+不得用下述 Codex 模型名规则替代。
+
+Codex 模型名先去掉供应商路径前缀，再由 `model-token-counter.mjs` 的正则选择：
 
 - 已匹配的 `gpt-4o`、`gpt-4.1`、`gpt-5*`、`gpt-oss`、`o1/o3/o4`、`codex*`：`o200k_base`。
 - 旧 `gpt-3.5` / `gpt-4` 命名：`cl100k_base`。
@@ -367,7 +376,7 @@ git diff --check
 | 改动面 | 必须保留的回归 |
 | --- | --- |
 | Codex 会话/模型 | 不同 ID 的占位与活动 root；system、subagent 隔离；response/notification/read；早到模型、迟到响应、关闭清理；用户 delta 仍能产生非零 TPS |
-| OMP | 无界面子代理不发布；profile 恢复；delta 优先、snapshot 补齐、工具排除；duration fallback 与 shutdown |
+| OMP | 无界面子代理不发布；profile 恢复；原生 tokenizer、工具参数 delta、上游速率 trace、小数和 usage 校正；shutdown |
 | 采样/显示 | 多 stream、token 边界、停顿、新 generation、平滑、短响应 hold、新输出取消归零 |
 | Publisher | 唯一 source、guard、队列合并/过期、TTL 覆盖心跳、错误收敛、退出清理 |
 | Installer/wrapper | 幂等、自定义配置保护、CLI 更新目标、Herdr-only PATH、参数/信号转发和失败清理 |

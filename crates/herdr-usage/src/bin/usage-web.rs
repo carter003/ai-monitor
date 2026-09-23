@@ -17,7 +17,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let database = db_path();
-    let server = Server::start(database.clone(), port, PlanOptions::default())?;
+    let cf_config = herdr_usage::cloudflare::CloudflareConfig::from_env_or_config(None, None, None, None);
+    let server = Server::start(database.clone(), port, PlanOptions::default(), cf_config)?;
     println!(
         "Token 统计网页：http://{}\n数据库：{}",
         server.address(),

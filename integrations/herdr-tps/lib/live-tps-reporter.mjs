@@ -17,9 +17,11 @@ export class LiveTpsReporter {
     metadataRefreshMs = DEFAULT_METADATA_REFRESH_MS,
     metadataTtlMs = DEFAULT_METADATA_TTL_MS,
     tokenCounterFactory = tokenCounterForModel,
+    streamingOnly = false,
     autoStart = true,
   } = {}) {
     this.publisher = publisher;
+    this.streamingOnly = streamingOnly;
     this.sampleIntervalMs = sampleIntervalMs;
     this.staleMs = staleMs;
     this.displayIntervalMs = displayIntervalMs;
@@ -28,6 +30,7 @@ export class LiveTpsReporter {
     this.metadataTtlMs = metadataTtlMs;
     this.sampler = new TokenRateMeter({
       countTokens: tokenCounterFactory(undefined),
+      ...(streamingOnly ? { minTokens: 1, minTimeMs: MIN_OBSERVATION_MS } : {}),
     });
     this.tokenCounterFactory = tokenCounterFactory;
     this.currentModel = undefined;
@@ -111,6 +114,16 @@ export class LiveTpsReporter {
     if (this.closed) return;
     if (typeof delta !== 'string' || delta.length === 0) return;
     this.setModel(model, now);
+    if (this.streamingOnly) {
+      // A Codex turn spans many model requests and tool waits. Start timing at
+      // the first delta, and close the previous burst before a gap can dilute it.
+      this.pauseStaleStream(now);
+      if (this.sampler.lastDeltaAt === undefined) {
+        this.sampler.start(generationKey, now);
+      }
+      this.sampler.append(generationKey, streamKey, delta, now);
+      return;
+    }
     if (
       this.sampler.generationKey !== generationKey ||
       this.sampler.lastDeltaAt === undefined ||
@@ -123,6 +136,9 @@ export class LiveTpsReporter {
 
   pause(now = Date.now(), fallbackDurationMs, outputTokens) {
     if (this.closed) return;
+    if (this.streamingOnly && this.sampler.lastDeltaAt !== undefined) {
+      now = Math.min(now, this.sampler.lastDeltaAt);
+    }
     const observationDuration = this.sampler.observationDuration(now);
     let finalRate = this.sampler.sample(now);
     // One nearly instantaneous chunk has no meaningful streaming-rate denominator.
@@ -169,6 +185,7 @@ export class LiveTpsReporter {
 
   tick(now = Date.now()) {
     if (this.closed) return;
+    if (this.pauseStaleStream(now)) return;
     const rate = this.sampler.sample(now);
     if (rate === undefined || rate <= 0) {
       this.publishZero();
@@ -185,6 +202,15 @@ export class LiveTpsReporter {
     }
     this.lastDisplayAt = now;
     this.publishRate(displayRate);
+  }
+
+  pauseStaleStream(now) {
+    const lastDeltaAt = this.sampler.lastDeltaAt;
+    if (!this.streamingOnly || lastDeltaAt === undefined || now - lastDeltaAt < this.staleMs) {
+      return false;
+    }
+    this.pause(lastDeltaAt);
+    return true;
   }
 
   resetDisplay() {

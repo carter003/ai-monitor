@@ -164,6 +164,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             agy_home: config.agy.clone(),
             agy2_home: config.agy2.clone(),
         },
+        config.cloudflare.clone(),
     )
     .map_err(|error| {
         io::Error::new(
@@ -199,6 +200,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.clear()?;
     let refresh = config.refresh;
+    let mut network =
+        ai_monitor::network::NetworkState::new(config.network_enabled, config.network_interval);
     let workers = Workers::start(config);
     let mut states: Vec<_> = Source::ALL
         .into_iter()
@@ -226,6 +229,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         state.finish(result, at, next);
                     }
                 }
+                Update::Network(update) => network.apply(update),
                 Update::Usage(stats) => usage = *stats,
             }
             dirty = true;
@@ -242,6 +246,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &sampler.stats,
                     &states,
                     &usage,
+                    &network,
                     &mut view,
                     chrono::Utc::now().timestamp(),
                 )

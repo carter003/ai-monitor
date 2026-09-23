@@ -291,3 +291,41 @@ test('LiveTpsReporter seed populates rate immediately for Herdr metadata', async
 
   await reporter.close();
 });
+
+for (const tickDuringWait of [true, false]) {
+  test(`Codex short bursts exclude tool waits (timer runs: ${tickDuringWait})`, async () => {
+    const events = [];
+    const reporter = new LiveTpsReporter({
+      publisher: ratePublisher(events),
+      tokenCounterFactory: () => (text) => text.length,
+      streamingOnly: true,
+      autoStart: false,
+    });
+    reporter.start('long-turn', 'gpt-6-astra', 0);
+    // Thirty seconds to first output must not become generation time.
+    for (let t = 30000; t <= 31000; t += 250) {
+      reporter.append('long-turn', 'reasoning', 'xxxxx', 'gpt-6-astra', t);
+      reporter.tick(t);
+    }
+    assert.ok(reporter.lastRate >= 20, `short output rate: ${reporter.lastRate}`);
+    const beforeWait = reporter.lastRate;
+    if (tickDuringWait) {
+      reporter.tick(32500);
+      reporter.tick(90000);
+      assert.equal(reporter.lastRate, beforeWait);
+      reporter.refreshMetadata();
+      assert.equal(events.at(-1).snapshot.rate, beforeWait);
+    }
+    // Another short inference in the SAME turn after a long tool wait.
+    for (let t = 120000; t <= 121000; t += 250) {
+      reporter.append('long-turn', 'answer', 'xxxxx', 'gpt-6-astra', t);
+      reporter.tick(t);
+    }
+    assert.ok(reporter.lastRate >= 20, `rate after tool wait: ${reporter.lastRate}`);
+    reporter.pause(121000);
+    reporter.tick(180000);
+    assert.ok(reporter.lastRate >= 20);
+    assert.ok(events.filter(e => e.rate !== undefined).every(e => e.rate > 0));
+    await reporter.close();
+  });
+}

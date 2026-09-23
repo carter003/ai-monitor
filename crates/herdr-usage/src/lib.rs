@@ -1,5 +1,6 @@
 //! Shared library for the herdr token-usage collector and its price importer.
 
+pub mod cloudflare;
 pub mod cost;
 pub mod db;
 pub mod event;
