@@ -68,12 +68,12 @@ impl CloudflareConfig {
 pub struct CloudflareQuotas {
     pub workers_requests: f64,
     pub workers_cpu_time_us: f64,
+    pub workers_scripts: f64,
     pub d1_rows_read: f64,
     pub d1_rows_written: f64,
     pub d1_storage_bytes: f64,
     pub r2_class_a: f64,
     pub r2_class_b: f64,
-    pub r2_operations: f64,
     pub r2_storage_bytes: f64,
     pub kv_read_operations: f64,
     pub kv_write_operations: f64,
@@ -88,12 +88,12 @@ impl CloudflareQuotas {
             Self {
                 workers_requests: 3_000_000.0,         // ~100k/day * 30
                 workers_cpu_time_us: 30_000_000_000.0, // 30,000s
+                workers_scripts: 100.0,                // 100 Workers scripts limit
                 d1_rows_read: 150_000_000.0,           // 5M/day * 30
                 d1_rows_written: 3_000_000.0,          // 100k/day * 30
-                d1_storage_bytes: 500_000_000.0,       // 500 MB
+                d1_storage_bytes: 5_000_000_000.0,     // 5 GB 账户总存储（500 MB 是单库上限）
                 r2_class_a: 1_000_000.0,               // 1M Class A
                 r2_class_b: 10_000_000.0,              // 10M Class B
-                r2_operations: 1_000_000.0,
                 r2_storage_bytes: 10_000_000_000.0,    // 10 GB
                 kv_read_operations: 3_000_000.0,       // 100k/day * 30
                 kv_write_operations: 30_000.0,         // 1k/day * 30
@@ -105,12 +105,12 @@ impl CloudflareQuotas {
             Self {
                 workers_requests: 10_000_000.0,        // 10M included
                 workers_cpu_time_us: 30_000_000_000.0, // 30M ms = 30,000s included ($0.02 / 1M ms thereafter)
+                workers_scripts: 500.0,                // 500 Workers scripts included
                 d1_rows_read: 25_000_000_000.0,        // 25B included
                 d1_rows_written: 50_000_000.0,         // 50M included
                 d1_storage_bytes: 5_000_000_000.0,     // 5 GB included ($0.75/GB-mo thereafter)
                 r2_class_a: 1_000_000.0,               // 1M Class A included
                 r2_class_b: 10_000_000.0,              // 10M Class B included
-                r2_operations: 1_000_000.0,            // 1M Class A included
                 r2_storage_bytes: 10_000_000_000.0,    // 10 GB included ($0.015/GB-mo thereafter)
                 kv_read_operations: 10_000_000.0,      // 10M included ($0.50/M thereafter)
                 kv_write_operations: 1_000_000.0,      // 1M included ($5.00/M thereafter)
@@ -136,7 +136,7 @@ pub struct BillingCycleInfo {
     pub is_fallback: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MetricItem {
     pub name: String,
     pub value: f64,
@@ -153,11 +153,16 @@ pub struct MetricItem {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CurrentPeriodSummary {
-    // Workers Compute
+    // Workers Compute & Deployments
     pub workers_requests: MetricItem,
     pub workers_cpu_time: MetricItem,
     pub workers_errors: MetricItem,
-
+    #[serde(default)]
+    pub workers_scripts: MetricItem,
+    #[serde(default)]
+    pub workers_build_minutes_limit: u64,
+    #[serde(default)]
+    pub workers_concurrent_builds_limit: u64,
     // D1
     pub d1_rows_read: MetricItem,
     pub d1_rows_written: MetricItem,
@@ -339,6 +344,12 @@ pub fn generate_ascii_card(summary: &CurrentPeriodSummary) -> String {
         &summary.workers_cpu_time.formatted_value,
         &format_percent(summary.workers_cpu_time.percent),
         &summary.workers_cpu_time.progress_bar,
+    ));
+    lines.push(format_row(
+        "Deployments",
+        &summary.workers_scripts.formatted_value,
+        &format_percent(summary.workers_scripts.percent),
+        &summary.workers_scripts.progress_bar,
     ));
     lines.push(format_row(
         "Errors",
@@ -540,6 +551,7 @@ pub struct StorageDetails {
     pub r2_buckets_count: u64,
     pub r2_objects_count: u64,
     pub kv_namespaces_count: u64,
+    pub workers_scripts_count: u64,
 }
 
 pub fn fetch_storage_details(
@@ -603,7 +615,103 @@ pub fn fetch_storage_details(
         }
     }
 
+    // 4. Workers scripts (deployed Workers count)
+    let workers_url = format!("https://api.cloudflare.com/client/v4/accounts/{account_id}/workers/scripts");
+    if let Ok(resp) = client.get(&workers_url).header("Authorization", format!("Bearer {api_token}")).send() {
+        if let Ok(json) = resp.json::<serde_json::Value>() {
+            if let Some(total) = json.get("result_info").and_then(|info| info.get("total_count")).and_then(|c| c.as_u64()) {
+                details.workers_scripts_count = total;
+            } else if let Some(arr) = json.get("result").and_then(|r| r.as_array()) {
+                details.workers_scripts_count = arr.len() as u64;
+            }
+        }
+    }
+
     details
+}
+
+// ---------------------------------------------------------------------------
+// Observability Log Events (Workers Logs)
+// ---------------------------------------------------------------------------
+
+/// Billed Workers Logs events for the billing period.
+///
+/// GraphQL exposes no dataset for Observability log events; the only source is
+/// the Workers Observability telemetry query, which the token must be allowed
+/// to call (`Workers Observability Write`/`Read`). Any failure degrades to
+/// `None` so the dashboard shows 未采集 — never a number borrowed from another
+/// metric (the bug this replaced: it displayed the request count).
+pub fn fetch_observability_events(
+    client: &reqwest::blocking::Client,
+    account_id: &str,
+    api_token: &str,
+    period: &BillingCycleInfo,
+) -> Result<u64, String> {
+    let from = chrono::DateTime::parse_from_rfc3339(&period.start)
+        .map_err(|e| format!("计费周期起始时间无法解析：{e}"))?
+        .timestamp_millis();
+    let to = chrono::DateTime::parse_from_rfc3339(&period.end)
+        .map_err(|e| format!("计费周期结束时间无法解析：{e}"))?
+        .timestamp_millis();
+
+    // 实测：view+ignoreSeries 组合下 aggregates 恒为占位 0（扫了几百万行也返回 0），
+    // chartType=aggregate 才返回真实计数。datasets=[] = 默认配额池——Workers Logs
+    // 事件与 traces spans 共享 20M 配额，只查单一 dataset 会漏掉 spans 部分。
+    let body = serde_json::json!({
+        "queryId": "ai-monitor-log-events",
+        "timeframe": { "from": from, "to": to },
+        "chart": true,
+        "chartType": "aggregate",
+        "parameters": {
+            "datasets": [],
+            "filterCombination": "AND",
+            "filters": [],
+            "calculations": [{ "operator": "count", "alias": "total" }]
+        }
+    });
+
+    let url = format!(
+        "https://api.cloudflare.com/client/v4/accounts/{account_id}/workers/observability/telemetry/query"
+    );
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {api_token}"))
+        .json(&body)
+        .send()
+        .map_err(|e| format!("Observability 查询请求失败：{e}"))?;
+    let status = response.status();
+    let parsed: serde_json::Value = response
+        .json()
+        .map_err(|e| format!("Observability 查询响应解析失败：{e}"))?;
+
+    let rejected = !status.is_success()
+        || parsed.get("success").and_then(|v| v.as_bool()) == Some(false);
+    if rejected {
+        let message = parsed["errors"][0]["message"].as_str().unwrap_or("未知错误");
+        return Err(format!("Observability 查询被拒绝（{status}）：{message}"));
+    }
+
+    parse_log_event_count(&parsed)
+        .ok_or_else(|| "Observability 查询响应中没有 total 计数".to_string())
+}
+
+/// `chartType=aggregate` 响应的计数在 `result.calculations[]`：按 alias 定位
+/// 我们的计数项，累加其 `aggregates[].value`（整体窗口通常只有一项）。
+fn parse_log_event_count(payload: &serde_json::Value) -> Option<u64> {
+    let entry = payload
+        .pointer("/result/calculations")?
+        .as_array()?
+        .iter()
+        .find(|c| c.get("alias").and_then(|a| a.as_str()) == Some("total"))?;
+    let aggregates = entry.pointer("/aggregates")?.as_array()?;
+    if aggregates.is_empty() {
+        return None;
+    }
+    let sum: f64 = aggregates
+        .iter()
+        .filter_map(|a| a.get("value").and_then(|v| v.as_f64()))
+        .sum();
+    Some(sum as u64)
 }
 
 // ---------------------------------------------------------------------------
@@ -649,6 +757,8 @@ struct GqlAccountNode {
     kv_operations: Option<Vec<GqlKvOperationItem>>,
     #[serde(default, rename = "analyticsEngine")]
     analytics_engine: Option<Vec<GqlAnalyticsEngineItem>>,
+    #[serde(default, rename = "kvStorage")]
+    kv_storage: Option<Vec<GqlKvStorageItem>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -703,8 +813,15 @@ struct GqlR2OverviewItem {
 
 #[derive(Deserialize, Default)]
 struct GqlR2DailyItem {
-    dimensions: Option<GqlDateDimension>,
+    dimensions: Option<GqlR2DailyDimension>,
     sum: Option<GqlR2Sum>,
+}
+
+#[derive(Deserialize, Default)]
+struct GqlR2DailyDimension {
+    date: Option<String>,
+    #[serde(rename = "actionType")]
+    action_type: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -745,6 +862,20 @@ struct GqlKvSum {
 }
 
 #[derive(Deserialize, Default)]
+struct GqlKvStorageItem {
+    dimensions: Option<GqlDateDimension>,
+    max: Option<GqlKvStorageMax>,
+}
+
+/// `kvStorageAdaptiveGroups` 只有 `max` 聚合器（内省确认），没有 `sum`；
+/// 每行是一个命名空间的时点值，账户总量需要在客户端按最新快照日求和。
+#[derive(Deserialize, Default)]
+struct GqlKvStorageMax {
+    #[serde(rename = "byteCount")]
+    byte_count: Option<u64>,
+}
+
+#[derive(Deserialize, Default)]
 struct GqlAnalyticsEngineItem {
     count: Option<u64>,
 }
@@ -762,8 +893,27 @@ pub struct FetchedAnalytics {
     pub r2_operations: u64,
     pub kv_read_operations: u64,
     pub kv_write_operations: u64,
+    /// None = 该数据集缺失/字段为空，不得显示为 0。
+    pub kv_storage_bytes: Option<u64>,
     pub analytics_engine_points: u64,
     pub daily_records: Vec<(String, String, String, f64)>,
+}
+
+/// CF 只对 A/B 两类操作计费；删除/中止类操作免费，不进任何配额也不进合计
+/// （官方 R2 pricing：DeleteObject、DeleteBucket、AbortMultipartUpload 免费）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum R2OpClass {
+    A,
+    B,
+    Free,
+}
+
+fn r2_op_class(action: &str) -> R2OpClass {
+    match action {
+        "GetObject" | "HeadObject" | "HeadBucket" => R2OpClass::B,
+        "DeleteObject" | "DeleteBucket" | "AbortMultipartUpload" => R2OpClass::Free,
+        _ => R2OpClass::A,
+    }
 }
 
 pub fn query_analytics(
@@ -773,7 +923,7 @@ pub fn query_analytics(
     period: &BillingCycleInfo,
 ) -> Result<FetchedAnalytics, String> {
     let query = r#"
-query AccountAnalytics($accountTag: String!, $start: Time!, $end: Time!, $startDate: Date!, $endDate: Date!) {
+query AccountAnalytics($accountTag: String!, $start: Time!, $end: Time!, $startDate: Date!, $endDate: Date!, $kvStartDate: Date!) {
   viewer {
     accounts(filter: { accountTag: $accountTag }) {
       workersOverview: workersInvocationsAdaptive(filter: { datetime_geq: $start, datetime_lt: $end }, limit: 10000) {
@@ -795,7 +945,7 @@ query AccountAnalytics($accountTag: String!, $start: Time!, $end: Time!, $startD
         sum { requests responseObjectSize }
       }
       r2Daily: r2OperationsAdaptiveGroups(filter: { date_geq: $startDate, date_leq: $endDate }, limit: 10000, orderBy: [date_ASC]) {
-        dimensions { date }
+        dimensions { date actionType }
         sum { requests }
       }
       kvOperations: kvOperationsAdaptiveGroups(filter: { date_geq: $startDate, date_leq: $endDate }, limit: 100) {
@@ -805,10 +955,18 @@ query AccountAnalytics($accountTag: String!, $start: Time!, $end: Time!, $startD
       analyticsEngine: workersAnalyticsEngineAdaptiveGroups(filter: { date_geq: $startDate, date_leq: $endDate }, limit: 100) {
         count
       }
+      kvStorage: kvStorageAdaptiveGroups(filter: { date_geq: $kvStartDate, date_leq: $endDate }, limit: 10000, orderBy: [date_DESC]) {
+        dimensions { date namespaceId }
+        max { byteCount }
+      }
     }
   }
 }
 "#;
+
+    // KV 存储是时点量：固定回看 31 天保留期内的最新快照。不能绑定周期起点——
+    // 周期刚开始时，最新快照（可能滞后一天）会落在周期之前而查不到。
+    let kv_start = (Utc::now() - chrono::Duration::days(30)).format("%Y-%m-%d").to_string();
 
     let variables = serde_json::json!({
         "accountTag": account_id,
@@ -816,6 +974,7 @@ query AccountAnalytics($accountTag: String!, $start: Time!, $end: Time!, $startD
         "end": period.end,
         "startDate": period.start_date,
         "endDate": period.end_date,
+        "kvStartDate": kv_start,
     });
 
     let body = serde_json::json!({
@@ -862,6 +1021,7 @@ query AccountAnalytics($accountTag: String!, $start: Time!, $end: Time!, $startD
         r2_operations: 0,
         kv_read_operations: 0,
         kv_write_operations: 0,
+        kv_storage_bytes: None,
         analytics_engine_points: 0,
         daily_records: Vec::new(),
     };
@@ -933,32 +1093,40 @@ query AccountAnalytics($accountTag: String!, $start: Time!, $end: Time!, $startD
     if let Some(overview) = node.r2_overview {
         for item in overview {
             let reqs = item.sum.as_ref().and_then(|s| s.requests).unwrap_or(0);
-            analytics.r2_operations += reqs;
             let action = item
                 .dimensions
                 .as_ref()
                 .and_then(|d| d.action_type.as_deref())
                 .unwrap_or("");
-            match action {
-                "GetObject" | "HeadObject" | "HeadBucket" => {
-                    analytics.r2_class_b_operations += reqs;
-                }
-                _ => {
+            match r2_op_class(action) {
+                R2OpClass::A => {
                     analytics.r2_class_a_operations += reqs;
+                    analytics.r2_operations += reqs;
                 }
+                R2OpClass::B => {
+                    analytics.r2_class_b_operations += reqs;
+                    analytics.r2_operations += reqs;
+                }
+                R2OpClass::Free => {}
             }
         }
     }
 
-    // R2 Daily
+    // R2 Daily：只记计费的 A+B，与周期合计、A/B 卡片同一口径（免费删除不计）。
     if let Some(daily) = node.r2_daily {
+        let mut billable_by_date: BTreeMap<String, u64> = BTreeMap::new();
         for item in daily {
             if let (Some(dim), Some(sum)) = (item.dimensions, item.sum) {
+                if r2_op_class(dim.action_type.as_deref().unwrap_or("")) == R2OpClass::Free {
+                    continue;
+                }
                 if let Some(date) = dim.date {
-                    let ops = sum.requests.unwrap_or(0);
-                    analytics.daily_records.push((date, "r2".into(), "operations".into(), ops as f64));
+                    *billable_by_date.entry(date).or_insert(0) += sum.requests.unwrap_or(0);
                 }
             }
+        }
+        for (date, ops) in billable_by_date {
+            analytics.daily_records.push((date, "r2".into(), "operations".into(), ops as f64));
         }
     }
 
@@ -983,6 +1151,25 @@ query AccountAnalytics($accountTag: String!, $start: Time!, $end: Time!, $startD
         for item in ae_items {
             analytics.analytics_engine_points += item.count.unwrap_or(0);
         }
+    }
+
+    // KV Storage：时点量。取最新快照日，跨命名空间求和；数据集缺失 → None。
+    if let Some(items) = node.kv_storage {
+        analytics.kv_storage_bytes = match items
+            .iter()
+            .filter_map(|i| i.dimensions.as_ref().and_then(|d| d.date.as_deref()))
+            .max()
+        {
+            Some(latest) => Some(
+                items
+                    .iter()
+                    .filter(|i| i.dimensions.as_ref().and_then(|d| d.date.as_deref()) == Some(latest))
+                    .filter_map(|i| i.max.as_ref().and_then(|m| m.byte_count))
+                    .sum(),
+            ),
+            None if items.is_empty() => Some(0),
+            None => None,
+        };
     }
 
     Ok(analytics)
@@ -1162,8 +1349,11 @@ pub fn build_current_period_summary(
     r2_objects_count: u64,
     kv_read_operations: u64,
     kv_write_operations: u64,
+    kv_storage_bytes: Option<u64>,
     kv_namespaces_count: u64,
     analytics_engine_points: u64,
+    observability_events: Option<u64>,
+    workers_scripts_count: u64,
 ) -> CurrentPeriodSummary {
     let workers_requests_item = make_metric(
         "Workers 请求次数",
@@ -1182,6 +1372,21 @@ pub fn build_current_period_summary(
         |v| format_cpu_time(v),
         |q| format_cpu_time(q),
     );
+
+    let workers_scripts_item = make_metric(
+        "Workers 部署服务数",
+        workers_scripts_count as f64,
+        quotas.workers_scripts,
+        "个",
+        |v| format_compact_number(v),
+        |q| format_compact_number(q),
+    );
+
+    let (build_mins, concurrent_builds) = if quotas.workers_scripts <= 100.0 {
+        (3_000, 1)
+    } else {
+        (6_000, 6)
+    };
 
     let err_pct = if workers_requests > 0 {
         (workers_errors as f64 / workers_requests as f64) * 100.0
@@ -1249,14 +1454,20 @@ pub fn build_current_period_summary(
         |q| format_compact_number(q),
     );
 
-    let r2_operations_item = make_metric(
-        "R2 总操作数",
-        r2_operations as f64,
-        quotas.r2_operations,
-        "次",
-        |v| format_compact_number(v),
-        |q| format_compact_number(q),
-    );
+    // CF 没有 A+B 合计上限：总数只作展示，不套任何伪配额。
+    let r2_operations_item = MetricItem {
+        name: "R2 总操作数".into(),
+        value: r2_operations as f64,
+        quota: 0.0,
+        remaining: 0.0,
+        percent: 0.0,
+        formatted_value: format_compact_number(r2_operations as f64),
+        formatted_quota: "—".into(),
+        formatted_remaining: "—".into(),
+        unit: "次".into(),
+        status: "normal".into(),
+        progress_bar: "".into(),
+    };
 
     let r2_storage_item = make_metric(
         "R2 存储桶容量",
@@ -1286,14 +1497,30 @@ pub fn build_current_period_summary(
         |q| format_compact_number(q),
     );
 
-    let kv_storage_item = make_metric(
-        "KV 存储容量",
-        0.0,
-        quotas.kv_storage_bytes,
-        "",
-        |v| format_bytes(v),
-        |q| format_bytes(q),
-    );
+    let kv_storage_item = match kv_storage_bytes {
+        Some(bytes) => make_metric(
+            "KV 存储容量",
+            bytes as f64,
+            quotas.kv_storage_bytes,
+            "",
+            |v| format_bytes(v),
+            |q| format_bytes(q),
+        ),
+        // 采不到就明说：绝不显示硬编码的 0 B 冒充实测值。
+        None => MetricItem {
+            name: "KV 存储容量".into(),
+            value: 0.0,
+            quota: 0.0,
+            remaining: 0.0,
+            percent: 0.0,
+            formatted_value: "未采集".into(),
+            formatted_quota: "—".into(),
+            formatted_remaining: "—".into(),
+            unit: String::new(),
+            status: "normal".into(),
+            progress_bar: "".into(),
+        },
+    };
 
     // Observability
     let ae_item = make_metric(
@@ -1304,20 +1531,39 @@ pub fn build_current_period_summary(
         |v| format_compact_number(v),
         |q| format_compact_number(q),
     );
-    let obs_events_item = make_metric(
-        "Observability 日志事件",
-        workers_requests as f64,
-        quotas.observability_events,
-        "次",
-        |v| format_compact_number(v),
-        |q| format_compact_number(q),
-    );
+    let obs_events_item = match observability_events {
+        Some(events) => make_metric(
+            "Observability 日志事件",
+            events as f64,
+            quotas.observability_events,
+            "次",
+            |v| format_compact_number(v),
+            |q| format_compact_number(q),
+        ),
+        // 采集失败时不显示任何数字：绝不回落到请求数冒充日志事件。
+        None => MetricItem {
+            name: "Observability 日志事件".into(),
+            value: 0.0,
+            quota: 0.0,
+            remaining: 0.0,
+            percent: 0.0,
+            formatted_value: "未采集".into(),
+            formatted_quota: "—".into(),
+            formatted_remaining: "—".into(),
+            unit: String::new(),
+            status: "normal".into(),
+            progress_bar: "".into(),
+        },
+    };
 
 
     CurrentPeriodSummary {
         workers_requests: workers_requests_item,
         workers_cpu_time: workers_cpu_time_item,
+        workers_scripts: workers_scripts_item,
         workers_errors: workers_errors_item,
+        workers_build_minutes_limit: build_mins,
+        workers_concurrent_builds_limit: concurrent_builds,
         d1_rows_read: d1_rows_read_item,
         d1_rows_written: d1_rows_written_item,
         d1_storage: d1_storage_item,
@@ -1418,8 +1664,11 @@ pub fn report(
                 storage.r2_objects_count,
                 analytics.kv_read_operations,
                 analytics.kv_write_operations,
+                analytics.kv_storage_bytes,
                 storage.kv_namespaces_count,
                 analytics.analytics_engine_points,
+                fetch_observability_events(&client, account_id, api_token, &period).ok(),
+                storage.workers_scripts_count,
             );
 
             let ascii_card = generate_ascii_card(&summary);
@@ -1542,8 +1791,11 @@ mod tests {
             8,
             1000,
             100,
+            None,
             0,
             0,
+            None,
+            12,
         );
         let card = generate_ascii_card(&summary);
         assert!(card.contains("WORKERS"));
@@ -1553,6 +1805,9 @@ mod tests {
         assert!(card.contains("CPU Time"));
         assert!(card.contains("48.2 sec"));
         assert!(card.contains("0.2%"));
+        assert!(card.contains("Deployments"));
+        assert!(card.contains("12"));
+        assert!(card.contains("2.4%"));
         assert!(card.contains("Errors"));
         assert!(card.contains("1,203"));
         assert!(card.contains("D1"));
@@ -1660,5 +1915,201 @@ mod tests {
         assert_eq!(monthly2.len(), 1);
         assert_eq!(monthly2[0].workers_requests, 1600000);
         assert_eq!(monthly2[0].d1_rows_read, 4500000000);
+    }
+
+    #[test]
+    fn test_observability_events_use_log_counts_not_requests() {
+        let quotas = CloudflareQuotas::for_plan("paid");
+        let base = |events: Option<u64>| {
+            build_current_period_summary(
+                &quotas,
+                11_864,
+                146_093_003,
+                0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, None,
+                0, 0,
+                events,
+                7,
+            )
+        };
+
+        // 采集成功：卡片显示真实日志事件数，而不是请求数。
+        let collected = base(Some(127_520));
+        assert_eq!(collected.observability_events.value, 127_520.0);
+        // 用户看到的两个卡片必须不同：11.9K 是请求数，127.5K 才是日志事件。
+        assert_ne!(
+            collected.observability_events.formatted_value,
+            collected.workers_requests.formatted_value
+        );
+        assert!(collected.observability_events.formatted_value.ends_with('K'));
+
+        // 采集失败：不显示任何数字，更不能拿请求数顶替。
+        let missing = base(None);
+        assert_eq!(missing.observability_events.formatted_value, "未采集");
+        assert_eq!(missing.observability_events.value, 0.0);
+        assert_eq!(missing.observability_events.quota, 0.0);
+        assert_ne!(
+            missing.observability_events.value,
+            missing.workers_requests.value
+        );
+    }
+
+    #[test]
+    fn parses_log_event_count_from_aggregate_response() {
+        // 真实 chartType=aggregate 响应（节选）：alias 定位 + aggregates 求和。
+        let live = serde_json::json!({
+            "success": true,
+            "result": {
+                "calculations": [{
+                    "alias": "total",
+                    "calculation": "count",
+                    "aggregates": [
+                        {"value": 46278, "interval": 1.0027, "sampleInterval": 1.0027, "count": 46278}
+                    ],
+                    "series": [{"time": "2026-09-20 01:36:00", "data": []}]
+                }],
+                "statistics": {"rows_read": 8398196}
+            }
+        });
+        assert_eq!(parse_log_event_count(&live), Some(46_278));
+
+        // 多段 aggregates（若引擎按区间拆分）应求和而不是取第一段。
+        let multi = serde_json::json!({
+            "result": {"calculations": [{
+                "alias": "total",
+                "aggregates": [{"value": 10}, {"value": 32}]}
+            ]}
+        });
+        assert_eq!(parse_log_event_count(&multi), Some(42));
+
+        // alias 不匹配或结构缺失 → None（显示未采集，绝不显示 0 冒充实测）。
+        let wrong_alias = serde_json::json!({
+            "result": {"calculations": [{"alias": "other", "aggregates": [{"value": 5}]}]}
+        });
+        assert_eq!(parse_log_event_count(&wrong_alias), None);
+        assert_eq!(
+            parse_log_event_count(&serde_json::json!({"result": {"calculations": []}})),
+            None
+        );
+        let empty_aggs = serde_json::json!({
+            "result": {"calculations": [{"alias": "total", "aggregates": []}]}
+        });
+        assert_eq!(parse_log_event_count(&empty_aggs), None);
+    }
+
+    #[test]
+    fn r2_classifies_free_deletes_out_of_billable_totals() {
+        assert_eq!(r2_op_class("PutObject"), R2OpClass::A);
+        assert_eq!(r2_op_class("ListBuckets"), R2OpClass::A);
+        assert_eq!(r2_op_class("GetObject"), R2OpClass::B);
+        assert_eq!(r2_op_class("HeadBucket"), R2OpClass::B);
+        // 官方免费操作：不进 Class A/B，也不进合计。
+        assert_eq!(r2_op_class("DeleteObject"), R2OpClass::Free);
+        assert_eq!(r2_op_class("DeleteBucket"), R2OpClass::Free);
+        assert_eq!(r2_op_class("AbortMultipartUpload"), R2OpClass::Free);
+    }
+
+    #[test]
+    fn kv_storage_shows_bytes_or_uncollected_never_fake_zero() {
+        let quotas = CloudflareQuotas::for_plan("paid");
+        let base = |kv: Option<u64>| {
+            build_current_period_summary(
+                &quotas,
+                1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0,
+                kv,
+                0,
+                0,
+                None,
+                1,
+            )
+        };
+
+        let collected = base(Some(50_000_000));
+        assert_eq!(collected.kv_storage.formatted_value, "50.0 MB");
+        assert_eq!(collected.kv_storage.quota, quotas.kv_storage_bytes);
+
+        let missing = base(None);
+        assert_eq!(missing.kv_storage.formatted_value, "未采集");
+        assert_eq!(missing.kv_storage.quota, 0.0);
+
+        // 合计没有 CF 官方配额，绝不套 Class A 的 1M。
+        assert_eq!(collected.r2_operations.quota, 0.0);
+        assert_eq!(collected.r2_operations.formatted_quota, "—");
+    }
+
+    #[test]
+    fn test_worker_deployment_quotas_and_limits() {
+        let free_quotas = CloudflareQuotas::for_plan("free");
+        assert_eq!(free_quotas.workers_scripts, 100.0);
+        // free 档 D1 是账户 5 GB 总存储；500 MB 是单库上限，不是账户配额。
+        assert_eq!(free_quotas.d1_storage_bytes, 5_000_000_000.0);
+
+        let paid_quotas = CloudflareQuotas::for_plan("paid");
+        assert_eq!(paid_quotas.workers_scripts, 500.0);
+
+        let free_summary = build_current_period_summary(
+            &free_quotas,
+            1000, 10000, 0,
+            100, 10, 1, 1, 1024, 1,
+            10, 10, 20, 1024, 1, 1,
+            10, 1, None, 1, 10,
+            None,
+            5, // 5 scripts deployed
+        );
+        assert_eq!(free_summary.workers_scripts.value, 5.0);
+        assert_eq!(free_summary.workers_scripts.quota, 100.0);
+        assert_eq!(free_summary.workers_scripts.remaining, 95.0);
+        assert_eq!(free_summary.workers_scripts.percent, 5.0);
+        assert_eq!(free_summary.workers_build_minutes_limit, 3_000);
+        assert_eq!(free_summary.workers_concurrent_builds_limit, 1);
+
+        let paid_summary = build_current_period_summary(
+            &paid_quotas,
+            1000, 10000, 0,
+            100, 10, 1, 1, 1024, 1,
+            10, 10, 20, 1024, 1, 1,
+            10, 1, None, 1, 10,
+            None,
+            25, // 25 scripts deployed
+        );
+        assert_eq!(paid_summary.workers_scripts.value, 25.0);
+        assert_eq!(paid_summary.workers_scripts.quota, 500.0);
+        assert_eq!(paid_summary.workers_scripts.remaining, 475.0);
+        assert_eq!(paid_summary.workers_scripts.percent, 5.0);
+        assert_eq!(paid_summary.workers_build_minutes_limit, 6_000);
+        assert_eq!(paid_summary.workers_concurrent_builds_limit, 6);
+
+        // Verify backward compatibility: JSON without workers_scripts deserializes with default values
+        let legacy_json = serde_json::json!({
+            "workers_requests": { "name": "req", "value": 0.0, "quota": 0.0, "remaining": 0.0, "percent": 0.0, "formatted_value": "", "formatted_quota": "", "formatted_remaining": "", "unit": "", "status": "", "progress_bar": "" },
+            "workers_cpu_time": { "name": "cpu", "value": 0.0, "quota": 0.0, "remaining": 0.0, "percent": 0.0, "formatted_value": "", "formatted_quota": "", "formatted_remaining": "", "unit": "", "status": "", "progress_bar": "" },
+            "workers_errors": { "name": "err", "value": 0.0, "quota": 0.0, "remaining": 0.0, "percent": 0.0, "formatted_value": "", "formatted_quota": "", "formatted_remaining": "", "unit": "", "status": "", "progress_bar": "" },
+            "d1_rows_read": { "name": "d1r", "value": 0.0, "quota": 0.0, "remaining": 0.0, "percent": 0.0, "formatted_value": "", "formatted_quota": "", "formatted_remaining": "", "unit": "", "status": "", "progress_bar": "" },
+            "d1_rows_written": { "name": "d1w", "value": 0.0, "quota": 0.0, "remaining": 0.0, "percent": 0.0, "formatted_value": "", "formatted_quota": "", "formatted_remaining": "", "unit": "", "status": "", "progress_bar": "" },
+            "d1_storage": { "name": "d1s", "value": 0.0, "quota": 0.0, "remaining": 0.0, "percent": 0.0, "formatted_value": "", "formatted_quota": "", "formatted_remaining": "", "unit": "", "status": "", "progress_bar": "" },
+            "d1_read_queries": 0,
+            "d1_write_queries": 0,
+            "d1_databases_count": 0,
+            "r2_class_a_operations": { "name": "r2a", "value": 0.0, "quota": 0.0, "remaining": 0.0, "percent": 0.0, "formatted_value": "", "formatted_quota": "", "formatted_remaining": "", "unit": "", "status": "", "progress_bar": "" },
+            "r2_class_b_operations": { "name": "r2b", "value": 0.0, "quota": 0.0, "remaining": 0.0, "percent": 0.0, "formatted_value": "", "formatted_quota": "", "formatted_remaining": "", "unit": "", "status": "", "progress_bar": "" },
+            "r2_operations": { "name": "r2o", "value": 0.0, "quota": 0.0, "remaining": 0.0, "percent": 0.0, "formatted_value": "", "formatted_quota": "", "formatted_remaining": "", "unit": "", "status": "", "progress_bar": "" },
+            "r2_storage": { "name": "r2s", "value": 0.0, "quota": 0.0, "remaining": 0.0, "percent": 0.0, "formatted_value": "", "formatted_quota": "", "formatted_remaining": "", "unit": "", "status": "", "progress_bar": "" },
+            "r2_buckets_count": 0,
+            "r2_objects_count": 0,
+            "kv_read_operations": { "name": "kvr", "value": 0.0, "quota": 0.0, "remaining": 0.0, "percent": 0.0, "formatted_value": "", "formatted_quota": "", "formatted_remaining": "", "unit": "", "status": "", "progress_bar": "" },
+            "kv_write_operations": { "name": "kvw", "value": 0.0, "quota": 0.0, "remaining": 0.0, "percent": 0.0, "formatted_value": "", "formatted_quota": "", "formatted_remaining": "", "unit": "", "status": "", "progress_bar": "" },
+            "kv_storage": { "name": "kvs", "value": 0.0, "quota": 0.0, "remaining": 0.0, "percent": 0.0, "formatted_value": "", "formatted_quota": "", "formatted_remaining": "", "unit": "", "status": "", "progress_bar": "" },
+            "kv_namespaces_count": 0,
+            "observability_events": { "name": "obs", "value": 0.0, "quota": 0.0, "remaining": 0.0, "percent": 0.0, "formatted_value": "", "formatted_quota": "", "formatted_remaining": "", "unit": "", "status": "", "progress_bar": "" },
+            "analytics_engine_points": { "name": "ae", "value": 0.0, "quota": 0.0, "remaining": 0.0, "percent": 0.0, "formatted_value": "", "formatted_quota": "", "formatted_remaining": "", "unit": "", "status": "", "progress_bar": "" },
+            "subrequests_limit": 50,
+            "live_tail_limit": 2,
+            "logpush_jobs_limit": 4,
+            "cron_triggers_limit": 5
+        });
+        let deserialized: CurrentPeriodSummary = serde_json::from_value(legacy_json).unwrap();
+        assert_eq!(deserialized.workers_scripts.value, 0.0);
+        assert_eq!(deserialized.workers_build_minutes_limit, 0);
     }
 }

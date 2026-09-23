@@ -28,13 +28,29 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[derive(Clone, Debug)]
+struct PendingMessage {
+    event_id: String,
+    usage: crate::event::UsageEvent,
+    model: Option<String>,
+    provider: Option<String>,
+    session_id: Option<String>,
+    started_at: Option<i64>,
+    completed_at: Option<i64>,
+    duration_ms: Option<i64>,
+    occurred_at: i64,
+}
+
 #[derive(Default)]
 pub struct OmpState {
+    base_sessions: HashMap<PathBuf, String>,
     sessions: HashMap<PathBuf, String>,
     pins: HashMap<(PathBuf, String), String>,
     api_key_pins: HashMap<(PathBuf, String), String>,
     api_key_timelines: HashSet<(PathBuf, String)>,
     seeded: HashSet<PathBuf>,
+    just_reset: HashSet<(PathBuf, String)>,
+    pending: HashMap<PathBuf, PendingMessage>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -219,17 +235,69 @@ impl OmpState {
     }
 
     /// Drop metadata tied to a rotated session file.
+    /// Drop metadata tied to a rotated session file.
     pub fn forget(&mut self, path: &Path) {
+        self.base_sessions.remove(path);
         self.sessions.remove(path);
         self.pins.retain(|(file, _), _| file != path);
         self.api_key_pins.retain(|(file, _), _| file != path);
         self.api_key_timelines.retain(|(file, _)| file != path);
         self.seeded.remove(path);
+        self.just_reset.retain(|(file, _)| file != path);
+        self.pending.remove(path);
     }
 
-    /// Read only the small JSONL header so a collector restart can associate
-    /// newly appended requests with the upstream session id. No messages or
-    /// conversation content are retained.
+    fn finalize_pending(
+        &mut self,
+        path: &Path,
+        accounts: &AccountCatalog,
+    ) -> Option<ParsedEvent> {
+        let pending = self.pending.remove(path)?;
+        let pin = pending
+            .provider
+            .as_ref()
+            .and_then(|provider| self.pins.get(&(path.to_owned(), provider.clone())));
+        let account = pending.provider.as_deref().and_then(|provider| {
+            let timeline_key = (path.to_owned(), provider.to_owned());
+            if self.api_key_timelines.contains(&timeline_key) {
+                self.api_key_pins
+                    .get(&timeline_key)
+                    .and_then(|id| accounts.resolve_credential_id(provider, id))
+            } else {
+                accounts.resolve(
+                    provider,
+                    pending.session_id.as_deref(),
+                    pin.map(String::as_str),
+                )
+            }
+        });
+        Some(ParsedEvent {
+            event_id: pending.event_id,
+            usage: pending.usage,
+            model_source: pending.model.as_ref().map(|_| ModelSource::Event),
+            model: pending.model,
+            provider: pending.provider,
+            session_id: pending.session_id,
+            started_at: pending.started_at,
+            completed_at: pending.completed_at,
+            duration_ms: pending.duration_ms,
+            account_key: account.as_ref().map(|account| account.key.clone()),
+            account_label: account.as_ref().map(|account| account.label.clone()),
+            account_source: account.map(|account| account.source.to_owned()),
+            occurred_at: pending.occurred_at,
+        })
+    }
+
+    pub fn flush_file(
+        &mut self,
+        path: &Path,
+        accounts: &AccountCatalog,
+    ) -> Vec<ParsedEvent> {
+        self.finalize_pending(path, accounts).into_iter().collect()
+    }
+
+    /// Read JSONL metadata so a collector restart can associate
+    /// newly appended requests with the upstream session id and credentials.
     pub fn seed_file(&mut self, path: &Path) {
         if !self.seeded.insert(path.to_owned()) {
             return;
@@ -237,21 +305,85 @@ impl OmpState {
         let Ok(file) = std::fs::File::open(path) else {
             return;
         };
-        for line in BufReader::new(file).lines().map_while(Result::ok).take(8) {
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            let bytes = line.as_bytes();
+            if !bytes.windows(9).any(|part| part == b"\"session\"")
+                && !bytes.windows(14).any(|part| part == b"credential_pin")
+                && !bytes.windows(14).any(|part| part == b"reset_boundary")
+                && !bytes
+                    .windows(b"herdr-api-key-sticky-v1".len())
+                    .any(|part| part == b"herdr-api-key-sticky-v1")
+            {
+                continue;
+            }
             let Ok(record) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
-            if record.get("type").and_then(Value::as_str) == Some("session") {
-                if let Some(id) = record.get("id").and_then(Value::as_str) {
-                    self.sessions.insert(path.to_owned(), id.to_owned());
+            match record.get("type").and_then(Value::as_str) {
+                Some("session") => {
+                    if let Some(id) = record.get("id").and_then(Value::as_str) {
+                        self.base_sessions.insert(path.to_owned(), id.to_owned());
+                        self.sessions.insert(path.to_owned(), id.to_owned());
+                    }
                 }
-                break;
+                Some("reset_boundary") => {
+                    let reset_id = record.get("id").and_then(Value::as_str);
+                    let base_id = self
+                        .base_sessions
+                        .get(path)
+                        .cloned()
+                        .or_else(|| self.sessions.get(path).cloned());
+                    if let (Some(base), Some(rid)) = (base_id, reset_id) {
+                        self.sessions.insert(path.to_owned(), format!("{base}/{rid}"));
+                        self.just_reset.insert((path.to_owned(), "all".to_string()));
+                    }
+                }
+                Some("credential_pin") => {
+                    if let (Some(provider), Some(hash)) = (
+                        record.get("provider").and_then(Value::as_str),
+                        record.get("hash").and_then(Value::as_str),
+                    ) {
+                        self.pins
+                            .insert((path.to_owned(), provider.to_owned()), hash.to_owned());
+                    }
+                }
+                Some("custom")
+                    if record.get("customType").and_then(Value::as_str)
+                        == Some(API_KEY_STICKY_ENTRY) =>
+                {
+                    let Some(data) = record.get("data") else {
+                        continue;
+                    };
+                    let (Some(provider), Some(action)) = (
+                        data.get("provider").and_then(Value::as_str),
+                        data.get("action").and_then(Value::as_str),
+                    ) else {
+                        continue;
+                    };
+                    let key = (path.to_owned(), provider.to_owned());
+                    match action {
+                        "pin" => {
+                            if let Some(cid) = data.get("credentialId").and_then(credential_id) {
+                                self.api_key_timelines.insert(key.clone());
+                                self.api_key_pins.insert(key, cid);
+                            }
+                        }
+                        "release" => {
+                            self.api_key_timelines.insert(key.clone());
+                            self.api_key_pins.remove(&key);
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
             }
         }
     }
 
     pub fn parse_line(&mut self, path: &Path, line: &TailLine) -> Vec<ParsedEvent> {
-        self.parse_line_with_accounts(path, line, &AccountCatalog::default())
+        let mut events = self.parse_line_with_accounts(path, line, &AccountCatalog::default());
+        events.extend(self.flush_file(path, &AccountCatalog::default()));
+        events
     }
 
     pub fn parse_line_with_accounts(
@@ -268,10 +400,26 @@ impl OmpState {
         };
         match record.get("type").and_then(Value::as_str) {
             Some("session") => {
+                let out = self.finalize_pending(path, accounts).into_iter().collect::<Vec<_>>();
                 if let Some(id) = record.get("id").and_then(Value::as_str) {
+                    self.base_sessions.insert(path.to_owned(), id.to_owned());
                     self.sessions.insert(path.to_owned(), id.to_owned());
                 }
-                return vec![];
+                return out;
+            }
+            Some("reset_boundary") => {
+                let out = self.finalize_pending(path, accounts).into_iter().collect::<Vec<_>>();
+                let reset_id = record.get("id").and_then(Value::as_str);
+                let base_id = self
+                    .base_sessions
+                    .get(path)
+                    .cloned()
+                    .or_else(|| self.sessions.get(path).cloned());
+                if let (Some(base), Some(rid)) = (base_id, reset_id) {
+                    self.sessions.insert(path.to_owned(), format!("{base}/{rid}"));
+                    self.just_reset.insert((path.to_owned(), "all".to_string()));
+                }
+                return out;
             }
             Some("credential_pin") => {
                 if let (Some(provider), Some(hash)) = (
@@ -281,26 +429,51 @@ impl OmpState {
                     self.pins
                         .insert((path.to_owned(), provider.to_owned()), hash.to_owned());
                 }
+                let mut out = vec![];
+                if let Some(pending) = self.pending.get(path) {
+                    if pending.provider.as_deref() == record.get("provider").and_then(Value::as_str) {
+                        if let Some(event) = self.finalize_pending(path, accounts) {
+                            out.push(event);
+                        }
+                    }
+                }
+                return out;
+            }
+            Some("custom")
+                if record.get("customType").and_then(Value::as_str)
+                    == Some("tool_execution_start") =>
+            {
+                // tool_execution_start sits between assistant message and its credential_pin.
+                // Keep pending event untouched so credential_pin on the next line can attach to it.
                 return vec![];
             }
             Some("custom")
                 if record.get("customType").and_then(Value::as_str)
                     == Some(API_KEY_STICKY_ENTRY) =>
             {
+                let out = self.finalize_pending(path, accounts).into_iter().collect::<Vec<_>>();
                 let Some(data) = record.get("data") else {
-                    return vec![];
+                    return out;
                 };
                 let (Some(provider), Some(session_id), Some(action)) = (
                     data.get("provider").and_then(Value::as_str),
                     data.get("sessionId").and_then(Value::as_str),
                     data.get("action").and_then(Value::as_str),
                 ) else {
-                    return vec![];
+                    return out;
                 };
-                // A branched session can inherit custom entries from its parent.
-                // Only the exact session named by the entry owns this timeline.
-                if self.sessions.get(path).map(String::as_str) != Some(session_id) {
-                    return vec![];
+                let base_matches = self
+                    .base_sessions
+                    .get(path)
+                    .map(String::as_str)
+                    == Some(session_id);
+                let current_matches = self
+                    .sessions
+                    .get(path)
+                    .map(String::as_str)
+                    == Some(session_id);
+                if !base_matches && !current_matches {
+                    return out;
                 }
                 let key = (path.to_owned(), provider.to_owned());
                 match action {
@@ -318,33 +491,32 @@ impl OmpState {
                     }
                     _ => {}
                 }
-                return vec![];
+                return out;
             }
             _ => {}
         }
         let Some(message) = record.get("message") else {
-            return vec![];
+            return self.finalize_pending(path, accounts).into_iter().collect();
         };
         if message.get("role").and_then(Value::as_str) != Some("assistant") {
-            return vec![];
+            return self.finalize_pending(path, accounts).into_iter().collect();
         }
+        let mut out = self.finalize_pending(path, accounts).into_iter().collect::<Vec<_>>();
         let Some(usage) = message.get("usage") else {
-            return vec![];
+            return out;
         };
         if usage.is_null() {
-            return vec![];
+            return out;
         }
         let Some(event_id) = record.get("id").and_then(Value::as_str) else {
-            // Without the envelope id the row cannot be deduplicated; dropping it
-            // is safer than re-inserting it on every overlapping read.
-            return vec![];
+            return out;
         };
         let Some(occurred_at) = message
             .get("timestamp")
             .and_then(timestamp_ms)
             .or_else(|| record.get("timestamp").and_then(timestamp_ms))
         else {
-            return vec![];
+            return out;
         };
 
         let parsed = OmpUsage {
@@ -366,19 +538,6 @@ impl OmpState {
             .map(str::to_owned);
         let usage = normalize_omp(&parsed);
         let session_id = self.sessions.get(path).cloned();
-        let pin = provider
-            .as_ref()
-            .and_then(|provider| self.pins.get(&(path.to_owned(), provider.clone())));
-        let account = provider.as_deref().and_then(|provider| {
-            let timeline_key = (path.to_owned(), provider.to_owned());
-            if self.api_key_timelines.contains(&timeline_key) {
-                self.api_key_pins
-                    .get(&timeline_key)
-                    .and_then(|id| accounts.resolve_credential_id(provider, id))
-            } else {
-                accounts.resolve(provider, session_id.as_deref(), pin.map(String::as_str))
-            }
-        });
         let duration_ms = message
             .get("duration")
             .and_then(Value::as_f64)
@@ -387,21 +546,63 @@ impl OmpState {
             .get("completedAt")
             .and_then(timestamp_ms)
             .or_else(|| duration_ms.map(|duration| occurred_at.saturating_add(duration)));
-        vec![ParsedEvent {
-            event_id: event_id.to_owned(),
-            usage,
-            model_source: model.as_ref().map(|_| ModelSource::Event),
-            model,
-            provider,
-            session_id,
-            started_at: Some(occurred_at),
-            completed_at,
-            duration_ms,
-            account_key: account.as_ref().map(|account| account.key.clone()),
-            account_label: account.as_ref().map(|account| account.label.clone()),
-            account_source: account.map(|account| account.source.to_owned()),
-            occurred_at,
-        }]
+
+        let has_pin = provider
+            .as_ref()
+            .is_some_and(|p| self.pins.contains_key(&(path.to_owned(), p.clone())));
+        let is_reset = self.just_reset.remove(&(path.to_owned(), "all".to_string()))
+            || provider
+                .as_ref()
+                .is_some_and(|p| self.just_reset.remove(&(path.to_owned(), p.clone())));
+        let needs_pin_wait =
+            provider.as_deref() == Some("google-antigravity") && (!has_pin || is_reset);
+
+        if !needs_pin_wait {
+            let pin = provider
+                .as_ref()
+                .and_then(|p| self.pins.get(&(path.to_owned(), p.clone())));
+            let account = provider.as_deref().and_then(|provider| {
+                let timeline_key = (path.to_owned(), provider.to_owned());
+                if self.api_key_timelines.contains(&timeline_key) {
+                    self.api_key_pins
+                        .get(&timeline_key)
+                        .and_then(|id| accounts.resolve_credential_id(provider, id))
+                } else {
+                    accounts.resolve(provider, session_id.as_deref(), pin.map(String::as_str))
+                }
+            });
+            out.push(ParsedEvent {
+                event_id: event_id.to_owned(),
+                usage,
+                model_source: model.as_ref().map(|_| ModelSource::Event),
+                model,
+                provider,
+                session_id,
+                started_at: Some(occurred_at),
+                completed_at,
+                duration_ms,
+                account_key: account.as_ref().map(|account| account.key.clone()),
+                account_label: account.as_ref().map(|account| account.label.clone()),
+                account_source: account.map(|account| account.source.to_owned()),
+                occurred_at,
+            });
+        } else {
+            self.pending.insert(
+                path.to_owned(),
+                PendingMessage {
+                    event_id: event_id.to_owned(),
+                    usage,
+                    model,
+                    provider,
+                    session_id,
+                    started_at: Some(occurred_at),
+                    completed_at,
+                    duration_ms,
+                    occurred_at,
+                },
+            );
+        }
+        out
     }
 }
 
@@ -667,5 +868,103 @@ mod tests {
         );
         assert_eq!(first.account_source.as_deref(), Some("session_pin"));
         assert_eq!(second.account_source.as_deref(), Some("session_pin"));
+    }
+
+    #[test]
+    fn credential_pin_trailing_assistant_message_resolves_correctly() {
+        let path = Path::new("/session.jsonl");
+        let mut state = OmpState::new();
+        let mut accounts = AccountCatalog::default();
+        accounts.by_pin.insert(
+            ("google-antigravity".into(), "pin-real".into()),
+            AccountIdentity {
+                key: "oauth:pin-real".into(),
+                label: "real@example.com".into(),
+                source: "credential_pin",
+            },
+        );
+        // Suppose sticky_cache has an old or pre-pinned account
+        accounts.sticky.insert(
+            ("google-antigravity".into(), "session-1".into()),
+            AccountIdentity {
+                key: "oauth:pin-fake".into(),
+                label: "fake@example.com".into(),
+                source: "sticky_cache",
+            },
+        );
+
+        let parse = |state: &mut OmpState, ordinal, text: &str| {
+            state.parse_line_with_accounts(path, &line(ordinal, text), &accounts)
+        };
+
+        let session = r#"{"type":"session","id":"session-1"}"#;
+        let request = r#"{"id":"req-1","type":"message","message":{"role":"assistant","provider":"google-antigravity","model":"gemini-3.8-flash","timestamp":1000,"duration":500,"usage":{"input":10,"output":20}}}"#;
+        let tool_start = r#"{"type":"custom","customType":"tool_execution_start","data":{"toolName":"bash"}}"#;
+        let pin = r#"{"type":"credential_pin","provider":"google-antigravity","hash":"pin-real"}"#;
+
+        assert!(parse(&mut state, 0, session).is_empty());
+        // Message arrives first; it should wait for credential_pin rather than immediately resolving to sticky_cache
+        assert!(parse(&mut state, 1, request).is_empty());
+        // tool_execution_start sits between message and pin
+        assert!(parse(&mut state, 2, tool_start).is_empty());
+        // When credential_pin arrives, the buffered message is resolved with the new pin
+        let events = parse(&mut state, 3, pin);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_id, "req-1");
+        assert_eq!(events[0].account_label.as_deref(), Some("real@example.com"));
+        assert_eq!(events[0].account_source.as_deref(), Some("credential_pin"));
+        assert_eq!(events[0].session_id.as_deref(), Some("session-1"));
+    }
+
+    #[test]
+    fn reset_boundary_segments_session_and_supports_reranking() {
+        let path = Path::new("/session.jsonl");
+        let mut state = OmpState::new();
+        let mut accounts = AccountCatalog::default();
+        accounts.by_pin.insert(
+            ("google-antigravity".into(), "pin-a".into()),
+            AccountIdentity {
+                key: "oauth:pin-a".into(),
+                label: "account-a@example.com".into(),
+                source: "credential_pin",
+            },
+        );
+        accounts.by_pin.insert(
+            ("google-antigravity".into(), "pin-b".into()),
+            AccountIdentity {
+                key: "oauth:pin-b".into(),
+                label: "account-b@example.com".into(),
+                source: "credential_pin",
+            },
+        );
+
+        let parse = |state: &mut OmpState, ordinal, text: &str| {
+            state.parse_line_with_accounts(path, &line(ordinal, text), &accounts)
+        };
+
+        let session = r#"{"type":"session","id":"session-root"}"#;
+        let req_1 = r#"{"id":"req-1","type":"message","message":{"role":"assistant","provider":"google-antigravity","model":"gemini","timestamp":1000,"duration":100,"usage":{"input":1,"output":2}}}"#;
+        let pin_a = r#"{"type":"credential_pin","provider":"google-antigravity","hash":"pin-a"}"#;
+
+        let reset = r#"{"type":"reset_boundary","id":"reset-100"}"#;
+        let req_2 = r#"{"id":"req-2","type":"message","message":{"role":"assistant","provider":"google-antigravity","model":"gemini","timestamp":2000,"duration":100,"usage":{"input":3,"output":4}}}"#;
+        let pin_b = r#"{"type":"credential_pin","provider":"google-antigravity","hash":"pin-b"}"#;
+
+        assert!(parse(&mut state, 0, session).is_empty());
+        assert!(parse(&mut state, 1, req_1).is_empty());
+        let first = parse(&mut state, 2, pin_a);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].session_id.as_deref(), Some("session-root"));
+        assert_eq!(first[0].account_label.as_deref(), Some("account-a@example.com"));
+
+        // Reset boundary creates a new segment
+        assert!(parse(&mut state, 3, reset).is_empty());
+        // First request after reset waits for possible new pin
+        assert!(parse(&mut state, 4, req_2).is_empty());
+        // New pin arrives
+        let second = parse(&mut state, 5, pin_b);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].session_id.as_deref(), Some("session-root/reset-100"));
+        assert_eq!(second[0].account_label.as_deref(), Some("account-b@example.com"));
     }
 }

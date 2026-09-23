@@ -41,7 +41,7 @@
     <p>请在配置文件 <code>~/.config/ai-monitor/config.toml</code> 中添加您的凭据以开启用量监控：</p>
     <ul class="notes">
       <li><code>cloudflare_account_id = "3aae92fbe9fdd0d6c7a6943be5d37a77"</code></li>
-      <li><code>cloudflare_api_token = "..."</code> (需具备 <code>Account Analytics: Read</code> 权限；若需自动读取账单起止日需 <code>Billing: Read</code>)</li>
+      <li><code>cloudflare_api_token = "..."</code> (需具备 <code>Account Analytics: Read</code> 与 <code>Workers Scripts: Read</code> 权限；若需自动读取账单起止日需 <code>Billing: Read</code>)</li>
       <li><code>cloudflare_plan = "paid"</code> (默认 <code>paid</code>，支持 <code>free</code>)</li>
       <li><code>cloudflare_billing_day = 11</code> (可选：自定义套餐每月账单重置日，例如 11 号重置)</li>
     </ul>
@@ -81,7 +81,7 @@
     <section class="cf-section" aria-label="Workers 用量指标">
       <div class="cf-section-title">
         <div class="service-tag service-workers">⚡ Cloudflare Workers</div>
-        <span class="muted">含 1000 万次请求 与 3000 万毫秒（30,000 秒）CPU 基础配额</span>
+        <span class="muted" id="cf-workers-subhead">含 1000 万次请求、3000 万毫秒（30,000 秒）CPU 耗时与 500 个 Worker 部署配额</span>
       </div>
       <div class="cf-metrics-grid" id="cf-workers-cards"></div>
     </section>

@@ -161,6 +161,10 @@ impl Collector {
                         batch.push((event, priced));
                     }
                 }
+                for event in self.omp.flush_file(file, accounts) {
+                    let priced = price(prices, &event);
+                    batch.push((event, priced));
+                }
                 if batch.len() >= 1000 {
                     inserted += db::insert_events(connection, kind, &batch, now)?;
                     batch.clear();
@@ -608,6 +612,7 @@ pub fn backfill_omp_request_metadata(
                 let Ok(line) = line else { break };
                 if !line.windows(9).any(|part| part == b"\"session\"")
                     && !line.windows(14).any(|part| part == b"credential_pin")
+                    && !line.windows(14).any(|part| part == b"reset_boundary")
                     && !line
                         .windows(b"herdr-api-key-sticky-v1".len())
                         .any(|part| part == b"herdr-api-key-sticky-v1")
@@ -623,6 +628,11 @@ pub fn backfill_omp_request_metadata(
                     if pending.remove(&event.event_id) {
                         found.insert(event.event_id.clone(), event);
                     }
+                }
+            }
+            for event in state.flush_file(&file, &catalog) {
+                if pending.remove(&event.event_id) {
+                    found.insert(event.event_id.clone(), event);
                 }
             }
         }

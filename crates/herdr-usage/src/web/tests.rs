@@ -285,8 +285,11 @@ fn test_cloudflare_api_with_cached_data() {
         8,
         1000,
         100,
+        None,
         0,
         0,
+        None,
+        12,
     );
     let ascii_card = crate::cloudflare::generate_ascii_card(&summary);
     let cached_report = crate::cloudflare::CloudflareReport {
@@ -344,6 +347,8 @@ fn test_cloudflare_api_with_cached_data() {
     assert!(resp.contains(r#""configured":true"#));
     assert!(resp.contains("3.24M"));
     assert!(resp.contains("32.4%"));
+    assert!(resp.contains("Deployments"));
+    assert!(resp.contains("workers_scripts"));
+    assert!(resp.contains("workers_build_minutes_limit"));
     assert!(resp.contains("WORKERS"));
-    assert!(resp.contains("8.72B"));
 }

@@ -17,6 +17,7 @@ const modelName = model => model == null ? '未识别模型' : model;
 let reportLoaded = false;
 let report, page = 0, request = 0, controller;
 let hourlyReport = null, hourlyRequest = 0, hourlyController = null;
+let cfReport = null, cfRequest = 0, cfController = null;
 const pageSize = 50;
 function node(tag, text, className) {
   const element = document.createElement(tag);
@@ -641,10 +642,6 @@ function renderDailyChartsList(report) {
 }
 
 // ---- Cloudflare stats ----------------------------------------------------
-let cfReport = null;
-let cfRequest = 0;
-let cfController = null;
-
 async function loadCloudflare(force = false) {
   const current = ++cfRequest;
   cfController?.abort();
@@ -774,9 +771,37 @@ function renderCloudflare(data) {
   const curr = data.current_period;
 
   // 1. Workers Grid
+  const workersSubhead = $('cf-workers-subhead');
+  if (workersSubhead) {
+    workersSubhead.textContent = isFree
+      ? '含 10 万次/日请求、10 毫秒/请求 CPU 耗时与 100 个 Worker 部署配额'
+      : '含 1000 万次请求、3000 万毫秒（30,000 秒）CPU 耗时与 500 个 Worker 部署配额';
+  }
+
+  const scriptsItem = curr.workers_scripts || {
+    name: 'Workers 部署服务数',
+    value: 0,
+    quota: isFree ? 100 : 500,
+    remaining: isFree ? 100 : 500,
+    percent: 0,
+    formatted_value: '0',
+    formatted_quota: isFree ? '100' : '500',
+    formatted_remaining: isFree ? '100' : '500',
+    unit: '个',
+    status: 'normal'
+  };
+
   $('cf-workers-cards').replaceChildren(
     renderMetricCard(curr.workers_requests),
     renderMetricCard(curr.workers_cpu_time),
+    renderMetricCard(scriptsItem, [
+      { label: '已部署服务', value: `${scriptsItem.formatted_value} 个` },
+      { label: isFree ? 'Free 部署配额' : 'Paid 部署配额', value: `${scriptsItem.formatted_quota} 个` },
+      { label: '剩余可用额度', value: `${scriptsItem.formatted_remaining} 个` },
+      { label: '构建分钟数配额', value: `${number(curr.workers_build_minutes_limit || (isFree ? 3000 : 6000))} 分钟/月` },
+      { label: '并发构建数', value: `${curr.workers_concurrent_builds_limit || (isFree ? 1 : 6)} 个` },
+      { label: '单 Worker 体积上限', value: '64 MiB' }
+    ]),
     renderMetricCard(curr.workers_errors, [
       { label: '错误次数', value: `${curr.workers_errors.formatted_value} 次` },
       { label: '错误率占比', value: `${curr.workers_errors.percent.toFixed(2)}%` },
