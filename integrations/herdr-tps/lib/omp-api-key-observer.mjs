@@ -76,15 +76,24 @@ function observeRelease(state, provider, sessionId, reason) {
   appendState(state, { action: 'release', provider, sessionId, reason, at: Date.now() });
 }
 
-function wrapAuthStorage(auth, state) {
-  state.auth = auth;
-  if (auth[OBSERVER_STATE]) {
-    auth[OBSERVER_STATE].pi = state.pi;
-    auth[OBSERVER_STATE].providers = state.providers;
-    return auth[OBSERVER_STATE];
+function wrapNamespaces(auth, state) {
+  const { keys, sessions, limits } = auth;
+  const previous = state.namespaces;
+  if (previous?.keys === keys && previous.sessions === sessions && previous.limits === limits) {
+    return;
+  }
+  const namespaces = { keys, sessions, limits };
+  state.namespaces = namespaces;
+  if (previous) {
+    // Credential IDs belong to a store; even an identical ID must be pinned
+    // again after replacement. Persist releases so collectors drop old pins.
+    for (const key of state.selections.keys()) {
+      const separator = key.indexOf('\0');
+      observeRelease(state, key.slice(0, separator), key.slice(separator + 1), 'store-replaced');
+    }
+    state.selections.clear();
   }
 
-  const keys = auth.keys;
   const originalGetWithCredential = keys.getWithCredential.bind(keys);
   keys.getWithCredential = async function getWithCredentialWithObservation(
     provider,
@@ -92,35 +101,57 @@ function wrapAuthStorage(auth, state) {
     ...rest
   ) {
     const selected = await originalGetWithCredential(provider, sessionId, ...rest);
-    observeSelection(state, provider, sessionId, selected?.credentialId);
+    if (state.namespaces === namespaces) {
+      observeSelection(state, provider, sessionId, selected?.credentialId);
+    }
     return selected;
   };
 
-  const sessions = auth.sessions;
   const originalRelease = sessions.release.bind(sessions);
   sessions.release = function releaseSessionCredential(provider, sessionId) {
     const released = originalRelease(provider, sessionId);
-    if (released) observeRelease(state, provider, sessionId, 'reselection');
+    if (released && state.namespaces === namespaces) {
+      observeRelease(state, provider, sessionId, 'reselection');
+    }
     return released;
   };
 
-  const limits = auth.limits;
   const originalMark = limits.markReached.bind(limits);
   limits.markReached = async function markReached(provider, sessionId, ...rest) {
     try {
       return await originalMark(provider, sessionId, ...rest);
     } finally {
-      observeRelease(state, provider, sessionId, 'usage-limit');
+      if (state.namespaces === namespaces) {
+        observeRelease(state, provider, sessionId, 'usage-limit');
+      }
     }
   };
 
   const originalRotate = limits.rotate.bind(limits);
   limits.rotate = async function rotate(provider, sessionId, ...rest) {
     const rotated = await originalRotate(provider, sessionId, ...rest);
-    if (rotated) observeRelease(state, provider, sessionId, 'rotation');
+    if (rotated && state.namespaces === namespaces) {
+      observeRelease(state, provider, sessionId, 'rotation');
+    }
     return rotated;
   };
+}
 
+function wrapAuthStorage(auth, state) {
+  state.auth = auth;
+  if (auth[OBSERVER_STATE]) {
+    const activeState = auth[OBSERVER_STATE];
+    activeState.pi = state.pi;
+    activeState.providers = state.providers;
+    wrapNamespaces(auth, activeState);
+    return activeState;
+  }
+
+  wrapNamespaces(auth, state);
+  // OMP carries generation subscribers to the new store and notifies them
+  // synchronously after replacing its namespaces. Ordinary reloads keep the
+  // same objects and must not reset selections or stack wrappers.
+  auth.credentials?.onGeneration?.(() => wrapNamespaces(auth, state));
   Object.defineProperty(auth, OBSERVER_STATE, { value: state, configurable: false });
   return state;
 }

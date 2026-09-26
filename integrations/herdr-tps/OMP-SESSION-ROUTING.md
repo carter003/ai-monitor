@@ -20,6 +20,11 @@ fallback，也不覆盖原生 `health.model`。
 发生选择变化或 release 才追加记录。记录不包含 API key，观察器不改变 block、rotation、
 release 或其它认证行为。
 
+运行期间修改 `auth.broker.url` 或 `auth.broker.token` 导致存储替换时，观察器通过
+`credentials.onGeneration` 检测新的认证对象，立即重新安装观察钩子，并记录
+`store-replaced` release、清理旧存储的选择缓存。新存储即使复用相同 credential ID，也会
+重新记录 pin；旧存储尚未完成的异步调用不会覆盖新存储的观察状态。
+
 OMP 18.3.2 已原生提供持久化的 session-to-credential affinity，包括 API key 粘性、额度
 保留、限流恢复和跨进程 resume。旧的本地粘性 monkey-patch 与 Antigravity session router
 均已删除，避免与原生选择器重复路由；观察器与 collector 继续记录账户。
@@ -33,6 +38,7 @@ generator 管理。
 观察器不依赖 bundle 字节偏移或 minified 私有方法名，只依赖 OMP 18.3.2 的：
 
 - `keys.getWithCredential`、`sessions.release`、`limits.markReached`、`limits.rotate`；
+- `credentials.onGeneration`（存储替换时保留订阅并在新对象就位后通知）；
 - 扩展 API 的 `appendEntry`；
 - 扩展上下文的 `ctx.agent.kind`（18.3.2 新增），用于拒绝子代理 session 驱动 pane 元数据。
 
