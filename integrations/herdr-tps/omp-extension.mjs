@@ -1,9 +1,7 @@
 import { HerdrMetadataPublisher } from './lib/herdr-metadata-publisher.mjs';
 import { OmpTpsReporter } from './lib/omp-tps-reporter.mjs';
 import { registerOmpAntigravityRequestWorkaround } from './lib/omp-antigravity-request-workaround.mjs';
-import { registerOmpAntigravitySessionRouter } from './lib/omp-antigravity-session-router.mjs';
 import { registerOmpApiKeyObserver } from './lib/omp-api-key-observer.mjs';
-import { registerOmpApiKeyStickiness } from './lib/omp-api-key-stickiness.mjs';
 import { argumentValue, profileFromSessionPath } from './lib/omp-profile.mjs';
 
 function messageKey(message) {
@@ -189,6 +187,12 @@ export function registerOmpTpsHandlers(pi, reporterOrFactory, { requireUi = fals
   let displayRefreshTimer;
 
   const activateRootSession = (context) => {
+    // OMP 18.3.2 reports the running agent on the extension context. A subagent
+    // session (task tool, eval agent(), /tan clone) must never drive the pane,
+    // even when it renders its own UI.
+    if (context?.agent?.kind === 'sub') {
+      return false;
+    }
     if (rootSession) {
       return true;
     }
@@ -312,13 +316,6 @@ export function createOmpMetadataPublisher(pi) {
 
 export default async function herdrTpsExtension(pi) {
   registerOmpAntigravityRequestWorkaround(pi);
-  registerOmpAntigravitySessionRouter(pi);
-  // Selection observation is permanent collection infrastructure. The
-  // stickiness wrapper is only a compatibility policy and can be disabled once
-  // upstream OMP owns that behavior, without changing usage collection.
-  if (process.env.HERDR_TPS_OMP_API_KEY_STICKINESS !== '0') {
-    registerOmpApiKeyStickiness(pi);
-  }
   registerOmpApiKeyObserver(pi);
   const publisher = createOmpMetadataPublisher(pi);
   if (!publisher.enabled) {

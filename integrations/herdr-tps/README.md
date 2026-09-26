@@ -124,12 +124,14 @@ OMP 的 `pro2` profile 会自动显示为 `omp2`。Herdr 冷重启只使用
 发现活动 client/broker/daemon PID 时，wrapper 拒绝切换并退出，不自动终止任务。
 可用 `node integrations/herdr-tps/share-omp-daemons.mjs --dry-run` 单独检查，
 或退出旧客户端后用 `--apply` 单独执行；默认仅检查。原始 runtime 二进制不会运行此启动检查，
-完成链接后它也会使用共享目录。当前本机 OMP 18.1.11 已核对目录解析；启用 XDG state 的布局需另行适配。
+完成链接后它也会使用共享目录。当前本机 OMP 18.3.2 已核对目录解析；启用 XDG state 的布局需另行适配。
 回滚时先退出全部 OMP 客户端并等待 broker 退出，再移除 pro2 的 daemon 符号链接、
 将输出的 `daemons.before-share-*` 备份恢复原名，并撤销 wrapper 的共享启动接线。
 
-OMP 扩展只观察带 UI 的根 session。scout/reviewer 等无 UI 子代理即使使用不同模型，也不会
-覆盖父 pane 的模型或 TPS；同时运行的多个 OMP pane 各自向自己的 `HERDR_PANE_ID` 发布。
+OMP 扩展只观察根 session：先按 OMP 18.3.2 的 `ctx.agent.kind` 拒绝子代理 session
+（task、eval `agent()`、`/tan` clone），再要求带 UI。scout/reviewer 等子代理即使使用不同
+模型或自己渲染 UI，也不会覆盖父 pane 的模型或 TPS；同时运行的多个 OMP pane 各自向自己的
+`HERDR_PANE_ID` 发布。
 
 Codex 包装器在本机回环地址启动 App Server 和透明 WebSocket 代理，再启动远程 TUI；
 代理观察 App Server 发往 TUI 的 agent-message 与 reasoning 增量；token-usage 事件仅
@@ -196,24 +198,21 @@ OMP 使用与上游一致的 200 tokens / 4000ms 证据门槛；消息结束后�
 
 更改脚本后需退出并重新启动相应 Codex/OMP 进程，运行中的 wrapper/extension 不会热加载。
 
-## OMP 会话路由扩展
+## OMP 原生认证与账户观察
 
-OMP 账号选择修复只通过普通扩展加载，见
-[维护说明](./OMP-SESSION-ROUTING.md)。wrapper 始终直接启动 `.runtime/omp`，禁止修改、
-重打包或禁用 OMP 可执行文件中的 Bun 字节码。
+OMP 18.3.2 的 Antigravity 与 opencode-go 多账号选择全部使用原生 AuthStorage。wrapper 始终
+直接启动 `.runtime/omp`，禁止修改、重打包或禁用 OMP 可执行文件中的 Bun 字节码。Antigravity
+request workaround 只修正被服务端拒绝的 system prompt 片段，不参与账号选择。
 
-`opencode-go` 的账户观察与 API-key 粘性是两个独立模块。观察器只读取 OMP `getApiKey` 的实际
-返回值，在 credential 变化或释放时写入不含密钥的 session custom entry，不改变 OMP 选择结果；
-collector 按 append-only pin/release entry 给每次 request 绑定账户并写入 SQLite。粘性模块是
-当前 OMP 的临时兼容策略：首次选择后同一 session 复用同一个 credential ID，账户被限流、
-显式释放、删除或禁用后才重新选择。OMP 原生修复后可设置
-`HERDR_TPS_OMP_API_KEY_STICKINESS=0` 单独关闭粘性策略，账户采集不受影响。
+`opencode-go` 的账户观察只读取 OMP `keys.getWithCredential` 返回的 credential ID，在选择变化或
+释放时写入不含密钥的 session custom entry，不改变 OMP 选择结果；collector 按 append-only
+pin/release entry 给每次 request 绑定账户并写入 SQLite。OMP 18.3.2 已原生提供 API-key
+session affinity、额度保留、限流恢复和跨进程 resume；旧的本地粘性 monkey-patch 已删除，
+账户采集不受影响。
 
-Antigravity 账号平衡与 15% fallback 也合并为扩展层的单次新会话路由：`session_start`
-先选择并固定 Gemini 5H 剩余最多的可用 OAuth 账号，使 OMP 标题生成子 session 与主请求继承
-同一 credential；首次使用 Antigravity Gemini 时，若最高值仍低于 15%，则把该 session 切到
-`opencode-go/deepseek-v4.1-flash:high`。路由完成或 transcript 已存在后，扩展跳过 OMP 每个
-request 的主动额度 preflight；真实 429 仍走 OMP 独立的错误恢复和 fallback 路径。
+Antigravity 同样完全使用原生 counter 级额度报告、required-drain 排序、session affinity、
+reserve、429 block/rotation，以及标题和子代理 credential 继承。本地不再预选剩余额度最多的
+账号，不再执行 15% 跨 provider fallback，也不覆盖原生 `health.model`。
 
 ## 生命周期与性能维护约束
 

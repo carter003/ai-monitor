@@ -10,17 +10,17 @@ function fixture({ entries = [], selected = ['account-a', 'account-a', 'account-
   const appended = [];
   let calls = 0;
   const auth = {
-    getApiKey: async () => selected[Math.min(calls++, selected.length - 1)],
-    exportSnapshot: () => ({
-      credentials: ['account-a', 'account-b'].map((key, index) => ({
-        id: index + 7,
-        provider: 'opencode-go',
-        credential: { type: 'api_key', source: 'login', key },
-      })),
-    }),
-    releaseSessionCredentialForReselection: () => true,
-    markUsageLimitReached: async () => ({ switched: true }),
-    rotateSessionCredential: async () => true,
+    keys: {
+      getWithCredential: async () => {
+        const apiKey = selected[Math.min(calls++, selected.length - 1)];
+        return { apiKey, credentialId: apiKey === 'account-a' ? 7 : 8 };
+      },
+    },
+    sessions: { release: () => true },
+    limits: {
+      markReached: async () => ({ switched: true }),
+      rotate: async () => true,
+    },
   };
   const pi = {
     on: (event, handler) => handlers.set(event, handler),
@@ -36,9 +36,18 @@ function fixture({ entries = [], selected = ['account-a', 'account-a', 'account-
 
 test('observes every selection but records only account changes', async () => {
   const f = fixture();
-  assert.equal(await f.auth.getApiKey('opencode-go', 'session-1'), 'account-a');
-  assert.equal(await f.auth.getApiKey('opencode-go', 'session-1'), 'account-a');
-  assert.equal(await f.auth.getApiKey('opencode-go', 'session-1'), 'account-b');
+  assert.deepEqual(await f.auth.keys.getWithCredential('opencode-go', 'session-1'), {
+    apiKey: 'account-a',
+    credentialId: 7,
+  });
+  assert.deepEqual(await f.auth.keys.getWithCredential('opencode-go', 'session-1'), {
+    apiKey: 'account-a',
+    credentialId: 7,
+  });
+  assert.deepEqual(await f.auth.keys.getWithCredential('opencode-go', 'session-1'), {
+    apiKey: 'account-b',
+    credentialId: 8,
+  });
 
   assert.equal(f.calls(), 3, 'the observer must never pin or bypass OMP selection');
   assert.deepEqual(
@@ -54,8 +63,8 @@ test('observes every selection but records only account changes', async () => {
 
 test('records release boundaries without changing OMP behavior', async () => {
   const f = fixture();
-  await f.auth.getApiKey('opencode-go', 'session-1');
-  assert.equal(f.auth.releaseSessionCredentialForReselection('opencode-go', 'session-1'), true);
+  await f.auth.keys.getWithCredential('opencode-go', 'session-1');
+  assert.equal(f.auth.sessions.release('opencode-go', 'session-1'), true);
   assert.deepEqual(f.appended.map((entry) => entry.data.action), ['pin', 'release']);
 });
 
@@ -73,6 +82,9 @@ test('restores observed state and avoids duplicate records after restart', async
     },
   ];
   const f = fixture({ entries, selected: ['account-a'] });
-  assert.equal(await f.auth.getApiKey('opencode-go', 'session-1'), 'account-a');
+  assert.deepEqual(await f.auth.keys.getWithCredential('opencode-go', 'session-1'), {
+    apiKey: 'account-a',
+    credentialId: 7,
+  });
   assert.deepEqual(f.appended, []);
 });

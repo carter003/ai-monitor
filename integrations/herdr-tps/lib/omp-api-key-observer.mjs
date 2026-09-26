@@ -52,36 +52,22 @@ function loadEntries(state, context) {
   }
 }
 
-function snapshotCredentials(auth, provider) {
-  try {
-    const credentials = auth.exportSnapshot?.().credentials;
-    return Array.isArray(credentials)
-      ? credentials.filter(
-          (item) =>
-            item?.provider === provider &&
-            item?.credential?.type === 'api_key' &&
-            item?.credential?.source === 'login',
-        )
-      : [];
-  } catch {
-    return [];
-  }
+function credentialId(value) {
+  return typeof value === 'number' || typeof value === 'string' ? value : undefined;
 }
 
-function observeSelection(state, provider, sessionId, apiKey) {
+
+function observeSelection(state, provider, sessionId, selectedCredentialId) {
   if (!state.providers.has(provider) || typeof sessionId !== 'string' || !sessionId) return;
-  if (typeof apiKey !== 'string' || !apiKey) return;
-  const matches = snapshotCredentials(state.auth, provider).filter(
-    (item) => item?.credential?.key === apiKey,
-  );
-  if (matches.length !== 1) return;
+  const id = credentialId(selectedCredentialId);
+  if (id === undefined) return;
 
-  const credentialId = matches[0].id;
   const key = selectionKey(provider, sessionId);
-  if (state.selections.get(key) === credentialId) return;
-  state.selections.set(key, credentialId);
-  appendState(state, { action: 'pin', provider, sessionId, credentialId, at: Date.now() });
+  if (state.selections.get(key) === id) return;
+  state.selections.set(key, id);
+  appendState(state, { action: 'pin', provider, sessionId, credentialId: id, at: Date.now() });
 }
+
 
 function observeRelease(state, provider, sessionId, reason) {
   if (!state.providers.has(provider) || typeof sessionId !== 'string' || !sessionId) return;
@@ -98,53 +84,47 @@ function wrapAuthStorage(auth, state) {
     return auth[OBSERVER_STATE];
   }
 
-  const originalGetApiKey = auth.getApiKey.bind(auth);
-  auth.getApiKey = async function getApiKeyWithObservation(provider, sessionId, ...rest) {
-    const selected = await originalGetApiKey(provider, sessionId, ...rest);
-    observeSelection(state, provider, sessionId, selected);
+  const keys = auth.keys;
+  const originalGetWithCredential = keys.getWithCredential.bind(keys);
+  keys.getWithCredential = async function getWithCredentialWithObservation(
+    provider,
+    sessionId,
+    ...rest
+  ) {
+    const selected = await originalGetWithCredential(provider, sessionId, ...rest);
+    observeSelection(state, provider, sessionId, selected?.credentialId);
     return selected;
   };
 
-  if (typeof auth.releaseSessionCredentialForReselection === 'function') {
-    const originalRelease = auth.releaseSessionCredentialForReselection.bind(auth);
-    auth.releaseSessionCredentialForReselection = function releaseSessionCredential(
-      provider,
-      sessionId,
-      ...rest
-    ) {
-      const released = originalRelease(provider, sessionId, ...rest);
-      if (released) observeRelease(state, provider, sessionId, 'reselection');
-      return released;
-    };
-  }
+  const sessions = auth.sessions;
+  const originalRelease = sessions.release.bind(sessions);
+  sessions.release = function releaseSessionCredential(provider, sessionId) {
+    const released = originalRelease(provider, sessionId);
+    if (released) observeRelease(state, provider, sessionId, 'reselection');
+    return released;
+  };
 
-  if (typeof auth.markUsageLimitReached === 'function') {
-    const originalMark = auth.markUsageLimitReached.bind(auth);
-    auth.markUsageLimitReached = async function markUsageLimit(provider, sessionId, ...rest) {
-      try {
-        return await originalMark(provider, sessionId, ...rest);
-      } finally {
-        observeRelease(state, provider, sessionId, 'usage-limit');
-      }
-    };
-  }
+  const limits = auth.limits;
+  const originalMark = limits.markReached.bind(limits);
+  limits.markReached = async function markReached(provider, sessionId, ...rest) {
+    try {
+      return await originalMark(provider, sessionId, ...rest);
+    } finally {
+      observeRelease(state, provider, sessionId, 'usage-limit');
+    }
+  };
 
-  if (typeof auth.rotateSessionCredential === 'function') {
-    const originalRotate = auth.rotateSessionCredential.bind(auth);
-    auth.rotateSessionCredential = async function rotateSessionCredential(
-      provider,
-      sessionId,
-      ...rest
-    ) {
-      const rotated = await originalRotate(provider, sessionId, ...rest);
-      if (rotated) observeRelease(state, provider, sessionId, 'rotation');
-      return rotated;
-    };
-  }
+  const originalRotate = limits.rotate.bind(limits);
+  limits.rotate = async function rotate(provider, sessionId, ...rest) {
+    const rotated = await originalRotate(provider, sessionId, ...rest);
+    if (rotated) observeRelease(state, provider, sessionId, 'rotation');
+    return rotated;
+  };
 
   Object.defineProperty(auth, OBSERVER_STATE, { value: state, configurable: false });
   return state;
 }
+
 
 export function registerOmpApiKeyObserver(pi, { providers = DEFAULT_PROVIDERS } = {}) {
   const state = {
@@ -155,8 +135,13 @@ export function registerOmpApiKeyObserver(pi, { providers = DEFAULT_PROVIDERS } 
   };
   const activate = (_event, context) => {
     const auth = context?.modelRegistry?.authStorage;
-    if (!auth || typeof auth.getApiKey !== 'function') {
-      debug(pi, 'OMP auth storage is unavailable; API-key observation was not installed');
+    if (
+      typeof auth?.keys?.getWithCredential !== 'function' ||
+      typeof auth.sessions?.release !== 'function' ||
+      typeof auth.limits?.markReached !== 'function' ||
+      typeof auth.limits?.rotate !== 'function'
+    ) {
+      debug(pi, 'OMP auth namespaces are unavailable; API-key observation was not installed');
       return;
     }
     const activeState = wrapAuthStorage(auth, state);

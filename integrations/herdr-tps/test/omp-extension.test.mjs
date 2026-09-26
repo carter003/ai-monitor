@@ -92,6 +92,41 @@ test('does not let a headless OMP subagent overwrite root pane metadata', () => 
   assert.deepEqual(calls, []);
 });
 
+test('does not let a subagent with its own UI overwrite root pane metadata', () => {
+  const handlers = new Map();
+  const calls = [];
+  const pi = {
+    on: (event, handler) => handlers.set(event, handler),
+  };
+  const reporterFactory = () => {
+    calls.push(['create-reporter']);
+    return {
+      setModel: (model) => calls.push(['model', model]),
+      setDisplayAgent: (...args) => calls.push(['display-agent', ...args]),
+      refreshDisplayAgent: () => {},
+      start: (...args) => calls.push(['start', ...args]),
+      append: (...args) => calls.push(['append', ...args]),
+      pause: () => calls.push(['pause']),
+      close: () => calls.push(['close']),
+    };
+  };
+  registerOmpTpsHandlers(pi, reporterFactory, { requireUi: true });
+
+  const context = {
+    hasUI: true,
+    agent: { kind: 'sub', id: '0-Explore', name: 'explore', depth: 0, parentId: 'Main' },
+    model: { id: 'gpt-5.6-luna' },
+  };
+  const message = { role: 'assistant', timestamp: 1_500, model: 'gpt-5.6-luna' };
+  handlers.get('session_start')({}, context);
+  handlers.get('message_start')({ message }, context);
+  handlers.get('message_end')({ message }, context);
+  handlers.get('agent_end')();
+  handlers.get('session_shutdown')();
+
+  assert.deepEqual(calls, []);
+});
+
 test('tracks only OMP thinking and normal text deltas, then drains shutdown', async () => {
   const handlers = new Map();
   const calls = [];

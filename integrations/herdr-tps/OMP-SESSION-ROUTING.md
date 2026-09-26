@@ -1,60 +1,43 @@
-# OMP 会话路由扩展
+# OMP 原生认证与账户观察
 
-OMP 运行时保持原始可执行文件不变。`omp-extension.mjs` 加载两个路由模块和一个独立观察器：
+OMP 18.3.2 的 Antigravity 与 opencode-go 多账号选择全部使用原生 AuthStorage：模型对应
+counter 的额度报告、session affinity、reserve、block、rotation、429 恢复，以及标题和子代理
+credential 继承均由 OMP 管理。扩展不预选账号、不固定 Antigravity credential、不执行跨 provider
+fallback，也不覆盖原生 `health.model`。
 
-- `lib/omp-antigravity-session-router.mjs`：Antigravity Gemini 新会话路由；
-- `lib/omp-api-key-stickiness.mjs`：opencode-go API-key 会话粘性兼容策略；
-- `lib/omp-api-key-observer.mjs`：只观察实际 Key 选择，供 request 采集使用，不参与路由。
+`omp-extension.mjs` 只加载不改变账号选择的辅助模块：
 
-禁止通过修改、重打包或禁用 OMP Bun 字节码实现这些规则。wrapper 只启动
+- `lib/omp-antigravity-request-workaround.mjs`：只重写 Antigravity 拒绝的 system prompt 片段；
+- `lib/omp-api-key-observer.mjs`：只观察实际 Key 选择，供 request 采集使用。
+
+运行时保持原始可执行文件不变；禁止修改、重打包或禁用 OMP Bun 字节码。wrapper 只启动
 `.runtime/omp`，不维护或选择 patched/original 双份二进制。
 
-## Antigravity 新会话路由
+## opencode-go 账户观察
 
-仅当 session 尚无 user/assistant transcript 且初始模型为 Antigravity Gemini 时，
-`session_start` 执行一次账号预选：
+观察器通过 OMP 18.3.2 的 `keys.getWithCredential` 读取实际选择，将 credential ID 作为
+`herdr-api-key-sticky-v1` custom entry 写入 session；同一 credential 的连续请求不重复写，
+发生选择变化或 release 才追加记录。记录不包含 API key，观察器不改变 block、rotation、
+release 或其它认证行为。
 
-1. `session_start` 读取全部可用 Antigravity OAuth 账号的 Gemini 5H usage；
-2. 排除当前存在 credential block 的账号；
-3. 选择 5H `remainingFraction` 最大的账号，并立即把 session 固定到该 credential；
-4. OMP 随后创建标题生成子 session 时，会从父 session 继承同一个 credential，不再并发选中另一账号；
-5. 首次请求选择 `google-antigravity/gemini-*` 且最大值严格小于 `0.15` 时，将整个
-   session 切到 `opencode-go/deepseek-v4.1-flash`，thinking level 设为 `high`。
-
-非 Antigravity session 启动时跳过这次远端 usage 预检查；如果首次请求前切换到
-`google-antigravity/gemini-*`，则由 `before_agent_start` 执行同样的路由检查。
-
-正好 15% 保持 Antigravity。任何可用账号缺少可匹配的 5H usage 时 fail-open：保持
-Antigravity，不基于不完整数据 fallback。
-
-路由决定作为 `herdr-antigravity-route-v1` custom entry 写入 session，不包含 token 或账号
-密钥。已有 transcript 或已有路由记录的 session 不会重新选择。扩展对这些 session 跳过
-OMP 的每 request usage-aware preflight；真实请求返回 429 后仍由 OMP 独立的错误恢复路径处理。
-
-## opencode-go 账户观察与粘性
-
-观察器在 OMP 返回登录型 API-key 后将 credential ID 作为 `herdr-api-key-sticky-v1` custom
-entry 写入 session；同一 credential 的连续请求不重复写，发生选择变化或 release 才追加记录。
-它始终返回 OMP 的原始选择结果，不固定账户，也不改变 block、rotation 或 release 行为。
-
-独立的粘性兼容策略让后续请求和跨进程 resume 复用该账号；credential 被 block、限流、删除、
-禁用、rotation 或显式 release 后才重新选择。OMP 原生修复后设置
-`HERDR_TPS_OMP_API_KEY_STICKINESS=0` 即可关闭该策略，观察器与 collector 仍继续记录账户。
+OMP 18.3.2 已原生提供持久化的 session-to-credential affinity，包括 API key 粘性、额度
+保留、限流恢复和跨进程 resume。旧的本地粘性 monkey-patch 与 Antigravity session router
+均已删除，避免与原生选择器重复路由；观察器与 collector 继续记录账户。
 
 记录中只保存 credential ID。新 session/branch 必须使用自己的 session ID，不能继承父 session
-的 pin。并发首次请求合并为一次原生选择。
+的 pin。父 session、标题和子代理的 credential 继承由 OMP 原生 `sessions.inherit` 与 title
+generator 管理。
 
 ## OMP 升级
 
-这些模块不依赖 bundle 字节偏移或 minified 私有方法名。只要新版 OMP 保持以下扩展事件和
-`modelRegistry.authStorage` 方法的签名与语义不变，替换 `.runtime/omp` 后无需重新应用任何补丁：
+观察器不依赖 bundle 字节偏移或 minified 私有方法名，只依赖 OMP 18.3.2 的：
 
-- `session_start`、`session_switch`、`session_branch`、`session_tree`、`before_agent_start`；
-- `fetchUsageReports`、`listOAuthAccounts`、`listCredentialBlocks`、
-  `pinSessionOAuthAccount`、`getModelUsageHealth`；
-- `getApiKey`、`exportSnapshot`、`releaseSessionCredentialForReselection`、
-  `markUsageLimitReached`、`rotateSessionCredential`；
-- 扩展 API 的 `setModel`、`setThinkingLevel`、`appendEntry`。
+- `keys.getWithCredential`、`sessions.release`、`limits.markReached`、`limits.rotate`；
+- 扩展 API 的 `appendEntry`；
+- 扩展上下文的 `ctx.agent.kind`（18.3.2 新增），用于拒绝子代理 session 驱动 pane 元数据。
+
+Antigravity request workaround 只依赖 `before_provider_request` 事件和 payload 中的
+`requestType`、`userAgent`、`systemInstruction.parts`。账号选择契约完全由 OMP 原生实现维护。
 
 升级后的必要动作只有验证，而不是重新 patch：
 
@@ -62,6 +45,12 @@ entry 写入 session；同一 credential 的连续请求不重复写，发生选
 npm run herdr:tps:test
 ```
 
-再创建一个临时 Antigravity Gemini session，确认只产生一条
-`herdr-antigravity-route-v1`；恢复该 session，确认模型和 credential 不变。若上述接口发生变化，
-扩展应更新适配并重新测试，不能回退到修改 OMP 可执行文件。
+18.3.2 升级时已逐项核对：`before_provider_request` payload 形状、
+`keys.getWithCredential`/`appendEntry` 调用路径、`run/daemons` 目录解析与
+`utils/token-rate.ts`（与 18.2.5 逐字节相同，移植算法无需改动）均未变；TUI 实测模型、
+显示名、实时 TPS 与 `herdr-api-key-sticky-v1` pin entry 正常。仍未覆盖的实机验证是
+Antigravity Gemini session 的账号选择与恢复。
+
+创建一个临时 Antigravity Gemini session，确认账号由原生 usage ranking 和 session affinity
+选择；恢复该 session，确认模型与 credential 保持稳定。若原生认证接口发生变化，应升级 OMP
+并重新验证，不能回退到修改 OMP 可执行文件。
