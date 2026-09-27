@@ -719,14 +719,16 @@ pub fn backfill_omp_api_key_timeline(
     let mut updated = 0usize;
     {
         let mut statement = transaction.prepare(
-            "UPDATE usage_event SET account_key=?1, account_label=?2, account_source=?3
-             WHERE source='omp' AND provider='opencode-go' AND event_id=?4",
+            "UPDATE usage_event SET account_key=?1, account_label=?2, account_source=?3,
+                 account_route_reason=?4
+             WHERE source='omp' AND provider='opencode-go' AND event_id=?5",
         )?;
         for event in found.values() {
             updated += statement.execute(rusqlite::params![
                 event.account_key,
                 event.account_label,
                 event.account_source,
+                event.account_route_reason,
                 event.event_id,
             ])?;
         }

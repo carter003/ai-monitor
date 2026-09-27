@@ -47,6 +47,8 @@ pub struct OmpState {
     sessions: HashMap<PathBuf, String>,
     pins: HashMap<(PathBuf, String), String>,
     api_key_pins: HashMap<(PathBuf, String), String>,
+    api_key_route_reasons: HashMap<(PathBuf, String), String>,
+    api_key_release_reasons: HashMap<(PathBuf, String), String>,
     api_key_timelines: HashSet<(PathBuf, String)>,
     seeded: HashSet<PathBuf>,
     just_reset: HashSet<(PathBuf, String)>,
@@ -241,6 +243,10 @@ impl OmpState {
         self.sessions.remove(path);
         self.pins.retain(|(file, _), _| file != path);
         self.api_key_pins.retain(|(file, _), _| file != path);
+        self.api_key_route_reasons
+            .retain(|(file, _), _| file != path);
+        self.api_key_release_reasons
+            .retain(|(file, _), _| file != path);
         self.api_key_timelines.retain(|(file, _)| file != path);
         self.seeded.remove(path);
         self.just_reset.retain(|(file, _)| file != path);
@@ -271,6 +277,11 @@ impl OmpState {
                 )
             }
         });
+        let account_route_reason = pending.provider.as_ref().and_then(|provider| {
+            self.api_key_route_reasons
+                .get(&(path.to_owned(), provider.clone()))
+                .cloned()
+        });
         Some(ParsedEvent {
             event_id: pending.event_id,
             usage: pending.usage,
@@ -284,6 +295,7 @@ impl OmpState {
             account_key: account.as_ref().map(|account| account.key.clone()),
             account_label: account.as_ref().map(|account| account.label.clone()),
             account_source: account.map(|account| account.source.to_owned()),
+            account_route_reason,
             occurred_at: pending.occurred_at,
         })
     }
@@ -361,19 +373,7 @@ impl OmpState {
                         continue;
                     };
                     let key = (path.to_owned(), provider.to_owned());
-                    match action {
-                        "pin" => {
-                            if let Some(cid) = data.get("credentialId").and_then(credential_id) {
-                                self.api_key_timelines.insert(key.clone());
-                                self.api_key_pins.insert(key, cid);
-                            }
-                        }
-                        "release" => {
-                            self.api_key_timelines.insert(key.clone());
-                            self.api_key_pins.remove(&key);
-                        }
-                        _ => {}
-                    }
+                    self.apply_api_key_entry(key, action, data);
                 }
                 _ => {}
             }
@@ -476,21 +476,7 @@ impl OmpState {
                     return out;
                 }
                 let key = (path.to_owned(), provider.to_owned());
-                match action {
-                    "pin" => {
-                        if let Some(credential_id) =
-                            data.get("credentialId").and_then(credential_id)
-                        {
-                            self.api_key_timelines.insert(key.clone());
-                            self.api_key_pins.insert(key, credential_id);
-                        }
-                    }
-                    "release" => {
-                        self.api_key_timelines.insert(key.clone());
-                        self.api_key_pins.remove(&key);
-                    }
-                    _ => {}
-                }
+                self.apply_api_key_entry(key, action, data);
                 return out;
             }
             _ => {}
@@ -571,6 +557,11 @@ impl OmpState {
                     accounts.resolve(provider, session_id.as_deref(), pin.map(String::as_str))
                 }
             });
+            let account_route_reason = provider.as_ref().and_then(|provider| {
+                self.api_key_route_reasons
+                    .get(&(path.to_owned(), provider.clone()))
+                    .cloned()
+            });
             out.push(ParsedEvent {
                 event_id: event_id.to_owned(),
                 usage,
@@ -584,6 +575,7 @@ impl OmpState {
                 account_key: account.as_ref().map(|account| account.key.clone()),
                 account_label: account.as_ref().map(|account| account.label.clone()),
                 account_source: account.map(|account| account.source.to_owned()),
+                account_route_reason,
                 occurred_at,
             });
         } else {
@@ -603,6 +595,42 @@ impl OmpState {
             );
         }
         out
+    }
+
+    fn apply_api_key_entry(&mut self, key: (PathBuf, String), action: &str, data: &Value) {
+        self.api_key_timelines.insert(key.clone());
+        match action {
+            "pin" => {
+                let Some(next) = data.get("credentialId").and_then(credential_id) else {
+                    return;
+                };
+                let previous = self.api_key_pins.insert(key.clone(), next.clone());
+                let recorded_reason = data
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .filter(|reason| !reason.is_empty())
+                    .map(str::to_owned);
+                let reason = recorded_reason
+                    .or_else(|| self.api_key_release_reasons.remove(&key))
+                    .unwrap_or_else(|| match previous {
+                        Some(previous) if previous != next => "usage-ranking".to_owned(),
+                        _ => "initial".to_owned(),
+                    });
+                self.api_key_route_reasons.insert(key, reason);
+            }
+            "release" => {
+                self.api_key_pins.remove(&key);
+                self.api_key_route_reasons.remove(&key);
+                if let Some(reason) = data
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .filter(|reason| !reason.is_empty())
+                {
+                    self.api_key_release_reasons.insert(key, reason.to_owned());
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -868,6 +896,8 @@ mod tests {
         );
         assert_eq!(first.account_source.as_deref(), Some("session_pin"));
         assert_eq!(second.account_source.as_deref(), Some("session_pin"));
+        assert_eq!(first.account_route_reason.as_deref(), Some("initial"));
+        assert_eq!(second.account_route_reason.as_deref(), Some("rotation"));
     }
 
     #[test]

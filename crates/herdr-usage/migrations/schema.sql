@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS usage_event(
   account_key  TEXT,             -- stable, non-secret credential identity
   account_label TEXT,            -- human-readable email or redacted key fingerprint
   account_source TEXT,           -- credential_pin|sticky_cache|single_credential|upstream
+  account_route_reason TEXT,     -- initial|reset|usage-ranking|blocked|usage-limit|rotation|reselection|store-replaced|credential-unavailable
   input_total  INTEGER NOT NULL, -- gross, includes cache_read
   cache_read   INTEGER NOT NULL, -- 0 <= cache_read <= input_total
   cache_write  INTEGER NOT NULL, -- only opencode non-zero; not displayed, feeds cost

@@ -10,11 +10,30 @@ function fixture({ entries = [], selected = ['account-a', 'account-a', 'account-
   const appended = [];
   let calls = 0;
   const listeners = new Set();
+  const blocked = new Map();
+  let sessionId = 'session-1';
   const namespaces = (accounts) => ({
     credentials: {
       onGeneration(listener) {
         listeners.add(listener);
         return () => listeners.delete(listener);
+      },
+      list(provider) {
+        if (provider !== 'opencode-go') return [];
+        return [...new Set(accounts)].map((apiKey) => ({
+          id: apiKey === 'account-a' ? 7 : 8,
+          provider,
+          credential: { type: 'api_key', key: apiKey },
+        }));
+      },
+    },
+    blocks: {
+      list(ids) {
+        return ids.flatMap((id) => blocked.has(id) ? [{
+          credentialId: id,
+          providerKey: 'opencode-go:api_key',
+          blockedUntilMs: blocked.get(id),
+        }] : []);
       },
     },
     keys: {
@@ -47,16 +66,26 @@ function fixture({ entries = [], selected = ['account-a', 'account-a', 'account-
     on: (event, handler) => handlers.set(event, handler),
     appendEntry: (customType, data) => appended.push({ type: 'custom', customType, data }),
   };
+  const sessionManager = {
+    getEntries: () => [...entries, ...appended],
+    getSessionId: () => sessionId,
+    appendResetBoundary: () => ({ type: 'reset_boundary' }),
+  };
   const state = registerOmpApiKeyObserver(pi);
   const activate = (event = 'session_start') => handlers.get(event)({}, {
     modelRegistry: { authStorage: auth },
-    sessionManager: { getEntries: () => [...entries, ...appended] },
+    sessionManager,
   });
   activate();
-  return { auth, appended, calls: () => calls, activate, notifyGeneration, listeners, pi, state };
+  return {
+    auth, appended, calls: () => calls, activate, notifyGeneration, listeners, pi, state,
+    sessionManager,
+    setSessionId: (value) => { sessionId = value; },
+    block: (id) => blocked.set(id, Date.now() + 60_000),
+  };
 }
 
-test('observes every selection but records only account changes', async () => {
+test('ranks once and keeps the selected API key for the whole session', async () => {
   const f = fixture();
   assert.deepEqual(await f.auth.keys.getWithCredential('opencode-go', 'session-1'), {
     apiKey: 'account-a',
@@ -67,27 +96,75 @@ test('observes every selection but records only account changes', async () => {
     credentialId: 7,
   });
   assert.deepEqual(await f.auth.keys.getWithCredential('opencode-go', 'session-1'), {
-    apiKey: 'account-b',
-    credentialId: 8,
+    apiKey: 'account-a',
+    credentialId: 7,
   });
 
-  assert.equal(f.calls(), 3, 'the observer must never pin or bypass OMP selection');
+  assert.equal(f.calls(), 1, 'ordinary requests must not re-run usage ranking');
   assert.deepEqual(
     f.appended.map((entry) => [entry.customType, entry.data.action, entry.data.credentialId]),
     [
       [ompApiKeySelectionEntryType, 'pin', 7],
-      [ompApiKeySelectionEntryType, 'pin', 8],
     ],
   );
+  assert.deepEqual(f.appended.map((entry) => entry.data.reason), ['initial']);
   assert.equal(JSON.stringify(f.appended).includes('account-a'), false);
   assert.equal(JSON.stringify(f.appended).includes('account-b'), false);
 });
 
-test('records release boundaries without changing OMP behavior', async () => {
+test('a new session runs ranking independently', async () => {
+  const f = fixture({ selected: ['account-a', 'account-b'] });
+  assert.equal((await f.auth.keys.getWithCredential('opencode-go', 'session-1')).credentialId, 7);
+  f.setSessionId('session-2');
+  assert.equal((await f.auth.keys.getWithCredential('opencode-go', 'session-2')).credentialId, 8);
+  assert.equal(f.calls(), 2);
+});
+
+test('concurrent first requests share one ranking decision', async () => {
+  const f = fixture({ selected: ['account-a', 'account-b'] });
+  const [first, second] = await Promise.all([
+    f.auth.keys.getWithCredential('opencode-go', 'session-1'),
+    f.auth.keys.getWithCredential('opencode-go', 'session-1'),
+  ]);
+  assert.equal(first.credentialId, 7);
+  assert.equal(second.credentialId, 7);
+  assert.equal(f.calls(), 1);
+});
+
+test('reset releases the current session pin and ranks again', async () => {
+  const f = fixture({ selected: ['account-a', 'account-b'] });
+  assert.equal((await f.auth.keys.getWithCredential('opencode-go', 'session-1')).credentialId, 7);
+  f.sessionManager.appendResetBoundary();
+  assert.equal((await f.auth.keys.getWithCredential('opencode-go', 'session-1')).credentialId, 8);
+  assert.equal(f.calls(), 2);
+  assert.deepEqual(f.appended.map(({ data }) => [data.action, data.reason]), [
+    ['pin', 'initial'], ['release', 'reset'], ['pin', 'reset'],
+  ]);
+});
+
+test('an active block invalidates the pin and permits failover ranking', async () => {
+  const f = fixture({ selected: ['account-a', 'account-b'] });
+  assert.equal((await f.auth.keys.getWithCredential('opencode-go', 'session-1')).credentialId, 7);
+  f.block(7);
+  assert.equal((await f.auth.keys.getWithCredential('opencode-go', 'session-1')).credentialId, 8);
+  assert.equal(f.calls(), 2);
+  assert.equal(f.appended.at(-1).data.reason, 'blocked');
+});
+
+test('records explicit release boundaries and allows the next request to rank', async () => {
   const f = fixture();
   await f.auth.keys.getWithCredential('opencode-go', 'session-1');
   assert.equal(f.auth.sessions.release('opencode-go', 'session-1'), true);
   assert.deepEqual(f.appended.map((entry) => entry.data.action), ['pin', 'release']);
+});
+
+test('carries an explicit release reason onto the next selected account', async () => {
+  const f = fixture({ selected: ['account-a', 'account-b'] });
+  await f.auth.keys.getWithCredential('opencode-go', 'session-1');
+  f.auth.sessions.release('opencode-go', 'session-1');
+  await f.auth.keys.getWithCredential('opencode-go', 'session-1');
+  assert.equal(f.appended.at(-1).data.reason, 'reselection');
+  assert.equal(f.appended.at(-1).data.previousCredentialId, 7);
 });
 
 test('restores observed state and avoids duplicate records after restart', async () => {
@@ -109,6 +186,7 @@ test('restores observed state and avoids duplicate records after restart', async
     credentialId: 7,
   });
   assert.deepEqual(f.appended, []);
+  assert.equal(f.calls(), 0, 'resume restores the durable credential without ranking');
 });
 
 test('observes new namespaces immediately across repeated store replacements', async () => {
@@ -159,7 +237,7 @@ test('ordinary generation changes and repeated activation do not stack observers
   assert.equal(f.listeners.size, 1);
   await f.auth.keys.getWithCredential('opencode-go', 'session-1');
   assert.equal(f.appended.length, 1);
-  assert.equal(f.calls(), 2);
+  assert.equal(f.calls(), 1);
 });
 
 test('failed replacement keeps the old observation and cached selection', async () => {

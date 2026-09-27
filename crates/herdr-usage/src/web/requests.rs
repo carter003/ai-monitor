@@ -22,6 +22,7 @@ pub struct RequestRow {
     pub account_key: Option<String>,
     pub account: Option<String>,
     pub account_source: Option<String>,
+    pub account_route_reason: Option<String>,
     pub started_at: i64,
     pub completed_at: Option<i64>,
     pub local_time: String,
@@ -34,6 +35,9 @@ pub struct CrossAccountSession {
     pub session_id: String,
     pub provider: String,
     pub accounts: Vec<String>,
+    pub account_requests: Vec<usize>,
+    pub switches: usize,
+    pub switch_reasons: Vec<String>,
     pub requests: usize,
     pub first_at: i64,
     pub last_at: i64,
@@ -60,6 +64,20 @@ pub fn load(path: &Path) -> Result<RequestReport, String> {
 }
 
 fn report(connection: &Connection) -> Result<RequestReport, String> {
+    let has_route_reason = connection
+        .prepare("PRAGMA table_info(usage_event)")
+        .and_then(|mut statement| {
+            let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+            Ok(rows
+                .filter_map(Result::ok)
+                .any(|name| name == "account_route_reason"))
+        })
+        .unwrap_or(false);
+    let route_reason = if has_route_reason {
+        "account_route_reason"
+    } else {
+        "NULL"
+    };
     let (requests, resolved, average_duration_ms) = connection
         .query_row(
             "SELECT COUNT(*), COUNT(account_key), CAST(AVG(duration_ms) AS INTEGER)
@@ -77,17 +95,19 @@ fn report(connection: &Connection) -> Result<RequestReport, String> {
         )
         .map_err(|error| error.to_string())?;
 
-    let recent_sql = "SELECT event_id, source, COALESCE(session_id, ''),
+    let recent_sql = format!(
+        "SELECT event_id, source, COALESCE(session_id, ''),
                 COALESCE(provider, source), model,
-                account_key, account_label, account_source,
+                account_key, account_label, account_source, {route_reason},
                 COALESCE(started_at, occurred_at), completed_at, duration_ms
          FROM usage_event INDEXED BY idx_usage_recent_request
          WHERE source IN ('omp', 'codex', 'grok', 'opencode')
            AND session_id IS NOT NULL AND session_id <> ''
          ORDER BY COALESCE(started_at, occurred_at) DESC
-         LIMIT ?1";
+         LIMIT ?1"
+    );
     let mut statement = connection
-        .prepare(recent_sql)
+        .prepare(&recent_sql)
         .or_else(|error| {
             // usage-web can start against a database that the updated collector
             // has not migrated yet. Preserve the page until the index exists.
@@ -103,7 +123,7 @@ fn report(connection: &Connection) -> Result<RequestReport, String> {
         .map_err(|error| error.to_string())?;
     let mapped = statement
         .query_map([RECENT_REQUEST_LIMIT as i64], |row| {
-            let started_at: i64 = row.get(8)?;
+            let started_at: i64 = row.get(9)?;
             Ok(RequestRow {
                 event_id: row.get(0)?,
                 client: row.get(1)?,
@@ -113,14 +133,15 @@ fn report(connection: &Connection) -> Result<RequestReport, String> {
                 account_key: row.get(5)?,
                 account: row.get(6)?,
                 account_source: row.get(7)?,
+                account_route_reason: row.get(8)?,
                 started_at,
-                completed_at: row.get(9)?,
+                completed_at: row.get(10)?,
                 local_time: Local
                     .timestamp_millis_opt(started_at)
                     .single()
                     .map(|time| time.format("%Y-%m-%d %H:%M:%S").to_string())
                     .unwrap_or_else(|| started_at.to_string()),
-                duration_ms: row.get(10)?,
+                duration_ms: row.get(11)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -128,50 +149,66 @@ fn report(connection: &Connection) -> Result<RequestReport, String> {
         .collect::<Result<_, _>>()
         .map_err(|error| error.to_string())?;
 
-    // Aggregate once in SQLite. `account_rollup` produces one row per account,
-    // then `HAVING COUNT(*) > 1` selects cross-account sessions. This avoids
-    // loading all requests into Rust and avoids pairwise account comparisons.
+    // Collapse chronologically adjacent requests on the same account into one
+    // segment. The old report sorted distinct accounts by fingerprint, which
+    // rendered a misleading arrow and could not represent A -> B -> A.
+    let cross_sql = format!(
+        "WITH eligible AS (
+             SELECT source AS client,
+                    session_id,
+                    COALESCE(provider, source) AS provider,
+                    event_id,
+                    account_key,
+                    COALESCE(NULLIF(account_label, ''), account_key) AS account,
+                    {route_reason} AS route_reason,
+                    COALESCE(started_at, occurred_at) AS at
+             FROM usage_event
+             WHERE provider IN ('google-antigravity', 'opencode-go')
+               AND session_id IS NOT NULL AND session_id <> ''
+               AND account_key IS NOT NULL AND account_key <> ''
+         ),
+         cross_sessions AS (
+             SELECT client, session_id, provider,
+                    COUNT(*) AS requests, MIN(at) AS first_at, MAX(at) AS last_at
+             FROM eligible
+             GROUP BY client, session_id, provider
+             HAVING COUNT(DISTINCT account_key) > 1
+         ),
+         ordered AS (
+             SELECT eligible.*,
+                    LAG(account_key) OVER (
+                        PARTITION BY client, session_id, provider
+                        ORDER BY at, event_id
+                    ) AS previous_account
+             FROM eligible
+             JOIN cross_sessions USING (client, session_id, provider)
+         ),
+         marked AS (
+             SELECT *, CASE WHEN previous_account IS NULL OR previous_account <> account_key
+                            THEN 1 ELSE 0 END AS starts_segment
+             FROM ordered
+         ),
+         numbered AS (
+             SELECT *, SUM(starts_segment) OVER (
+                         PARTITION BY client, session_id, provider
+                         ORDER BY at, event_id ROWS UNBOUNDED PRECEDING
+                       ) AS segment_no
+             FROM marked
+         )
+         SELECT numbered.client, numbered.session_id, numbered.provider,
+                cross_sessions.requests, cross_sessions.first_at, cross_sessions.last_at,
+                MAX(numbered.account), COUNT(*),
+                COALESCE(MAX(NULLIF(numbered.route_reason, '')), ''), numbered.segment_no
+         FROM numbered
+         JOIN cross_sessions USING (client, session_id, provider)
+         GROUP BY numbered.client, numbered.session_id, numbered.provider,
+                  cross_sessions.requests, cross_sessions.first_at, cross_sessions.last_at,
+                  numbered.segment_no, numbered.account_key
+         ORDER BY cross_sessions.last_at DESC, numbered.client, numbered.session_id,
+                  numbered.provider, numbered.segment_no"
+    );
     let mut cross_statement = connection
-        .prepare(
-            "WITH account_rollup AS (
-                 SELECT source AS client,
-                        session_id,
-                        COALESCE(provider, source) AS provider,
-                        account_key,
-                        COALESCE(MAX(NULLIF(account_label, '')), account_key) AS account,
-                        COUNT(*) AS requests,
-                        MIN(COALESCE(started_at, occurred_at)) AS first_at,
-                        MAX(COALESCE(started_at, occurred_at)) AS last_at
-                 FROM usage_event
-                 WHERE provider IN ('google-antigravity', 'opencode-go')
-                   AND session_id IS NOT NULL AND session_id <> ''
-                   AND account_key IS NOT NULL AND account_key <> ''
-                 GROUP BY source, session_id, COALESCE(provider, source), account_key
-             ),
-             cross_sessions AS (
-                 SELECT client, session_id, provider,
-                        SUM(requests) AS requests,
-                        MIN(first_at) AS first_at,
-                        MAX(last_at) AS last_at
-                 FROM account_rollup
-                 GROUP BY client, session_id, provider
-                 HAVING COUNT(*) > 1
-             )
-             SELECT cross_sessions.client,
-                    cross_sessions.session_id,
-                    cross_sessions.provider,
-                    cross_sessions.requests,
-                    cross_sessions.first_at,
-                    cross_sessions.last_at,
-                    account_rollup.account
-             FROM cross_sessions
-             JOIN account_rollup USING (client, session_id, provider)
-             ORDER BY cross_sessions.last_at DESC,
-                      cross_sessions.client,
-                      cross_sessions.session_id,
-                      cross_sessions.provider,
-                      account_rollup.account_key",
-        )
+        .prepare(&cross_sql)
         .map_err(|error| error.to_string())?;
     let account_rows = cross_statement
         .query_map([], |row| {
@@ -183,25 +220,42 @@ fn report(connection: &Connection) -> Result<RequestReport, String> {
                 row.get::<_, i64>(4)?,
                 row.get::<_, i64>(5)?,
                 row.get::<_, String>(6)?,
+                row.get::<_, i64>(7)? as usize,
+                row.get::<_, String>(8)?,
             ))
         })
         .map_err(|error| error.to_string())?;
     let mut cross_account_sessions = Vec::<CrossAccountSession>::new();
     for row in account_rows {
-        let (client, session_id, provider, requests, first_at, last_at, account) =
-            row.map_err(|error| error.to_string())?;
+        let (
+            client,
+            session_id,
+            provider,
+            requests,
+            first_at,
+            last_at,
+            account,
+            segment_requests,
+            reason,
+        ) = row.map_err(|error| error.to_string())?;
         if let Some(existing) = cross_account_sessions.last_mut().filter(|existing| {
             existing.client == client
                 && existing.session_id == session_id
                 && existing.provider == provider
         }) {
             existing.accounts.push(account);
+            existing.account_requests.push(segment_requests);
+            existing.switches += 1;
+            existing.switch_reasons.push(reason);
         } else {
             cross_account_sessions.push(CrossAccountSession {
                 client,
                 session_id,
                 provider,
                 accounts: vec![account],
+                account_requests: vec![segment_requests],
+                switches: 0,
+                switch_reasons: vec![],
                 requests,
                 first_at,
                 last_at,
@@ -262,6 +316,7 @@ mod tests {
             ("1", "a", "A", 1000),
             ("2", "a", "A", 1500),
             ("3", "b", "B", 2000),
+            ("4", "a", "A", 2500),
         ] {
             connection.execute(
                 "INSERT INTO usage_event VALUES (?1,'omp','s','opencode-go','m',?2,?3,'sticky_cache',?4,?4+10,10,?4)",
@@ -271,18 +326,54 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO usage_event VALUES
-                 ('4','codex','codex-s',NULL,'gpt',NULL,NULL,NULL,3000,NULL,NULL,3000)",
+                 ('5','codex','codex-s',NULL,'gpt',NULL,NULL,NULL,3000,NULL,NULL,3000)",
                 [],
             )
             .unwrap();
         let report = report(&connection).unwrap();
-        assert_eq!(report.requests, 4);
+        assert_eq!(report.requests, 5);
         assert_eq!(report.recent[0].client, "codex");
         assert_eq!(report.recent[0].provider, "codex");
         assert_eq!(report.recent_limit, 3_000);
         assert_eq!(report.cross_account_sessions.len(), 1);
-        assert_eq!(report.cross_account_sessions[0].accounts, ["A", "B"]);
-        assert_eq!(report.cross_account_sessions[0].requests, 3);
+        assert_eq!(report.cross_account_sessions[0].accounts, ["A", "B", "A"]);
+        assert_eq!(report.cross_account_sessions[0].account_requests, [2, 1, 1]);
+        assert_eq!(report.cross_account_sessions[0].switches, 2);
+        assert_eq!(report.cross_account_sessions[0].requests, 4);
+    }
+
+    #[test]
+    fn switch_reasons_follow_chronological_account_segments() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!("../../migrations/schema.sql"))
+            .unwrap();
+        for (id, key, label, reason, at) in [
+            ("1", "a", "A", "initial", 1_000),
+            ("2", "a", "A", "initial", 1_500),
+            ("3", "b", "B", "usage-ranking", 2_000),
+            ("4", "a", "A", "blocked", 2_500),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO usage_event(
+                       event_id, source, session_id, provider, model,
+                       account_key, account_label, account_source, account_route_reason,
+                       input_total, cache_read, cache_write, output_total, reasoning, occurred_at
+                     ) VALUES (?1,'omp','s','opencode-go','m',?2,?3,'session_pin',?4,0,0,0,0,0,?5)",
+                    rusqlite::params![id, key, label, reason, at],
+                )
+                .unwrap();
+        }
+
+        let report = report(&connection).unwrap();
+        let cross = &report.cross_account_sessions[0];
+        assert_eq!(cross.accounts, ["A", "B", "A"]);
+        assert_eq!(cross.switch_reasons, ["usage-ranking", "blocked"]);
+        assert_eq!(
+            report.recent[0].account_route_reason.as_deref(),
+            Some("blocked")
+        );
     }
 
     #[test]

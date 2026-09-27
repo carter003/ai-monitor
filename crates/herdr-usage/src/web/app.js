@@ -275,9 +275,21 @@ function renderRequests() {
     {label:'通道', value:r => r.provider},
     {label:'模型', value:r => modelName(r.model)},
     {label:'账户', value:r => r.account || '未解析'},
+    {label:'选择原因', value:r => routeReason(r.account_route_reason)},
     {label:'Session', value:r => r.session_id},
   ], rows.slice(requestPage * requestPageSize, (requestPage + 1) * requestPageSize)));
 }
+const routeReason = value => ({
+  initial:'初始选择',
+  reset:'会话 Reset 后重选',
+  'usage-ranking':'Usage 排名改选',
+  blocked:'原账户暂时阻塞',
+  'usage-limit':'原账户达到限额',
+  rotation:'失败后轮换',
+  reselection:'主动重新选择',
+  'store-replaced':'认证存储替换',
+  'credential-unavailable':'原账户已不可用',
+}[value] || (value ? value : '原因未记录'));
 async function loadRequests() {
   const current = ++request;
   controller?.abort(); controller = new AbortController();
@@ -302,7 +314,9 @@ async function loadRequests() {
       {label:'客户端', value:r => r.client},
       {label:'Session', value:r => r.session_id},
       {label:'通道', value:r => r.provider},
-      {label:'账户', value:r => r.accounts.join(' → ')},
+      {label:'账户路径', value:r => r.accounts.map((account, i) => `${account} (${number(r.account_requests[i])})`).join(' → ')},
+      {label:'切换次数', value:r => number(r.switches)},
+      {label:'切换原因', value:r => r.switch_reasons.map(routeReason).join(' → ') || '原因未记录'},
       {label:'Request 数', value:r => number(r.requests)},
       {label:'最后时间', value:r => new Date(r.last_at).toLocaleString('zh-CN')},
     ], data.cross_account_sessions));

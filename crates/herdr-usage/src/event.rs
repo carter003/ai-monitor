@@ -102,6 +102,10 @@ pub struct ParsedEvent {
     pub account_key: Option<String>,
     pub account_label: Option<String>,
     pub account_source: Option<String>,
+    /// Why OMP selected the current account. This is routing evidence, not an
+    /// inferred provider error: `usage-ranking` means the API-key selector
+    /// returned a different healthy candidate without an explicit release.
+    pub account_route_reason: Option<String>,
     /// UTC epoch milliseconds.
     pub occurred_at: i64,
 }

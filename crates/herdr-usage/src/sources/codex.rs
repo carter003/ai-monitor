@@ -222,6 +222,7 @@ impl CodexState {
             account_key: None,
             account_label: None,
             account_source: None,
+            account_route_reason: None,
             occurred_at,
         }]
     }

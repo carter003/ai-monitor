@@ -50,6 +50,7 @@ pub fn initialize(connection: &Connection) -> rusqlite::Result<()> {
             ("account_key", "TEXT"),
             ("account_label", "TEXT"),
             ("account_source", "TEXT"),
+            ("account_route_reason", "TEXT"),
         ] {
             if !columns.iter().any(|column| column == name) {
                 connection.execute(
@@ -81,11 +82,11 @@ pub fn insert_events(
             "INSERT OR IGNORE INTO usage_event(
                  source, event_id, model, model_source, provider,
                  session_id, started_at, completed_at, duration_ms,
-                 account_key, account_label, account_source,
+                 account_key, account_label, account_source, account_route_reason,
                  input_total, cache_read, cache_write, output_total, reasoning,
                  cost_usd, occurred_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                     ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                     ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         )?;
         for (event, priced) in events {
             let (usage, adjusted) = event.usage.clamped();
@@ -116,6 +117,7 @@ pub fn insert_events(
                 event.account_key,
                 event.account_label,
                 event.account_source,
+                event.account_route_reason,
                 usage.input_total,
                 usage.cache_read,
                 usage.cache_write,
@@ -307,6 +309,7 @@ mod tests {
             account_key: None,
             account_label: None,
             account_source: None,
+            account_route_reason: None,
             occurred_at: at,
         }
     }
