@@ -1,6 +1,5 @@
 import { HerdrMetadataPublisher } from './lib/herdr-metadata-publisher.mjs';
 import { OmpTpsReporter } from './lib/omp-tps-reporter.mjs';
-import { registerOmpAntigravityRequestWorkaround } from './lib/omp-antigravity-request-workaround.mjs';
 import { registerOmpApiKeyObserver } from './lib/omp-api-key-observer.mjs';
 import { argumentValue, profileFromSessionPath } from './lib/omp-profile.mjs';
 
@@ -187,7 +186,7 @@ export function registerOmpTpsHandlers(pi, reporterOrFactory, { requireUi = fals
   let displayRefreshTimer;
 
   const activateRootSession = (context) => {
-    // OMP 18.4.1 reports the running agent on the extension context. A subagent
+    // OMP 18.4.2 reports the running agent on the extension context. A subagent
     // session (task tool, eval agent(), /tan clone) must never drive the pane,
     // even when it renders its own UI.
     if (context?.agent?.kind === 'sub') {
@@ -315,7 +314,6 @@ export function createOmpMetadataPublisher(pi) {
 }
 
 export default async function herdrTpsExtension(pi) {
-  registerOmpAntigravityRequestWorkaround(pi);
   registerOmpApiKeyObserver(pi);
   const publisher = createOmpMetadataPublisher(pi);
   if (!publisher.enabled) {

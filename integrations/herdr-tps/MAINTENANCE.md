@@ -242,7 +242,7 @@ Codex wrapper 启用 `streamingOnly`：以首个可见 delta 作为片段起点�
 | 非零 TPS TTL | 2500ms | `max(stale, heartbeat) + 2 × sampleInterval` |
 
 生产环境（Codex 与 OMP wrapper）采用 OMP 18.2.5 移植的 `TokenRateMeter` 算法（upstream
-`utils/token-rate.ts` 到 18.4.1 未变）：
+`utils/token-rate.ts` 到 18.4.2 只增加了 pending 计数的 memo）：
 
 1. **多尺度指数衰减**：在 5s、20s、80s 三个半衰期桶内同时维护 tokens 与 time；使用解析积分 `(halfLife / ln2) * (1 - 2^(-t / halfLife))` 计算流式增长与时间权值。
 2. **词边界分块分词**：流式 delta 按 250ms 周期分块，并在最后空格/换行符处分割（保留末尾最多 32 字符至下一块），消除跨 delta 分词边界误差与突发抖动。

@@ -124,11 +124,11 @@ OMP 的 `pro2` profile 会自动显示为 `omp2`。Herdr 冷重启只使用
 发现活动 client/broker/daemon PID 时，wrapper 拒绝切换并退出，不自动终止任务。
 可用 `node integrations/herdr-tps/share-omp-daemons.mjs --dry-run` 单独检查，
 或退出旧客户端后用 `--apply` 单独执行；默认仅检查。原始 runtime 二进制不会运行此启动检查，
-完成链接后它也会使用共享目录。当前本机 OMP 18.4.1 已核对目录解析；启用 XDG state 的布局需另行适配。
+完成链接后它也会使用共享目录。当前本机 OMP 18.4.2 已核对目录解析；启用 XDG state 的布局需另行适配。
 回滚时先退出全部 OMP 客户端并等待 broker 退出，再移除 pro2 的 daemon 符号链接、
 将输出的 `daemons.before-share-*` 备份恢复原名，并撤销 wrapper 的共享启动接线。
 
-OMP 扩展只观察根 session：先按 OMP 18.4.1 的 `ctx.agent.kind` 拒绝子代理 session
+OMP 扩展只观察根 session：先按 OMP 18.4.2 的 `ctx.agent.kind` 拒绝子代理 session
 （task、eval `agent()`、`/tan` clone），再要求带 UI。scout/reviewer 等子代理即使使用不同
 模型或自己渲染 UI，也不会覆盖父 pane 的模型或 TPS；同时运行的多个 OMP pane 各自向自己的
 `HERDR_PANE_ID` 发布。
@@ -200,11 +200,11 @@ OMP 使用与上游一致的 200 tokens / 4000ms 证据门槛；消息结束后�
 
 ## OMP 原生认证与 opencode-go session 粘性
 
-OMP 18.4.1 的 Antigravity 与 opencode-go 认证使用原生 AuthStorage。wrapper 始终
+OMP 18.4.2 的 Antigravity 与 opencode-go 认证使用原生 AuthStorage。wrapper 始终
 直接启动 `.runtime/omp`，禁止修改、重打包或禁用 OMP 可执行文件中的 Bun 字节码。Antigravity
-request workaround 只修正被服务端拒绝的 system prompt 片段，不参与账号选择。
+账号选择完全由 OMP 原生实现，本扩展不再改写 system prompt。
 
-OMP 18.4.1 会写入 API-key session affinity，但 `selectApiKey` 不读取它，导致每次 request 都
+OMP 18.4.2 会写入 API-key session affinity，但 `selectApiKey` 不读取它，导致每次 request 都
 重新进行 usage 排名。`lib/omp-api-key-observer.mjs` 在首次选择后缓存实际 credential；同一
 session 的普通请求直接复用。`/reset`、`/new` 或新的 session ID 才重新排名；block、usage-limit、
 rotation 和显式 release 仍可清除 pin 并进入异常恢复。18.4.0 起 `limits.rotate` 返回
