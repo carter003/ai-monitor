@@ -1,4 +1,4 @@
-// OpenCode Go session router and observer. OMP 18.3.5 records API-key affinity
+// OpenCode Go session router and observer. OMP 18.4.0 records API-key affinity
 // but does not read it during selection, so every request is ranked again. This
 // wrapper keeps the first resolved credential for the session until reset,
 // release, store replacement, or an explicit limit/rotation path invalidates it.
@@ -250,8 +250,10 @@ function wrapNamespaces(auth, state) {
 
   const originalRotate = limits.rotate.bind(limits);
   limits.rotate = async function rotate(provider, sessionId, ...rest) {
+    // OMP 18.4.0 returns a CredentialRotation object, which is truthy even when
+    // no sibling was available, so only an actual switch releases the pin.
     const rotated = await originalRotate(provider, sessionId, ...rest);
-    if (rotated && state.namespaces === namespaces) {
+    if (rotated?.switched && state.namespaces === namespaces) {
       observeRelease(state, provider, sessionId, 'rotation');
     }
     return rotated;

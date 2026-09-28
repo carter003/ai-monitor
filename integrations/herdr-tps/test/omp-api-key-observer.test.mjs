@@ -12,6 +12,7 @@ function fixture({ entries = [], selected = ['account-a', 'account-a', 'account-
   const listeners = new Set();
   const blocked = new Map();
   let sessionId = 'session-1';
+  let rotation = { switched: true };
   const namespaces = (accounts) => ({
     credentials: {
       onGeneration(listener) {
@@ -45,7 +46,7 @@ function fixture({ entries = [], selected = ['account-a', 'account-a', 'account-
     sessions: { release: () => true },
     limits: {
       markReached: async () => ({ switched: true }),
-      rotate: async () => true,
+      rotate: async () => rotation,
     },
   });
   const notifyGeneration = () => {
@@ -81,6 +82,7 @@ function fixture({ entries = [], selected = ['account-a', 'account-a', 'account-
     auth, appended, calls: () => calls, activate, notifyGeneration, listeners, pi, state,
     sessionManager,
     setSessionId: (value) => { sessionId = value; },
+    setRotation: (value) => { rotation = value; },
     block: (id) => blocked.set(id, Date.now() + 60_000),
   };
 }
@@ -200,7 +202,7 @@ test('observes new namespaces immediately across repeated store replacements', a
   await f.auth.keys.getWithCredential('opencode-go', 'session-1');
   assert.deepEqual(await f.auth.limits.markReached('opencode-go', 'session-1'), { switched: true });
   await f.auth.keys.getWithCredential('opencode-go', 'session-1');
-  assert.equal(await f.auth.limits.rotate('opencode-go', 'session-1'), true);
+  assert.deepEqual(await f.auth.limits.rotate('opencode-go', 'session-1'), { switched: true });
   await f.auth.keys.getWithCredential('opencode-go', 'session-1');
   await f.auth.replaceStore(['account-a']);
   f.activate('session_switch');
@@ -210,6 +212,17 @@ test('observes new namespaces immediately across repeated store replacements', a
     ['pin', 8], ['release', 'usage-limit'], ['pin', 8], ['release', 'rotation'],
     ['pin', 8], ['release', 'store-replaced'], ['pin', 7],
   ]);
+});
+
+test('a rotation without an available sibling keeps the pin', async () => {
+  const f = fixture({ selected: ['account-a'] });
+  await f.auth.keys.getWithCredential('opencode-go', 'session-1');
+  f.setRotation({ switched: false, afterSiblingWait: true });
+  const rotated = await f.auth.limits.rotate('opencode-go', 'session-1');
+  assert.deepEqual(rotated, { switched: false, afterSiblingWait: true });
+  await f.auth.keys.getWithCredential('opencode-go', 'session-1');
+  assert.equal(f.calls(), 1, 'the same account stays pinned until a real switch');
+  assert.deepEqual(f.appended.map(({ data }) => data.action), ['pin']);
 });
 
 test('records a new pin when a replacement store reuses a credential ID', async () => {
