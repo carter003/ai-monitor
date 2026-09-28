@@ -1,6 +1,6 @@
 # OMP 原生认证与 opencode-go session 粘性
 
-OMP 18.4.0 的认证、额度报告、reserve、block、rotation 和 429 恢复继续使用原生 AuthStorage。
+OMP 18.4.1 的认证、额度报告、reserve、block、rotation 和 429 恢复继续使用原生 AuthStorage。
 扩展只补齐 opencode-go API Key 的 session 粘性，不固定 Antigravity credential、不执行跨
 provider fallback，也不覆盖原生 `health.model`。
 
@@ -28,7 +28,7 @@ credential ID 作为 `herdr-api-key-sticky-v1` custom entry 写入 session；同
 `store-replaced` release、清理旧存储的选择缓存。新存储即使复用相同 credential ID，也会
 重新记录 pin；旧存储尚未完成的异步调用不会覆盖新存储的观察状态。
 
-OMP 18.4.0 会记录 API key 的 session affinity，但 API-key 选择路径没有读取这份 affinity；
+OMP 18.4.1 会记录 API key 的 session affinity，但 API-key 选择路径没有读取这份 affinity；
 本地路由补丁因此位于公开的 `keys.getWithCredential`、`sessions.release` 和 reset boundary 接口，
 不修改 Bun runtime。普通 request 不再因额度样本刷新或排序分数变化而换号。
 
@@ -38,7 +38,7 @@ generator 管理。
 
 ## OMP 升级
 
-路由器不依赖 bundle 字节偏移或 minified 私有方法名，只依赖 OMP 18.4.0 的：
+路由器不依赖 bundle 字节偏移或 minified 私有方法名，只依赖 OMP 18.4.1 的：
 
 - `keys.getWithCredential`、`sessions.release`、`limits.markReached`、`limits.rotate`；
 - `credentials.list`、`sessionManager.getSessionId`、`sessionManager.appendResetBoundary`；
@@ -55,6 +55,7 @@ opencode-go session 粘性由本扩展维护。
 为真才表示真的换了账号。观察器因此只在 `rotated.switched` 时记录 `rotation` release。
 没有可用 sibling 时 rotate 最多等待 5s（`SIBLING_UNBLOCK_WAIT_MAX_MS`）等短暂 block 的
 sibling 恢复，随后返回 `switched: false`——此时账号没变，按旧的真值判断会被误记成 rotation。
+`ai/src/auth/rotation.ts` 在 18.4.1 逐字节相同，这个契约到本版为止没有再变。
 
 升级后必须验证这些公开接口与 reset boundary 行为：
 
@@ -62,43 +63,50 @@ sibling 恢复，随后返回 `switched: false`——此时账号没变，按旧
 npm run herdr:tps:test
 ```
 
-18.4.0 升级时已逐项核对。upstream `v18.3.5...v18.4.0` 有 136 个 commit、300+ 文件。
-bundle 按 `// packages/...` 注释切分：2750 → 2759 个模块，只新增 9 个、无删除；AST 归一化
-（标识符、私有字段名折叠）后 104 个模块有差异。运行时可见且与本扩展相关的改动：
+18.4.1 升级时已逐项核对。upstream `v18.4.0...v18.4.1` 有 340 个 commit、300+ 文件，
+是一个以修复为主的 patch 版；`ai/src/auth/rotation.ts`、`auth-storage.ts`、`auth/pool.ts`、
+`auth/affinity.ts`、`auth/sqlite-credential-store.ts` 逐字节相同，18.4.0 的 rotate 契约继续成立。
+bundle 按 `// packages/...` 注释切分：2759 → 2765 个模块，删除 6 个、无新增；AST 归一化
+（标识符、私有字段名折叠）后 148 个模块有差异。运行时可见且与本扩展相关的改动：
 
 | upstream 模块 | 变化 | 对本扩展的影响 |
 | --- | --- | --- |
-| `ai/src/auth/rotation.ts` +552 字节 | `rotate` 返回 `CredentialRotation`；无可用 sibling 时最多等 5s 再返回 `afterSiblingWait` | 观察器改判 `.switched`，否则记错 rotation |
-| `ai/src/auth/blocks.ts` +1246、`select.ts`、`resets.ts`、`usage.ts`、`usage-cache.ts` | 认证 block 与 quota block 分离（新增 `AUTH_BLOCK_SCOPE`、`ACCOUNT_POLICY_BLOCK_SCOPE`）；修复 Anthropic 额度恢复后仍被 block、并发 usage 刷新反复探测、auth 失败只轮换一个 sibling | 原生行为；观察器的 `markReached`/`rotate` 放行逻辑不变 |
-| `ai/src/auth/cascade.ts`、`ai/src/auth-retry.ts` | 上游消费方同步改读 `.switched` | 无 |
-| `ai/src/providers/google-shared.ts`、`google-gemini-cli.ts` | 新增 `mapGoogleUsage`，修复 Gemini/Antigravity 缺 prompt token 或 cached > prompt 时的用量与计价（`google-gemini-cli.ts` −652 字节） | Antigravity payload 的 `requestType`/`userAgent`/`systemInstruction.parts` 构造不变，workaround 无需改 |
-| `coding-agent/src/session/agent-session.ts` | `PromptDroppedError`、`resetAccountLockKey` 统一 reset 协调、judge 共享缓存、`purpose: "ttsr"` | 消息事件类型不变，observer 不受影响 |
-| `coding-agent/src/session/agent-session-types.ts` | 新增 `inheritedSessionAgents`、`runCommands`、`throwOnDrop` | 未使用 |
-| `coding-agent/src/extensibility/extensions/wrapper.ts` +399 字节 | `renderCall` 第二参数用 Proxy 同时满足 omp 与 pi 的 `Theme` 契约 | 本扩展不注册工具；事件与 `ExtensionContext` 不变 |
-| `utils/dirs.ts` +228 字节 | Windows 8.3 长路径展开、`getJudgmentCacheDbPath` | `run/daemons` 解析逐字节不变 |
-| 新增 `stats/src/{rollup,frustration,live}.ts`、`coding-agent/src/judgment/{cache,standalone}.ts`、`telemetry-settings.ts`、`eval/startup-warning.ts`、`natives/native/path.js`、`prompts/tools/wait-no-message.md` | stats 面板重构与 frustration judge、judge 缓存、OTLP 导出开关、telemetry 命名空间 `pi.*` → `omp.*` | 与本扩展无关；collector 不读 OMP 的 stats db |
+| `ai/src/auth/types.ts`、`auth/select.ts`、`auth/refresh.ts` −1400、`auth-retry.ts`、`auth/cascade.ts` | 401 恢复复用近期签发的 token（`OAuthRefreshByIdOptions.reuseRecentMint`、`refreshReason: "auth-recovery"`），不再每次 401 都重签 | 原生行为；`keys.getWithCredential` 语义不变 |
+| `ai/src/auth/usage/zai.ts`、`usage/claude.ts`、`error/rate-limit.ts` | 修复 Z.AI 额度恢复后仍被旧 block 钉在 fallback 模型、Claude saved resets 被限流探针清空、滚动 TPM/RPM 429 被当成额度耗尽 | 原生 block 行为，观察器的 `markReached`/`rotate` 放行逻辑不变 |
+| `coding-agent/src/session/session-manager.ts` | `repairMissingUsage`：assistant message 缺 usage 时补零值并告警；`close()` 的 deferred publish 与权威重写拆分（修复 dispose 丢最后一条消息） | 采集口径需核对（见下） |
+| `coding-agent/src/session/agent-storage.ts` | SQLite 语句改用 `using` 作用域，close 后不再挂住 `agent.db` | schema 未变；collector 不读该库 |
+| `coding-agent/src/extensibility/extensions/types.ts` | 仅注释：`pi.sendMessage` 空闲时的即时渲染语义 | 事件与 `ExtensionContext` 不变 |
+| `coding-agent/src/extensibility/extensions/runner.ts`、`wrapper.ts` | 新增 `ToolCallPreflight` 与 loop dispatch 标记（规则可在执行前拦截工具调用、别名归一） | 只影响工具调用路径，本扩展不注册工具 |
+| `coding-agent/src/config/model-registry.ts` | keyless provider 判定、`getDiscoveryProviderId`、`disabledProviders` 屏蔽 fallback | `authStorage` 暴露方式不变 |
+| `utils/dirs.ts` | composer 缓存目录 `cache/composer/` 改为单个 `cache/composer.db` | `run/daemons` 解析不变 |
+| 删除 `tui/src/status-line/startup.ts`、`tui/src/prompt/composer-cache.ts`、`export/html/vendor/{highlight,marked}.min.js`、`prompts/system/stream-stall-continue.md`、`prompts/tools/salvaged-child-hint.md`、`slash-commands/helpers/usage-accounts.ts` | 状态栏首帧重绘、HTML 导出内联 vendor、stream 卡住后续跑提示词 | 与本扩展无关 |
 
-AST 归一化后逐字节相同的有 `utils/token-rate.ts`（移植算法）、`session/session-manager.ts`
-（会话文件格式与 `appendResetBoundary`）、`config/model-registry.ts`、`ai/auth-storage.ts`、
-`ai/auth/pool.ts`、`ai/auth/affinity.ts`、`ai/auth/sqlite-credential-store.ts`
-（collector 依赖的 `auth_credentials` 与 cache `session:sticky:%`）、扩展 `types.ts` 与
-`runner.ts`、`session/agent-storage.ts`。bundle 内 `keys.getWithCredential` 5→5、
-`sessions.release` 5→5、`limits.markReached` 5→5、`limits.rotate` 40→40、
-`credentials.list` 6→6、`credentials.onGeneration` 6→6、`sessionManager.appendResetBoundary`
-2→2、`getSessionId` 164→164、`appendEntry` 15→15、`before_provider_request` 2→2、
-`systemInstruction` 10→10、`requestType` 6→6，出现次数与 18.3.5 完全一致。
+`repairMissingUsage` 是唯一触及采集口径的改动：18.4.1 起，缺 usage 的 assistant message 会写入
+全零 `usage`，而 collector 对 `usage` 缺失的记录是跳过的。本机 142064 条 assistant message 中
+缺 usage 的为 0 条、已有 976 条 usage 全零的记录在 18.4.0 就已入库，因此实际行为不变；若以后
+出现真正的 usage-less 消息，采集侧会多出一条零 token 记录，届时再决定是否过滤。
 
-实机探针扩展在 18.3.5 与 18.4.0 上输出逐项相同：`context.agent.kind === 'main'`、
+AST 归一化后逐字节相同的有 `utils/token-rate.ts`（移植算法）、`ai/auth-storage.ts`、
+`ai/auth/rotation.ts`、`ai/auth/pool.ts`、`ai/auth/affinity.ts`、
+`ai/auth/sqlite-credential-store.ts`（collector 依赖的 `auth_credentials` 与 cache
+`session:sticky:%`）、扩展 `types.ts`、`ai/providers/google-gemini-cli.ts`、
+`ai/providers/google-shared.ts`、`stats/src/db.ts`。bundle 内 `keys.getWithCredential` 5→5、
+`limits.markReached` 5→5、`limits.rotate` 40→40、`credentials.onGeneration` 6→6、
+`sessionManager.appendResetBoundary` 2→2、`appendEntry` 15→15、
+`before_provider_request` 2→2、`systemInstruction` 10→10、`requestType` 6→6 出现次数与 18.4.0
+完全一致（`getSessionId` 166→164，来自被删的 `status-line/startup.ts`，与接口无关）。
+
+实机探针扩展在 18.4.0 与 18.4.1 上除 `ctx.model`（会话遗留模型，本次为
+`gemini-3.8-flash`）外逐项相同：`context.agent.kind === 'main'`、
 `context.modelRegistry.authStorage` 存在，上述接口均为函数，`credentials.list()` 返回 10 条
 credential，`pi.appendEntry` 可回写，`@oh-my-pi/pi-agent-core` 的 `Tokenizer` 可加载。
-wrapper 链路 `~/.local/bin/omp` 与 `omp-tps` 均解析到 18.4.0；经 wrapper 启动时本扩展的
+wrapper 链路 `~/.local/bin/omp` 与 `omp-tps` 均解析到 18.4.1；经 wrapper 启动时本扩展的
 钩子确实装上（`getWithCredentialWithObservation`、`releaseSessionCredential`、
-appendResetBoundaryWithCredentialRelease）。真实 print 会话确认 18.4.0 写出的 session jsonl
-仍是 `message`/`custom`/`model_usage` 形状，assistant message 新增 `credentialId` 与
-`providerPayload` 两个字段，collector 照常入库。rotate 返回 `{ switched: false,
-afterSiblingWait: true }` 时不写 release，由 `test/omp-api-key-observer.test.mjs` 固定
-（未打补丁前该用例失败）。`install.mjs --dry-run` 无变更，`npm run herdr:tps:test` 118 passed，
-`cargo test -p herdr-usage` 23 passed。
+appendResetBoundaryWithCredentialRelease）。真实 print 会话确认 18.4.1 写出的 session jsonl
+仍是 `message`/`custom`/`credential_pin` 形状，collector 照常入库并从 `credential_pin` 解析出
+账户（`gemini-3.8-flash` / `google-antigravity` / `carter.gogo@gmail.com`）。
+`install.mjs --dry-run` 无变更，`npm run herdr:tps:test` 118 passed，
+`cargo test -p herdr-usage` 23 passed。本版不需要改扩展或采集代码。
 
 仍未覆盖的实机验证是 Antigravity Gemini session 的账号选择与恢复。
 
