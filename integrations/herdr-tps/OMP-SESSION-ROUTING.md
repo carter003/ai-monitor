@@ -1,6 +1,6 @@
 # OMP 原生认证与 opencode-go session 粘性
 
-OMP 18.4.3 的认证、额度报告、reserve、block、rotation 和 429 恢复继续使用原生 AuthStorage。
+OMP 18.4.4 的认证、额度报告、reserve、block、rotation 和 429 恢复继续使用原生 AuthStorage。
 扩展只补齐 opencode-go API Key 的 session 粘性，不固定 Antigravity credential、不执行跨
 provider fallback，也不覆盖原生 `health.model`。
 
@@ -27,7 +27,7 @@ credential ID 作为 `herdr-api-key-sticky-v1` custom entry 写入 session；同
 `store-replaced` release、清理旧存储的选择缓存。新存储即使复用相同 credential ID，也会
 重新记录 pin；旧存储尚未完成的异步调用不会覆盖新存储的观察状态。
 
-OMP 18.4.3 会记录 API key 的 session affinity，但 API-key 选择路径没有读取这份 affinity；
+OMP 18.4.4 会记录 API key 的 session affinity，但 API-key 选择路径没有读取这份 affinity；
 本地路由补丁因此位于公开的 `keys.getWithCredential`、`sessions.release` 和 reset boundary 接口，
 不修改 Bun runtime。普通 request 不再因额度样本刷新或排序分数变化而换号。
 
@@ -37,7 +37,7 @@ generator 管理。
 
 ## OMP 升级
 
-路由器不依赖 bundle 字节偏移或 minified 私有方法名，只依赖 OMP 18.4.3 的：
+路由器不依赖 bundle 字节偏移或 minified 私有方法名，只依赖 OMP 18.4.4 的：
 
 - `keys.getWithCredential`、`sessions.release`、`limits.markReached`、`limits.rotate`；
 - `credentials.list`、`sessionManager.getSessionId`、`sessionManager.appendResetBoundary`；
@@ -53,7 +53,7 @@ Antigravity 账号选择完全由 OMP 原生实现，本扩展不再改写 syste
 为真才表示真的换了账号。观察器因此只在 `rotated.switched` 时记录 `rotation` release。
 没有可用 sibling 时 rotate 最多等待 5s（`SIBLING_UNBLOCK_WAIT_MAX_MS`）等短暂 block 的
 sibling 恢复，随后返回 `switched: false`——此时账号没变，按旧的真值判断会被误记成 rotation。
-`ai/src/auth/rotation.ts` 在 18.4.1、18.4.2、18.4.3 逐字节相同，这个契约到本版为止没有再变。
+`ai/src/auth/rotation.ts` 在 18.4.1、18.4.2、18.4.3、18.4.4 逐字节相同，这个契约到本版为止没有再变。
 
 升级后必须验证这些公开接口与 reset boundary 行为：
 
@@ -61,57 +61,65 @@ sibling 恢复，随后返回 `switched: false`——此时账号没变，按旧
 npm run herdr:tps:test
 ```
 
-18.4.3 升级时已逐项核对。upstream `v18.4.2...v18.4.3` 有 77 个 commit、220 个文件，以 Command Code
-provider 刷新、task 推测执行和 TUI/perf 为主。路由器与 collector 依赖的接缝全部未改：
-`ai/src/auth/rotation.ts`（18.4.0 rotate 契约）、`auth-storage.ts`、`auth/pool.ts`、
-`auth/affinity.ts`、`auth/sqlite-credential-store.ts`、`coding-agent/src/session/session-manager.ts`、
-`session-storage.ts`、扩展 `extensibility/extensions/{types,runner,wrapper}.ts`、
-`coding-agent/src/utils/token-rate.ts` 和 `agent/src/tokenizer.ts` 都不在改动文件里。
+18.4.4 升级时已逐项核对。upstream `v18.4.3...v18.4.4` 有 169 个 commit、714 个文件，以 GPT-6.1 Sol
+与 ultrafast service tier、bare slash 命令、ask 粘贴图片、Tern surface protocol 与原生 TUI、
+skills 同名命名空间冲突、mnemopi 多音召回和一批 dead-code 清理为主。路由器与 collector 依赖的接缝
+全部逐字节相同：`ai/src/auth-storage.ts`、`ai/src/auth/rotation.ts`（18.4.0 rotate 契约）、
+`ai/src/auth/pool.ts`、`ai/src/auth/affinity.ts`、`ai/src/auth/sqlite-credential-store.ts`、
+`coding-agent/src/session/session-manager.ts`、`session-storage.ts`、
+`coding-agent/src/utils/token-rate.ts`、`agent/src/tokenizer.ts`、`catalog/src/model-cache.ts`。
+`cli/args.ts`、`main.ts`、`commands/launch.ts` 也未改，wrapper 注入 `--extension`、参数转发和退出码
+透传的语义不变。
 
-bundle 按 `// packages/...` 注释切分：2765 → 2768 个模块（新增 5、删除 2）。原始字节比对在这两个
-版本之间不可用——同一模块内标识符被打散重命名，逐字节差异会覆盖全部模块——因此这一版的证据是
-三层：upstream 源文件 diff、bundle 内接口出现次数、实机探针。接口出现次数逐项一致
-（`keys.getWithCredential`、`sessions.release`、`limits.markReached`、`limits.rotate`、
-`credentials.list`、`credentials.onGeneration`、`sessionManager.getSessionId`、
-`sessionManager.appendResetBoundary`、`appendEntry`、`before_provider_request`、`userAgent`、
-以及 `session_start`/`message_start`/`message_end`/`agent_end`/`session_shutdown` 与
-`text_delta`/`thinking_delta`/`toolcall_delta`），只有 `message_update` 28 → 30。运行时可见且与
-本扩展相关的改动：
+bundle 按 `// packages/...` 注释切分：2768 → 2817 个模块（新增 49、删除 0），新增集中在 Tern/TSP
+原生层、browser、mnemopi、skills 和 auth-broker 协议拆分。接口出现次数逐项保持或上升：
+`getWithCredential` 6 → 6、`markReached` 6 → 6、`onGeneration` 8 → 8、
+`appendResetBoundary` 3 → 3、`before_provider_request` 3 → 3、`session_start` 9 → 9、
+`message_update` 30 → 30、`session_shutdown` 9 → 9、`text_delta`/`thinking_delta`/`toolcall_delta`
+不变，`appendEntry` 19 → 20、`getSessionId` 151 → 171、`.rotate` 12 → 18。运行时可见且与本扩展
+相关的改动：
 
 | upstream 模块 | 变化 | 对本扩展的影响 |
 | --- | --- | --- |
-| `ai/src/usage/commandcode.ts`、`usage/registry.ts`、`catalog/src/compat/rules/providers/commandcode.kdl` | 新增 Command Code provider、usage 报告与排序策略 | 新增 provider，不在本扩展的观察列表（仅 `opencode-go`）内，Antigravity/opencode-go 路径不变 |
-| `ai/src/registry/engine/api-key.ts`、`catalog/.../auth/commandcode.kdl` | 可选登录探测支持 `trustForbidden`（Command Code 允许 403） | 只影响登录校验；不改变已存储 credential 的选择 |
-| `coding-agent/src/session/agent-session.ts` | `message_update` 的扩展投递改为先 `hasHandlers` 再入队（per-delta 热路径） | 纯性能；本扩展注册了 `message_update`，delta 仍然逐条到达（实机核对过） |
-| `coding-agent/src/extensibility/shared-events.ts`、`agent/src/types.ts`、`docs/extensions.md`、`docs/hooks.md` | `tool_call` 的 `additionalContext` 去重（同一次调用与同一批次内重复值只保留一份） | 本扩展不用 `tool_call` 的 `additionalContext` |
-| `agent/src/agent-loop.ts`、`agent.ts`、`types.ts`、`speculation/host.ts`、`coding-agent/src/task/{index,spawn-run,speculative-launch}.ts` | 批量 task 调用的推测执行：流式参数预授权启动子任务，新增 `transformAssistantMessagePreservesToolCalls` | 只影响 tool/task 路径；本扩展不注册工具，子代理仍以 `ctx.agent.kind === 'sub'` 拒绝 |
-| `coding-agent/src/cli/args.ts`、`cli/flag-tables.ts`、`main.ts`、`commands/launch.ts` | 内置枚举 flag（`--mode`/`--thinking`/`--approval-mode`）取值校验、退出码 2；`--no-ui` 要求 `--mode rpc`；非 TTY 的自动 print 判定改到扩展 flag 解析之后；ACP 改为按 session 绑定扩展；`--export` 也校验枚举 | wrapper 注入的 `--extension` 语义不变；参数转发与退出码透传照旧，误用 flag 现在以 usage error 退出而不是静默 |
-| `ai/src/utils/event-stream.ts`、`utils/src/stream.ts`、`ai/src/providers/google-{shared,gemini-cli}.ts` | 事件队列改用 head 游标代替 `shift()`；SSE 无诊断监听者时不再挂 observer，raw 复用冻结的空数组 | 纯性能，事件顺序与协议不变 |
-| `coding-agent/src/tools/output-meta.ts` | 工具结果溢出 artifact 的阈值先用 UTF-16 长度快速判定 | 只影响超长工具输出的落盘方式 |
-| `coding-agent/src/sdk.ts` | 松散 edit 恢复声明 `transformAssistantMessagePreservesToolCalls` | 原生行为 |
+| `coding-agent/src/extensibility/extensions/{types,runner,wrapper}.ts`、`extensibility/shared-events.ts`、`agent/src/types.ts` | 新增 `assistant_message` 事件（改写已完成的 assistant 消息，只能替换 text block 的 text）与 `tool_result.additionalContext`（handler 在工具失败时也能注入上下文） | 新增可选事件，本扩展既不注册也不使用；既有事件的投递路径与 `MessageEndEvent` 形状不变 |
+| `coding-agent/src/session/agent-session.ts`、`agent/src/agent.ts`、`session/queued-messages.ts`、`session/agent-session-events.ts` | 新增 `queue_update` 会话事件；keyword 提示改为随队列消息前置投递；`#queuedMessageRawText` 让 `removeQueuedMessage` 能按用户原始输入匹配；队列分组回调 | 只影响队列展示与 RPC 移除路径，不改 assistant 消息事件，也不改 session jsonl 的行形状 |
+| `coding-agent/src/session/attachment-source-notice.ts`、`prompts/system/image-attachment.md` | 图片/视频来源提示抽成独立模块，图片提示新增 ask answer 分支 | 只影响用户附件提示的措辞；本扩展不读该 custom 消息 |
+| `ai/src/usage/{shared,claude,cursor,synthetic,umans,zai,cline-pass,openai-codex}.ts` | `buildUsageAmount`/`usageStatus` 收敛到 `usage/shared.ts`；Cursor 丢弃未封顶且零请求的 legacy bucket | 纯重构加展示过滤，usage 报告字段与排序语义不变；`opencode-go` 的 usage provider 未改 |
+| `ai/src/auth-broker/protocol.ts`（新）、`auth-broker/{client,remote-store,server,snapshot-cache}.ts` | ETag 解析与 block 快照排序抽到共享协议模块，`#raceWithSignal` 换成 `raceSignal` 工具 | 纯重构；broker 协议与快照顺序不变 |
+| `coding-agent/src/session/{sql,indexed}-session-storage.ts`、`session-storage-errors.ts`（新） | `enoent` 构造器提取到共享模块 | 纯重构；session 文件写入与错误形状不变 |
+| `coding-agent/src/extensibility/skills.ts`、`docs/skills.md` | 同名不同源的 skill 统一加来源命名空间，覆盖优先级确定化 | 只影响 skill 解析；本扩展不读 skill |
+| `ai/src/providers/{anthropic,amazon-bedrock,bedrock-anthropic,bedrock-request-metadata,openai-*,cursor,google-shared,xai-base-url}.ts`、`catalog/src/models.json` | GPT-6.1 Sol 定价与 ultrafast service tier、Bedrock/Anthropic 与 xAI base URL 调整 | 原生 provider 行为；Antigravity / opencode-go 请求路径不受影响 |
+| `coding-agent/src/tools/browser/**`、`tui/src/native/**`、`wire/src/tsp.ts`（新） | Tern 原生 surface protocol、browser 画中画与新工具模块 | 只影响 browser/Tern；本扩展不注册工具 |
+| `ai/src/compaction/**`、`agent/src/compaction/*`、`mnemopi/src/core/*` | Bedrock/Azure/OpenAI 压缩端点、mnemopi 多音召回与查询缓存 | 原生行为 |
 
 18.4.2 起 system prompt 已不再包含被 Antigravity 拒绝的句子，`lib/omp-antigravity-request-workaround.mjs`
-及其测试一并删除，扩展不再改写 `before_provider_request` 的 payload；`prompts/` 不在
-`v18.4.2...v18.4.3` 的改动里，这个删除在 18.4.3 上依然正确。
+及其测试一并删除，扩展不再改写 `before_provider_request` 的 payload；`prompts/system/system-prompt.md`
+与 `prompts/advisor/system.md` 不在 `v18.4.3...v18.4.4` 的改动里（首行仍是 `RFC 2119 keywords: …`），
+这个删除在 18.4.4 上依然正确。
 
-实机验证（`omp-linux-x64` SHA256 与 release `SHA256SUMS.txt` 一致，`--version` → `omp/18.4.3`，
-`omp update --check` → Already up to date）：
+实机验证（`omp-linux-x64` SHA256 `24c830fc…` 与 release `SHA256SUMS.txt` 一致，`--version` →
+`omp/18.4.4`，`omp update --check` → Already up to date）：
 
-- 探针扩展逐项与 18.4.2 相同——`context.agent.kind === 'main'`、`hasUI === true`、
+- 探针扩展逐项与 18.4.3 相同——`context.agent.kind === 'main'`、`hasUI === false`（print 模式）、
   `context.modelRegistry.authStorage` 存在，`keys.getWithCredential`、`sessions.release`、
   `limits.markReached`、`limits.rotate`、`credentials.list`、`credentials.onGeneration`、
-  `sessionManager.getSessionId`、`sessionManager.appendResetBoundary` 均为函数，
-  `credentials.list()` 返回 10 条 credential（8 个 provider，与 18.4.2 集合相同），
-  `pi.appendEntry` 可回写，`@oh-my-pi/pi-agent-core` 的 `Tokenizer` 可加载并计数，`errors: []`。
-- 经 wrapper 启动时本扩展的钩子确实装上（`getWithCredentialWithObservation`、
-  `releaseSessionCredential`、`appendResetBoundaryWithCredentialRelease`）。
-- 真实 TUI 会话（经 wrapper 启动、`HERDR_*` 指向假 socket）发布出 `model`、`display_agent`
-  与非零 `tps`（44 个非零样本，52.8 → 135.4 tok/s，结束后归零），Herdr 官方集成同时给出
-  `idle` → `working` → `idle`；事件面 `session_start`/`message_start`/`message_update`/
-  `message_end`/`agent_end`/`session_shutdown` 全部到达，`message_end` 的 usage 字段形状不变。
-- 真实 opencode-go print 会话写出的 session jsonl 仍是 `message`/`custom`/`session` 等形状，
-  `custom` 仍是 `herdr-api-key-sticky-v1`（`action: pin`，`credentialId: 7`），collector 照常入库
-  并解析出账户（`OpenCode Go Key 97520118` / `opencode-go` / `session_pin` / `initial`）。
+  `sessionManager.getSessionId`、`sessionManager.appendResetBoundary`、`sessionManager.getEntries`
+  均为函数，`credentials.list()` 返回 10 条 credential（8 个 provider，与 18.4.3 集合相同），
+  `pi.appendEntry` 可回写，`@oh-my-pi/pi-agent-core` 的 `Tokenizer` 可加载并计数，
+  事件面 `session_start`/`message_start`/`message_update`/`message_end`/`agent_end`/
+  `session_shutdown` 全部到达，delta 为 `text_start`/`text_delta`/`text_end`，
+  `message_end` 的 usage 字段形状不变（`cacheRead`/`cacheWrite`/`cost`/`input`/`output`/
+  `reasoningTokens`/`totalTokens`），`errors: []`。
+- 与生产扩展同时加载时，本扩展的三个钩子确实装上：`getWithCredentialWithObservation`、
+  `releaseSessionCredential`、`appendResetBoundaryWithCredentialRelease`。
+- 真实 TUI 会话（经 `~/.local/bin/omp` 启动、`HERDR_*` 指向假 socket）发布出 `model`
+  （`gemini-3.8-flash`）、`display_agent`（`omp`）与非零 `tps`（27 个样本，82.5 → 78.7 tok/s），
+  Herdr 官方集成同时给出 `idle` → `working` → `idle`。
+- 真实 opencode-go print 会话写出的 session jsonl 仍是 `title`/`session`/`model_change`/
+  `thinking_level_change`/`message`/`custom` 这些行，`custom` 仍是
+  `herdr-api-key-sticky-v1`（`action: pin`，`provider: opencode-go`，`credentialId: 7`，
+  `reason: initial`），常驻 collector 照常入库并解析出账户
+  （`OpenCode Go Key 97520118` / `opencode-go` / `session_pin` / `initial`）。
 - `install.mjs --dry-run` 无变更，`npm run herdr:tps:test` 116 passed，
   `cargo test -p herdr-usage` 23 passed。不需要改扩展或采集代码。
 
