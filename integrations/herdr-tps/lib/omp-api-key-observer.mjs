@@ -1,4 +1,4 @@
-// OpenCode Go session router and observer. OMP 18.4.8 records API-key affinity
+// OpenCode Go session router and observer. OMP 18.4.9 records API-key affinity
 // but does not read it during selection, so every request is ranked again. This
 // wrapper keeps the first resolved credential for the session until reset,
 // release, store replacement, or an explicit limit/rotation path invalidates it.
