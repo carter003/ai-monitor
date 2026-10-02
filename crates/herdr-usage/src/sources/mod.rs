@@ -7,6 +7,7 @@
 pub mod codex;
 pub mod grok;
 pub mod omp;
+mod omp_api_keys;
 pub mod opencode;
 
 use crate::{
@@ -141,11 +142,18 @@ impl Collector {
             files.extend(omp::session_files(root));
         }
         self.scanned_files = files.len();
+        for file in &files {
+            let accounts = catalogs
+                .iter()
+                .find(|(root, _)| file.starts_with(root))
+                .map(|(_, accounts)| accounts)
+                .expect("OMP session file belongs to an enumerated root");
+            self.omp.seed_file(file, accounts);
+        }
         let mut store = OffsetStore::from_cursor(db::offset(connection, kind)?.as_deref());
-        let mut batch = vec![];
+        let mut batch = Vec::new();
         let mut inserted = 0;
         for file in &files {
-            self.omp.seed_file(file);
             let accounts = catalogs
                 .iter()
                 .find(|(root, _)| file.starts_with(root))
@@ -173,6 +181,8 @@ impl Collector {
             })?;
         }
         inserted += db::insert_events(connection, kind, &batch, now)?;
+        self.omp
+            .reconcile_api_key_accounts(connection, &catalogs, false)?;
         db::save_offset(connection, kind, &store.cursor())?;
         Ok(inserted)
     }
@@ -666,73 +676,27 @@ pub fn backfill_omp_request_metadata(
     Ok(updated)
 }
 
-/// Correct OpenCode Go request ownership from the append-only API-key pin
-/// timeline emitted by the Herdr OMP extension. Unlike `session:sticky`, these
-/// entries preserve rotations within one session. Rows without timeline
-/// evidence are deliberately left unchanged.
+/// Correct OpenCode Go request ownership from session-keyed pin evidence,
+/// including entries emitted into a sibling file by older observers.
+/// Unproven cache-only identities become unknown; token and price fields stay intact.
 pub fn backfill_omp_api_key_timeline(
     connection: &mut Connection,
     roots: &[PathBuf],
 ) -> rusqlite::Result<usize> {
-    use std::{
-        collections::HashMap,
-        io::{BufRead, BufReader},
-    };
-
-    let mut found = HashMap::<String, ParsedEvent>::new();
-    for root in roots {
-        let catalog = omp::AccountCatalog::load(&root.parent().unwrap_or(root).join("agent.db"));
-        let mut state = omp::OmpState::new();
+    let catalogs: Vec<_> = roots
+        .iter()
+        .map(|root| {
+            (
+                root.clone(),
+                omp::AccountCatalog::load(&root.parent().unwrap_or(root).join("agent.db")),
+            )
+        })
+        .collect();
+    let mut state = omp::OmpState::new();
+    for (root, accounts) in &catalogs {
         for file in omp::session_files(root) {
-            let Ok(handle) = std::fs::File::open(&file) else {
-                continue;
-            };
-            for (ordinal, line) in BufReader::new(handle).split(b'\n').enumerate() {
-                let Ok(line) = line else { break };
-                if !line.windows(9).any(|part| part == b"\"session\"")
-                    && !line
-                        .windows(b"herdr-api-key-sticky-v1".len())
-                        .any(|part| part == b"herdr-api-key-sticky-v1")
-                    && !line.windows(7).any(|part| part == b"\"usage\"")
-                {
-                    continue;
-                }
-                let tail = tail::TailLine {
-                    start: ordinal as u64,
-                    bytes: line,
-                };
-                for event in state.parse_line_with_accounts(&file, &tail, &catalog) {
-                    if event.provider.as_deref() == Some("opencode-go")
-                        && event.account_source.as_deref() == Some("session_pin")
-                    {
-                        found.insert(event.event_id.clone(), event);
-                    }
-                }
-            }
+            state.seed_file(&file, accounts);
         }
     }
-    if found.is_empty() {
-        return Ok(0);
-    }
-
-    let transaction = connection.transaction()?;
-    let mut updated = 0usize;
-    {
-        let mut statement = transaction.prepare(
-            "UPDATE usage_event SET account_key=?1, account_label=?2, account_source=?3,
-                 account_route_reason=?4
-             WHERE source='omp' AND provider='opencode-go' AND event_id=?5",
-        )?;
-        for event in found.values() {
-            updated += statement.execute(rusqlite::params![
-                event.account_key,
-                event.account_label,
-                event.account_source,
-                event.account_route_reason,
-                event.event_id,
-            ])?;
-        }
-    }
-    transaction.commit()?;
-    Ok(updated)
+    state.reconcile_api_key_accounts(connection, &catalogs, true)
 }

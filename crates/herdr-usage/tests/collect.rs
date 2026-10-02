@@ -137,7 +137,13 @@ fn a_large_backlog_is_batched_without_losing_events_at_chunk_boundaries() {
     let report = collector.run_round(&mut connection, 2_000).unwrap();
     assert_eq!(report.inserted, 2_000);
     assert_eq!(count(&connection, "codex"), 2_000);
-    assert_eq!(collector.run_round(&mut connection, 3_000).unwrap().inserted, 0);
+    assert_eq!(
+        collector
+            .run_round(&mut connection, 3_000)
+            .unwrap()
+            .inserted,
+        0
+    );
 }
 
 #[test]
@@ -273,7 +279,10 @@ fn a_second_omp_profile_session_tree_is_collected_too() {
     fs::write(sessions.join("x.jsonl"), format!("{OMP_LINE}\n")).expect("seed profile session");
 
     let report = collector.run_round(&mut connection, 2_000).expect("round");
-    assert_eq!(report.inserted, 1, "the second profile's events are collected");
+    assert_eq!(
+        report.inserted, 1,
+        "the second profile's events are collected"
+    );
     let (source, provider): (String, Option<String>) = connection
         .query_row(
             "SELECT source, provider FROM usage_event WHERE event_id = '681cad2e'",
@@ -324,7 +333,12 @@ fn opencode_account_rotation_is_stored_per_request() {
     let file = fixture.paths.omp.join("session.jsonl");
     fs::write(&file, "").expect("seed session file");
 
-    let auth_db = fixture.paths.omp.parent().expect("sessions parent").join("agent.db");
+    let auth_db = fixture
+        .paths
+        .omp
+        .parent()
+        .expect("sessions parent")
+        .join("agent.db");
     let auth = rusqlite::Connection::open(auth_db).expect("auth db");
     auth.execute_batch(
         "CREATE TABLE auth_credentials(
@@ -353,8 +367,8 @@ fn opencode_account_rotation_is_stored_per_request() {
         r#"{"type":"session","id":"session-1"}"#.to_owned(),
         r#"{"type":"custom","customType":"herdr-api-key-sticky-v1","data":{"action":"pin","provider":"opencode-go","sessionId":"session-1","credentialId":7,"at":100}}"#.to_owned(),
         message("request-a", 1000),
-        r#"{"type":"custom","customType":"herdr-api-key-sticky-v1","data":{"action":"release","provider":"opencode-go","sessionId":"session-1","reason":"rotation","at":200}}"#.to_owned(),
-        r#"{"type":"custom","customType":"herdr-api-key-sticky-v1","data":{"action":"pin","provider":"opencode-go","sessionId":"session-1","credentialId":8,"at":300}}"#.to_owned(),
+        r#"{"type":"custom","customType":"herdr-api-key-sticky-v1","data":{"action":"release","provider":"opencode-go","sessionId":"session-1","reason":"rotation","at":1200}}"#.to_owned(),
+        r#"{"type":"custom","customType":"herdr-api-key-sticky-v1","data":{"action":"pin","provider":"opencode-go","sessionId":"session-1","credentialId":8,"at":1300}}"#.to_owned(),
         message("request-b", 2000),
     ];
     fixture.append(&file, &format!("{}\n", lines.join("\n")));

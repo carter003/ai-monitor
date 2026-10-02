@@ -17,9 +17,9 @@ static STOPPED: AtomicBool = AtomicBool::new(false);
 /// restarts exactly like a watermark does.
 const BACKFILL_KIND: &str = "omp-provider-backfill";
 const REQUEST_BACKFILL_KIND: &str = "omp-request-metadata-backfill-v1";
-// v2 replays the same pin timeline to populate account_route_reason, added
-// after the v1 account-only backfill had already completed on existing installs.
-const API_KEY_TIMELINE_BACKFILL_KIND: &str = "omp-api-key-timeline-backfill-v2";
+// v3 recovers sibling-file pins and clears cache-only account guesses left by
+// earlier account/timeline migrations; usage and price fields are unchanged.
+const API_KEY_TIMELINE_BACKFILL_KIND: &str = "omp-api-key-attribution-backfill-v3";
 
 fn main() {
     let database = db_path();

@@ -96,7 +96,9 @@ JSON 接口：`GET /api/usage?start=2026-09-01&end=2026-09-12&model=vendor%2Fmod
 
 JSON 接口：`GET /api/plans`，返回 `ledger_found`、`accounts`、`plans`（每个套餐含当前周期 `period`、已用量 `used_*`、推算上限 `max_*` 与历史 `weekly` 点）和 `notes`。
 
-JSON 接口：`GET /api/requests`，返回账户解析覆盖率、平均耗时、跨账户 session 和最近 3000 条 request；`client` 直接来自 SQLite 的 `usage_event.source`。AGY 使用 OMP `credential_pin` 指纹与 OAuth 账户匹配；OpenCode Go 优先按 session 粘性路由器写入的 `herdr-api-key-sticky-v1` pin/release 时间线，把每个 request 匹配到当时的脱敏 Key 指纹，并记录首次选择、reset、usage 排名、block、限额、rotation、主动重选、存储替换或原 credential 不可用。没有时间线的旧记录才回退到 `agent.db` 的最终 session sticky 状态。账户字段在采集时直接写入 request 行；统计端按请求时间折叠连续同账户区段，完整保留往返切换。旧时间线没有显式原因时，直接发生的 pin 变化标为 `usage-ranking`，明确 release 的原因由下一次 pin 继承；无法恢复的旧记录不会猜测。
+JSON 接口：`GET /api/requests`，返回账户解析覆盖率、平均耗时、跨账户 session 和最近 3000 条 request；`client` 来自 SQLite 的 `usage_event.source`。AGY 使用 OMP `credential_pin` 指纹与 OAuth 账户匹配。OpenCode Go 只用 `herdr-api-key-sticky-v1` pin/release 的逻辑 `sessionId` 和时间线归因；请求开始早于取 Key 时，以响应完成时间确定本次选择。恢复子任务时会被覆盖的 `agent.db` sticky 值以及当前 credential 数量都不能证明历史请求账号。
+
+collector 在读取 request 前收集所有 session 文件的 pin，能恢复旧版观察器写进兄弟日志的记录；迟到的 pin 会修正已采集行。启动时的 `omp-api-key-attribution-backfill-v3` 会重新匹配有 pin 证据的旧记录，并清除缺少证据的 `sticky_cache` / `single_credential` 账号归因，保留未知。修正只涉及账号字段，不改 token、金额、模型和时间。跨账户区统计全库历史，不等同于最近 3000 条 request；父、子 session 独立统计，不因同一 pane 使用不同 Key 判为同一 session 换 Key。
 
 ### 套餐额度的口径
 
