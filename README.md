@@ -193,6 +193,37 @@ import_prices
 
 工具将从 OpenRouter 获取最新官方模型计价并写入 SQLite。对人工指定的别名或备注（`remark`）会自动保留。
 
+### 5. Codex ChatGPT Web 启动器（已安装，勿重复下载）
+
+[miuuyy/codex-chatgpt-web](https://github.com/miuuyy/codex-chatgpt-web) 的 Linux 启动器**已安装在本机**，
+升级安装脚本会重复下载 AppImage（约数百 MB），除非明确要升级，否则直接运行即可：
+
+```sh
+# 已安装版本（当前 6.1.3）
+ls ~/.local/lib/codex-web-gpt/          # 每个版本一个目录
+ls ~/.local/bin/codex-web-gpt           # 启动包装脚本
+
+# 启动（GUI 经 WSLg 显示）
+nohup ~/.local/bin/codex-web-gpt >/tmp/codex-web-gpt.log 2>&1 &
+
+# 查看是否在运行 / 停止
+pgrep -af codex-web-gpt-launcher
+pkill -f codex-web-gpt-launcher
+```
+
+运行状态描述文件：`~/.codex-chatgpt-web/runtime/launcher-browser.json`，其中 `pid` 与
+`endpoint`（本地回环地址）可用于确认进程是否存活。配置、浏览器登录态与密钥均在该目录下：
+`config.json`、`secrets/`、`tunnel/`。
+
+日志中的 `WebGL blocklisted`、`org.freedesktop.UPower ... ServiceUnknown` 是 WSLg 环境固有的
+噪音，不影响使用。
+
+仅在需要升级到新版本时才执行官方安装脚本（会校验 SHA-256 并保留用户数据）：
+
+```sh
+curl -fsSL https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install-launcher.sh | sh
+```
+
 ---
 
 ## 运行自动化测试
