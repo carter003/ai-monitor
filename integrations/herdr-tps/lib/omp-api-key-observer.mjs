@@ -1,4 +1,4 @@
-// OpenCode Go session router and observer. OMP 18.4.9 records API-key affinity
+// OpenCode Go session router and observer. OMP 18.4.12 records API-key affinity
 // but does not read it during selection, so every request is ranked again. This
 // wrapper keeps the first resolved credential for the session until reset,
 // release, store replacement, or an explicit limit/rotation path invalidates it.
@@ -15,10 +15,13 @@ function debug(pi, message) {
 }
 
 function appendState(state, data) {
+  const writer = state.writers.get(data.sessionId);
+  if (!writer) return;
   try {
-    state.pi?.appendEntry?.(ENTRY_TYPE, data);
+    if (writer.sessionManager.getSessionId() !== data.sessionId) return;
+    writer.pi.appendEntry?.(ENTRY_TYPE, data);
   } catch (error) {
-    debug(state.pi, `cannot persist API-key selection: ${error?.message ?? error}`);
+    debug(writer.pi, `cannot persist API-key selection: ${error?.message ?? error}`);
   }
 }
 
@@ -264,16 +267,12 @@ function wrapAuthStorage(auth, state) {
   state.auth = auth;
   if (auth[OBSERVER_STATE]) {
     const activeState = auth[OBSERVER_STATE];
-    activeState.pi = state.pi;
     activeState.providers = state.providers;
     wrapNamespaces(auth, activeState);
     return activeState;
   }
 
   wrapNamespaces(auth, state);
-  // OMP carries generation subscribers to the new store and notifies them
-  // synchronously after replacing its namespaces. Ordinary reloads keep the
-  // same objects and must not reset selections or stack wrappers.
   auth.credentials?.onGeneration?.(() => {
     state.resolved.clear();
     wrapNamespaces(auth, state);
@@ -285,33 +284,63 @@ function wrapAuthStorage(auth, state) {
 
 export function registerOmpApiKeyObserver(pi, { providers = DEFAULT_PROVIDERS } = {}) {
   const state = {
-    pi,
     providers: new Set(providers),
     selections: new Map(),
     resolved: new Map(),
     inflight: new Map(),
     pendingReasons: new Map(),
     releaseReasons: new Map(),
+    writers: new Map(),
     sessionManagers: new WeakSet(),
     auth: undefined,
   };
+  let writerState;
+  let writerSessionId;
+  let writer;
+  const detachWriter = () => {
+    if (writerState && writerState.writers.get(writerSessionId) === writer) {
+      writerState.writers.delete(writerSessionId);
+    }
+    writerState = undefined;
+    writerSessionId = undefined;
+    writer = undefined;
+  };
   const activate = (_event, context) => {
     const auth = context?.modelRegistry?.authStorage;
+    const manager = context?.sessionManager;
+    const sessionId = manager?.getSessionId?.();
     if (
       typeof auth?.keys?.getWithCredential !== 'function' ||
       typeof auth.sessions?.release !== 'function' ||
       typeof auth.limits?.markReached !== 'function' ||
-      typeof auth.limits?.rotate !== 'function'
+      typeof auth.limits?.rotate !== 'function' ||
+      typeof sessionId !== 'string' || !sessionId
     ) {
-      debug(pi, 'OMP auth namespaces are unavailable; API-key observation was not installed');
+      detachWriter();
+      debug(
+        pi,
+        'OMP auth/session namespaces are unavailable; API-key observation was not installed',
+      );
       return;
     }
     const activeState = wrapAuthStorage(auth, state);
+    if (
+      writerState !== activeState ||
+      writerSessionId !== sessionId ||
+      writer?.sessionManager !== manager
+    ) {
+      detachWriter();
+      writer = { pi, sessionManager: manager };
+      activeState.writers.set(sessionId, writer);
+      writerState = activeState;
+      writerSessionId = sessionId;
+    }
     loadEntries(activeState, context);
-    wrapResetBoundary(context?.sessionManager, activeState);
+    wrapResetBoundary(manager, activeState);
   };
   pi.on('session_start', activate);
   pi.on('session_switch', activate);
+  pi.on('session_shutdown', detachWriter);
   return state;
 }
 

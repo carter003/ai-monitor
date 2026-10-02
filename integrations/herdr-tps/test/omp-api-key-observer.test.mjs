@@ -79,13 +79,71 @@ function fixture({ entries = [], selected = ['account-a', 'account-a', 'account-
   });
   activate();
   return {
-    auth, appended, calls: () => calls, activate, notifyGeneration, listeners, pi, state,
+    auth,
+    appended,
+    calls: () => calls,
+    activate,
+    notifyGeneration,
+    listeners,
+    pi,
+    state,
     sessionManager,
     setSessionId: (value) => { sessionId = value; },
     setRotation: (value) => { rotation = value; },
     block: (id) => blocked.set(id, Date.now() + 60_000),
   };
 }
+
+function sessionScope(auth, id, entries = []) {
+  const handlers = new Map();
+  const appended = [];
+  const pi = {
+    on: (event, handler) => handlers.set(event, handler),
+    appendEntry: (customType, data) => appended.push({ type: 'custom', customType, data }),
+  };
+  const sessionManager = {
+    getSessionId: () => id,
+    getEntries: () => [...entries, ...appended],
+    appendResetBoundary: () => ({ type: 'reset_boundary' }),
+  };
+  registerOmpApiKeyObserver(pi);
+  const activate = () => handlers.get('session_start')({}, {
+    modelRegistry: { authStorage: auth }, sessionManager,
+  });
+  activate();
+  return { appended, activate, shutdown: () => handlers.get('session_shutdown')?.() };
+}
+
+test('shared auth preserves each child session account timeline', async () => {
+  const parent = fixture({ selected: ['account-a', 'account-b', 'account-a'] });
+  await parent.auth.keys.getWithCredential('opencode-go', 'session-1');
+  const first = sessionScope(parent.auth, 'child-a');
+  const second = sessionScope(parent.auth, 'child-b');
+  await parent.auth.keys.getWithCredential('opencode-go', 'child-a');
+  await parent.auth.keys.getWithCredential('opencode-go', 'child-b');
+  parent.activate();
+  await parent.auth.limits.markReached('opencode-go', 'child-a');
+  await parent.auth.keys.getWithCredential('opencode-go', 'child-a');
+  assert.deepEqual(parent.appended.map(({ data }) => [data.sessionId, data.credentialId]), [['session-1', 7]]);
+  assert.deepEqual(first.appended.map(({ data }) => [data.sessionId, data.action, data.credentialId, data.reason]), [
+    ['child-a', 'pin', 8, 'initial'],
+    ['child-a', 'release', undefined, 'usage-limit'],
+    ['child-a', 'pin', 7, 'usage-limit'],
+  ]);
+  assert.deepEqual(second.appended.map(({ data }) => [data.sessionId, data.credentialId]), [['child-b', 7]]);
+});
+
+test('a revived session keeps its writer when the old scope shuts down', async () => {
+  const parent = fixture({ selected: ['account-a', 'account-b'] });
+  const old = sessionScope(parent.auth, 'child-a');
+  await parent.auth.keys.getWithCredential('opencode-go', 'child-a');
+  const revived = sessionScope(parent.auth, 'child-a', old.appended);
+  old.shutdown();
+  await parent.auth.limits.markReached('opencode-go', 'child-a');
+  await parent.auth.keys.getWithCredential('opencode-go', 'child-a');
+  assert.deepEqual(old.appended.map(({ data }) => [data.action, data.credentialId]), [['pin', 7]]);
+  assert.deepEqual(revived.appended.map(({ data }) => [data.action, data.credentialId]), [['release', undefined], ['pin', 8]]);
+});
 
 test('ranks once and keeps the selected API key for the whole session', async () => {
   const f = fixture();
@@ -225,18 +283,22 @@ test('a rotation without an available sibling keeps the pin', async () => {
   assert.deepEqual(f.appended.map(({ data }) => data.action), ['pin']);
 });
 
-test('records a new pin when a replacement store reuses a credential ID', async () => {
+test('credential store replacement resets each session without mixing timelines', async () => {
   const f = fixture({ selected: ['account-a'] });
+  const child = sessionScope(f.auth, 'session-2');
   await f.auth.keys.getWithCredential('opencode-go', 'session-1');
   await f.auth.keys.getWithCredential('opencode-go', 'session-2');
   await f.auth.replaceStore(['account-a']);
-  assert.equal(f.state.selections.size, 0);
   await f.auth.keys.getWithCredential('opencode-go', 'session-1');
   assert.deepEqual(f.appended.map(({ data }) => [data.action, data.sessionId]), [
-    ['pin', 'session-1'], ['pin', 'session-2'], ['release', 'session-1'],
-    ['release', 'session-2'], ['pin', 'session-1'],
+    ['pin', 'session-1'], ['release', 'session-1'], ['pin', 'session-1'],
   ]);
-});
+  assert.deepEqual(child.appended.map(({ data }) => [data.action, data.sessionId]), [
+    ['pin', 'session-2'], ['release', 'session-2'],
+  ]);
+  assert.equal(f.appended.at(-1).data.reason, 'store-replaced');
+  assert.equal(f.appended.at(-1).data.credentialId, 7);
+});;
 
 test('ordinary generation changes and repeated activation do not stack observers', async () => {
   const f = fixture({ selected: ['account-a'] });
