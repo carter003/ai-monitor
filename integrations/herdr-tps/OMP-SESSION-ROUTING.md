@@ -1,6 +1,6 @@
 # OMP 原生认证与 opencode-go session 粘性
 
-OMP 18.4.12 的认证、额度报告、reserve、block、rotation 和 429 恢复继续使用原生 AuthStorage。
+OMP 18.5.0 的认证、额度报告、reserve、block、rotation 和 429 恢复继续使用原生 AuthStorage。
 扩展只补齐 opencode-go API Key 的 session 粘性，不固定 Antigravity credential、不执行跨
 provider fallback，也不覆盖原生 `health.model`。
 
@@ -29,7 +29,7 @@ credential ID 作为 `herdr-api-key-sticky-v1` custom entry 写入所属 session
 `store-replaced` release、清理旧存储的选择缓存。新存储即使复用相同 credential ID，也会
 重新记录 pin；旧存储尚未完成的异步调用不会覆盖新存储的观察状态。
 
-OMP 18.4.12 会记录 API key 的 session affinity，但 API-key 选择路径没有读取这份 affinity；
+OMP 18.5.0 会记录 API key 的 session affinity，但 API-key 选择路径没有读取这份 affinity；
 本地路由补丁因此位于公开的 `keys.getWithCredential`、`sessions.release` 和 reset boundary 接口，
 不修改 Bun runtime。普通 request 不再因额度样本刷新或排序分数变化而换号。
 
@@ -39,7 +39,7 @@ generator 管理。
 
 ## OMP 升级
 
-路由器不依赖 bundle 字节偏移或 minified 私有方法名，只依赖 OMP 18.4.12 的：
+路由器不依赖 bundle 字节偏移或 minified 私有方法名，只依赖 OMP 18.5.0 的：
 
 - `keys.getWithCredential`、`sessions.release`、`limits.markReached`、`limits.rotate`；
 - `credentials.list`、`sessionManager.getSessionId`、`sessionManager.appendResetBoundary`；
@@ -55,13 +55,100 @@ Antigravity 账号选择完全由 OMP 原生实现，本扩展不再改写 syste
 为真才表示真的换了账号。观察器因此只在 `rotated.switched` 时记录 `rotation` release。
 没有可用 sibling 时 rotate 最多等待 5s（`SIBLING_UNBLOCK_WAIT_MAX_MS`）等短暂 block 的
 sibling 恢复，随后返回 `switched: false`——此时账号没变，按旧的真值判断会被误记成 rotation。
-`packages/ai/src/auth/rotation.ts` 在 18.4.1 至 18.4.12 逐字节相同，这个契约到本版为止没有再变。
+`packages/ai/src/auth/rotation.ts` 在 18.4.1 至 18.5.0 逐字节相同，这个契约到本版为止没有再变。
 
 升级后必须验证这些公开接口与 reset boundary 行为：
 
 ```bash
 npm run herdr:tps:test
 ```
+
+### 18.5.0
+
+upstream [`v18.4.12...v18.5.0`](https://github.com/can1357/oh-my-pi/compare/v18.4.12...v18.5.0)
+是 67 个 commit、292 个文件（modified/added 混合，新增 `report-panel.ts`、`sub-sessions.ts`、
+`agent-tombstone.ts`、`effort.ts`、pi-vcs `filter.rs`，删除 `task-completion-probe.test.ts`）。
+版本号从 18.4.x 跳到 18.5.0，但变更集不是补丁规模，因此仍逐个接缝核对。
+
+逐字节未变（两 tag 相同 blob SHA）：`packages/ai/src/auth-storage.ts`、
+`packages/ai/src/auth/{rotation,select,blocks,cascade,affinity}.ts`、
+`packages/coding-agent/src/utils/token-rate.ts`、`packages/agent/src/tokenizer.ts`、
+`packages/coding-agent/src/extensibility/extensions/{runner,wrapper}.ts`、
+`packages/coding-agent/src/extensibility/shared-events.ts`、
+`packages/coding-agent/src/extensibility/extensions/lifecycle-mirror.ts`、
+`packages/coding-agent/src/session/{credential-pin,agent-session-types}.ts`、
+`packages/coding-agent/src/commands/launch.ts`、`packages/coding-agent/src/cli/{args,main}.ts`
+与 `docs/extensions.md`。因此 18.4.8 记录的“写了 session affinity 但选择路径不读它”继续成立，
+本地 session 粘性仍然必要；`shared-events.ts` 与 `docs/extensions.md` 未变说明本版本没有新增扩展
+事件，上表已消费事件的投递路径与字段形状不变。
+
+被改过但语义不变的接缝：
+
+- **session 所有权租约换了位置与键（本版本唯一的 session 存储破坏性变更）**：
+  `packages/coding-agent/src/session/session-storage.ts` 用
+  `claimSession(sessionId, sessionPath)` 取代 `claimSessionFile(sessionPath)`，
+  `tryAcquireSessionLease(sessionId)` 取代 `sessionOwnerLeasePath(sessionPath)`；租约从
+  session 文件旁的 `.{basename}.jsonl.owner` 移到与 profile 无关的
+  `~/.omp/run/session-owners/<sessionId>`（Linux 用 abstract socket，不落文件；本机该目录至今未生成），
+  并且 claim 会先读 journal header 的 session id，路径上已是别的 session 就拒绝认领。
+  `session-manager.ts` 相应把 `#claimSessionFile`/`#sessionFileOwnedElsewhere` 改名为
+  `#claimSession`/`#sessionOwnedElsewhere`，新增 `SessionMoveRefusedError`——`moveTo` 现在可能
+  拒绝移动且不动任何文件，重开路径捕获该错误后按“项目没搬动”继续。
+  本扩展只用 `getSessionId`/`getEntries`/`getSessionFile`/`appendCustomEntry`/
+  `appendResetBoundary`/`getCredentialPins`，全部签名与 JSONL 行形状不变；本仓库也不实现
+  `SessionStorage` 后端，因此没有需要迁移的实现。
+- `packages/coding-agent/src/session/session-paths.ts`：temp root 优先于 home 判定，同一个 cwd
+  同时落在两者之内时改用 `-tmp-…` 目录并把被遮蔽的 home 目录迁移过去。本机 `TMPDIR` 未设置、
+  `/tmp` 不在 `$HOME` 之下，session 目录名不变（实测仍是 `-project-ai-monitor`）。
+- `packages/coding-agent/src/session/agent-session.ts` 只增不删：新增
+  `getAvailableEffortSelectors()` 与 `/dump all` 的 `dumpSessionArchiveToTmpDir()`，
+  `dumpLlmRequestToTmpDir()` 抽出 `#formatLlmRequestJson`。本扩展读取的
+  `message_end`（`usage.output`/`duration`/`timestamp`/`content`）与 `agent_end` 未变。
+- `packages/catalog/src/model-cache.ts` 只新增 `closeModelCache()`；模型身份与显示名形状不变。
+- `packages/coding-agent/src/modes/rpc/rpc-mode.ts` 只在 Windows 把 stdout 换成 fd 写流，
+  Linux 分支与协议帧完全不变。
+- `packages/coding-agent/src/extensibility/plugins/legacy-pi-compat.ts` 让 `?mtime=` 裸路径
+  specifier 在 Windows 也生效；POSIX 上原来的分支就是裸路径，行为不变。
+- `history-storage.ts` 的 `prepare()` 改 `query()`、`indexed-session-storage.ts` 的
+  `listFilesSync` 改用 `directChildKeyName`：都只修 Windows 的文件锁与 `\` 分隔符列举。
+- `packages/utils/src/dirs.ts` 新增 `getSessionOwnersDir()`；`registry/agent-tombstone.ts`
+  是把 tombstone 路径从 `agent-registry.ts` 拆出，纯重构。
+
+**设置迁移**：`task.completionProbeMs`（毫秒）被 on/off 的 `task.completionProbe` 取代，
+旧值自动迁移（`0` → 关，其余 → 开）。本机 `~/.omp/agent/config.yml` 从未设置该键，实跑后
+配置文件未被改写，因此无需处理。
+
+bundle 接口出现次数 18.4.9 → 18.5.0：`getWithCredential` 10 → 10、`markReached` 6 → 6、
+`onGeneration` 8 → 8、`appendResetBoundary` 3 → 3、`session_start` 8 → 8、
+`session_shutdown` 9 → 9、`appendEntry` 19 → 19、`cancel_subagent` 7 → 7、
+`steer_subagent` 13 → 13、`predict_word` 13 → 13；`message_update` 32 → 33、
+`getSessionId` 171 → 174、`session_branch` 7、`session_tree` 5，新增 `tryAcquireSessionLease` 5、
+`getSessionOwnersDir` 2。`claimSessionFile`/`sessionOwnerLeasePath` 只剩 CHANGELOG 文本里的迁移说明。
+
+实机验证（`omp-linux-x64` SHA256
+`b8413e6e085a423c7a9b1d7bc025c2af794923b6b6c57330a309639b6176c8a1` 与 release
+`SHA256SUMS.txt` 一致，`--version` → `omp/18.5.0`，`omp update --check` → Already up to date）：
+
+- 经 `omp-with-tps.mjs --mode rpc --no-session --no-ui` 加载临时探针，runtime 发出
+  `ready`（protocol v1，支持 v1/v2，maxFrameBytes 1048576，maxReassembledFrameBytes 67108864）；
+  `context.agent.kind === 'main'`、`hasUI === false`；`modelRegistry.authStorage` 上
+  `credentials`/`keys`/`oauth`/`sessions`/`usage`/`health`/`limits`/`resets`/`blocks` 都在原型上，
+  `keys.getWithCredential`、`sessions.release`、`limits.markReached`、`limits.rotate`、
+  `credentials.list`、`credentials.onGeneration`、`blocks.list`、`sessionManager.getSessionId`/
+  `getEntries`/`getSessionFile`/`getCredentialPins`/`getBranch`/`onPersistenceNotice`/
+  `appendResetBoundary`/`appendCustomEntry`、`pi.appendEntry`/`sendMessage` 全部是 function。
+- 20 个事件名全部注册成功：本扩展消费的 7 个（`session_start`、`session_switch`、
+  `session_shutdown`、`message_start`、`message_update`、`message_end`、`agent_end`）、
+  `turn_start`、`turn_end`、`agent_start`、`queue_update`、`assistant_message`、
+  `cache_warming_start`、`cache_warming_end`、`before_provider_request`、`tool_result`、
+  `session_before_branch`、`session_branch`、`session_tree`，以及本扩展不消费的 `goal_updated`。
+- `omp --print` 真实请求成功完成；`opencode-go/deepseek-v4.1-flash` 的真实 session 写入
+  `herdr-api-key-sticky-v1`（`credentialId` 7、`reason` initial），collector 在生产库里落成一行
+  `source=omp, provider=opencode-go, account_route_reason=initial`，解析与回填链路不变。
+- `node --test integrations/herdr-tps/test/*.test.mjs`：120 passed；
+  `cargo test -p herdr-usage --locked`：116 + 23 + 3 passed；
+  `npm run herdr:tps:install -- --dry-run`：config、shell、links 均已就绪。
+  扩展与采集代码不需要修改。
 
 ### 18.4.12
 
