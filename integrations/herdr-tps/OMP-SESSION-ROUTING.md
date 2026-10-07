@@ -1,6 +1,6 @@
 # OMP 原生认证与 opencode-go session 粘性
 
-OMP 18.5.0 的认证、额度报告、reserve、block、rotation 和 429 恢复继续使用原生 AuthStorage。
+OMP 18.8.0 的认证、额度报告、reserve、block、rotation 和 429 恢复继续使用原生 AuthStorage。
 扩展只补齐 opencode-go API Key 的 session 粘性，不固定 Antigravity credential、不执行跨
 provider fallback，也不覆盖原生 `health.model`。
 
@@ -29,7 +29,7 @@ credential ID 作为 `herdr-api-key-sticky-v1` custom entry 写入所属 session
 `store-replaced` release、清理旧存储的选择缓存。新存储即使复用相同 credential ID，也会
 重新记录 pin；旧存储尚未完成的异步调用不会覆盖新存储的观察状态。
 
-OMP 18.5.0 会记录 API key 的 session affinity，但 API-key 选择路径没有读取这份 affinity；
+OMP 18.8.0 会记录 API key 的 session affinity，但 API-key 选择路径没有读取这份 affinity；
 本地路由补丁因此位于公开的 `keys.getWithCredential`、`sessions.release` 和 reset boundary 接口，
 不修改 Bun runtime。普通 request 不再因额度样本刷新或排序分数变化而换号。
 
@@ -38,8 +38,8 @@ OMP 18.5.0 会记录 API key 的 session affinity，但 API-key 选择路径没�
 generator 管理。
 
 ## OMP 升级
+路由器不依赖 bundle 字节偏移或 minified 私有方法名，只依赖 OMP 18.8.0 的：
 
-路由器不依赖 bundle 字节偏移或 minified 私有方法名，只依赖 OMP 18.5.0 的：
 
 - `keys.getWithCredential`、`sessions.release`、`limits.markReached`、`limits.rotate`；
 - `credentials.list`、`sessionManager.getSessionId`、`sessionManager.appendResetBoundary`；
@@ -55,13 +55,242 @@ Antigravity 账号选择完全由 OMP 原生实现，本扩展不再改写 syste
 为真才表示真的换了账号。观察器因此只在 `rotated.switched` 时记录 `rotation` release。
 没有可用 sibling 时 rotate 最多等待 5s（`SIBLING_UNBLOCK_WAIT_MAX_MS`）等短暂 block 的
 sibling 恢复，随后返回 `switched: false`——此时账号没变，按旧的真值判断会被误记成 rotation。
-`packages/ai/src/auth/rotation.ts` 在 18.4.1 至 18.5.0 逐字节相同，这个契约到本版为止没有再变。
+`packages/ai/src/auth/rotation.ts` 在 18.4.1 至 18.8.0 逐字节相同，这个契约到本版为止没有再变。
 
 升级后必须验证这些公开接口与 reset boundary 行为：
 
 ```bash
 npm run herdr:tps:test
 ```
+
+### 18.8.0
+
+upstream [`v18.7.0...v18.8.0`](https://github.com/can1357/oh-my-pi/compare/v18.7.0...v18.8.0)
+是补丁版本发布，逐个接缝核对。
+
+逐字节未变（两 tag 相同 blob SHA）：`packages/ai/src/auth-storage.ts`、
+`packages/ai/src/auth/{rotation,blocks,affinity}.ts`、`packages/coding-agent/src/utils/token-rate.ts`、
+`packages/coding-agent/src/extensibility/shared-events.ts`、
+`packages/coding-agent/src/extensibility/extensions/{lifecycle-mirror,runner,wrapper}.ts`、
+`packages/coding-agent/src/session/{session-storage,credential-pin}.ts`、
+`packages/coding-agent/src/commands/launch.ts`、`packages/coding-agent/src/cli/args.ts`、
+`packages/catalog/src/model-cache.ts`、`packages/utils/src/dirs.ts`。
+因此认证底层、存储、rotation 合约、session affinity 行为与事件定义均未改变；本地 session 粘性补丁继续完全适用。
+
+被改动但不破坏本扩展/采集契约的接缝：
+
+- `packages/ai/src/`：环境 API-key 辅助函数（`getEnvApiKey`、`getEnvApiKeyName`、
+  `listProvidersWithEnvKey`）从 `@oh-my-pi/pi-ai/stream` 移出，改为从 `@oh-my-pi/pi-ai` 或
+  `@oh-my-pi/pi-ai/env-api-key` 导入；`TranscriptionRequest.audio` 接受 `Uint8Array | Blob`。
+  本扩展不从 `pi-ai/stream` 导入任何符号，也不消费转录请求，因此不受影响。
+- `packages/agent/src/tokenizer.ts`：`countTokens` 核心接口与文本分词逻辑未变。
+- `packages/coding-agent/src/session/session-manager.ts`：本扩展消费的
+  `getSessionId`/`getEntries`/`getSessionFile`/`getCredentialPins`/`appendResetBoundary`
+  签名与 session JSONL 行形状不变。
+- `packages/coding-agent/src/extensibility/extensions/types.ts` 与 `docs/extensions.md`：
+  未新增扩展生命周期事件，本扩展消费的 7 个事件投递路径与字段形状不变。
+
+bundle 接口出现次数 18.7.0 → 18.8.0：`getWithCredential` 10 → 10、`markReached` 6 → 6、
+`onGeneration` 8 → 8、`appendResetBoundary` 3 → 3、`session_shutdown` 9 → 9、
+`appendEntry` 19 → 19、`getSessionId` 174 → 177、`session_tree` 5 → 5、
+`tryAcquireSessionLease` 5 → 5、`getSessionOwnersDir` 2 → 2、`session_start` 9 → 9、
+`cancel_subagent` 8 → 8、`steer_subagent` 14 → 14、`predict_word` 15 → 15、
+`message_update` 37 → 39、`agent_end` 57 → 58、`before_provider_request` 3 → 4、
+`session_branch` 8 → 8。全部核心接缝保持一致或仅内部使用增加。
+
+实机验证（`omp-linux-x64` SHA256
+`6d0bd5d624f96b42513859558bc001d523a1eada1d71446ab7ca743ec2aa7de1`，`--version` → `omp/18.8.0`，
+`omp update --check` → Already up to date）：
+
+- 经 `omp-with-tps.mjs --version` 加载 wrapper，正确解析到 18.8.0 runtime。
+- `node --test integrations/herdr-tps/test/*.test.mjs`：120 passed；
+  `npm run herdr:tps:install -- --dry-run`：config、shell、links 均已就绪。
+  本地 sticky pin、TPS reporter 及 herdr-usage 采集链路全部通过，无需修改代码。
+
+### 18.7.0
+
+upstream [`v18.6.1...v18.7.0`](https://github.com/can1357/oh-my-pi/compare/v18.6.1...v18.7.0)
+是 853 个 commit、869 个文件改动（含中间 tag 18.6.2、18.6.3），跨 ai/agent/catalog/coding-agent/natives/builtins/tui/edit/vcs/vfs。次版本发布规模大，逐个接缝核对。
+
+逐字节未变（两 tag 相同 blob SHA）：`packages/ai/src/auth-storage.ts`、
+`packages/ai/src/auth/{rotation,blocks,affinity}.ts`、
+`packages/coding-agent/src/utils/token-rate.ts`、
+`packages/coding-agent/src/extensibility/shared-events.ts`、
+`packages/coding-agent/src/extensibility/extensions/{lifecycle-mirror,runner,wrapper}.ts`、
+`packages/coding-agent/src/session/{session-storage,credential-pin}.ts`、
+`packages/coding-agent/src/commands/launch.ts`、`packages/coding-agent/src/cli/args.ts`、
+`packages/catalog/src/model-cache.ts`、`packages/utils/src/dirs.ts`。
+因此认证底层、存储、rotation 合约、session affinity 行为与事件定义均未改变；本地 session 粘性补丁继续完全适用。
+
+被改动但不破坏本扩展/采集契约的接缝：
+
+- `packages/ai/src/auth/cascade.ts` 与 `packages/ai/src/auth/select.ts`：在 `apiKeySelection`、`loginApiKeySelection` 及 OAuth 选择后记录 affinity 时新增 `recordAffinity !== false` 条件判断；`affinity.ts` 逻辑未变且 API key 选择逻辑依然不读取 session affinity，因此本地 sticky pin 仍然必须由扩展管理。
+- `packages/agent/src/tokenizer.ts`：构造器入参扩展为可选 `snapcompact.ShapeTarget`，对 snapcompact 消息帧 token 估算由固定值改为按像素尺寸与定价动态估算（`snapcompact.frameTokens`）；`countTokens` 核心接口与文本分词保持一致。
+- `packages/coding-agent/src/session/session-manager.ts`：`appendSessionInit` 的 `systemPrompt` 类型由 `string` 扩展为 `string[]` 并增加 `workPoolYieldItems`，`extractSessionInit` 兼容两者；本扩展消费的 `getSessionId`/`getEntries`/`getSessionFile`/`getCredentialPins`/`appendResetBoundary` 均保持不变。
+- `packages/coding-agent/src/extensibility/extensions/types.ts` 与 `docs/extensions.md`：`registerProvider` 的 `models` 支持指定 `kind`（如 `openai-images` 对应 `kind: "image"`），未新增扩展生命周期事件。
+- `packages/coding-agent/src/tools/read.ts` 与 `crates/pi-builtins/src/read.rs`：`read` 工具原生支持 `?q=<jq-filter>` 进行 JSON/JSONL 查询、分页与流式过滤（PR #14141）。
+- `packages/coding-agent/src/tools/{write,edit}.ts`：禁止对 FIFO、设备文件、终端等特殊文件进行写/改操作，遇到非普通文件安全报错而非挂起或耗尽资源（PR #14452、#14462）。
+- `crates/pi-natives/src/{sed,jq}.rs`：放弃输入文件 mmap 改为常规读取，彻底解决被外部截断导致的 SIGBUS（PR #14613）。
+- `crates/pi-natives/src/tail.rs`：修复文件大小恰为 64 KiB 整倍数时首部数据遗漏的 bug（PR #14264）；修复 macOS 上 `tail -f` 管道下游提前退出时未停止的问题（PR #14617）。
+- `crates/pi-builtins/src/sort.rs`：修复 UTF-8 语言环境下 `sort -u` 误丢弃标点相异路径的问题（PR #14606）。
+- `crates/pi-natives/src/svg.rs` 与 `packages/tui/`：支持终端行内渲染主题自适应 SVG 图表（PR #14529），数值表格自动生成图表（`tui.autoGraph`）。
+- `packages/coding-agent/src/session/session-context.ts`：修复 `.` 与 `..` 等特殊 session ID 可能越界本地存储目录的问题（PR #14385）。
+- `packages/coding-agent/src/cli/args.ts`：`--resume <path>` 在路径不存在时显式报错，不再静默退回创建新 session（PR #14404）。
+- `packages/catalog/`：新增 Mistral Large 4 支持、Google Antigravity Claude Opus 5.5 / Sonnet 5.5 价格与思考层级、MiniMax Token Plan 转 Anthropic 兼容端点、GPT-6 Astra Ultrafast 6x/8x 计费修复。
+
+bundle 接口出现次数 18.6.1 → 18.7.0：`getWithCredential` 10 → 10、`markReached` 6 → 6、
+`onGeneration` 8 → 8、`appendResetBoundary` 3 → 3、`session_shutdown` 9 → 9、
+`appendEntry` 19 → 19、`getSessionId` 174 → 177、`session_tree` 5 → 5、
+`tryAcquireSessionLease` 5 → 5、`getSessionOwnersDir` 2 → 2、`session_start` 9 → 9、
+`cancel_subagent` 8 → 8、`steer_subagent` 14 → 14、`predict_word` 15 → 15、
+`message_update` 37 → 37、`session_branch` 8 → 8。全部核心接缝保持一致或仅内部使用增加。
+
+实机验证（`omp-linux-x64` SHA256
+`03387aceae62386eaefbe96786f6df0e2e2e843ce76926c063a485905b1f4c4f`，`--version` → `omp/18.7.0`，
+`omp update --check` → Already up to date）：
+
+- 经 `omp-with-tps.mjs --mode rpc --no-session --no-ui` 加载探针，runtime 正常发出 `ready`
+  （protocol v1，支持 v1/v2，maxFrameBytes 1048576，maxReassembledFrameBytes 67108864）；
+  `context.agent.kind === 'main'`、`hasUI === false`；`authStorage` 原型及 `sessionManager` 核心方法均在位。
+- `omp --print "say pong"` 真实请求正常完成并返回 `pong`。
+- `node --test integrations/herdr-tps/test/*.test.mjs`：120 passed；
+  `cargo test -p herdr-usage --locked`：116 + 23 + 3 passed；
+  `npm run herdr:tps:install -- --dry-run`：config、shell、links 均已就绪。
+  本地 sticky pin、TPS reporter 及 herdr-usage 采集链路全部通过，无需修改代码。
+
+### 18.6.1
+
+upstream [`v18.6.0...v18.6.1`](https://github.com/can1357/oh-my-pi/compare/v18.6.0...v18.6.1)
+是 42 个 commit、69 个文件改动，跨 ai/agent/coding-agent/natives/tui/edit/wire。属于补丁版本发布，逐个接缝核对。
+
+逐字节未变（两 tag 相同 blob SHA）：`packages/ai/src/auth-storage.ts`、
+`packages/ai/src/auth/{rotation,select,blocks,cascade,affinity}.ts`、
+`packages/coding-agent/src/utils/token-rate.ts`、
+`packages/coding-agent/src/extensibility/shared-events.ts`、
+`packages/coding-agent/src/extensibility/extensions/lifecycle-mirror.ts`、
+`packages/coding-agent/src/session/{session-storage,credential-pin}.ts`、
+`packages/coding-agent/src/commands/launch.ts`、`packages/coding-agent/src/cli/args.ts`、
+`packages/catalog/src/model-cache.ts`、`packages/utils/src/dirs.ts`。
+因此认证、存储、rotation 合约、session affinity 行为与事件定义均未改变；本地 session 粘性补丁继续完全适用。
+
+被改动但不影响本扩展/采集契约的接缝：
+
+- `crates/pi-edit/src/modes/hashline/patcher.rs`：新增 `rescue_shifted_anchors` 救援机制（PR #14254）。当前序编辑在上方插入/删除行导致后续行号平移时，若补丁载荷包含了锚点行在当前文件中的内容（首尾 token-bounded 且不产生重复行歧义），允许后续编辑按平移后的行号应用，解决连续 patch 因行号平移误报“never displayed”而被拒的问题，同时依然拒绝真正陈旧的行号引用。
+- `packages/agent/src/tokenizer.ts` 与 `packages/agent/src/image-tokens.ts`：将消息分词中固定 1200 的图片 token 估算改为基于尺寸计算的 `estimateImageContentTokens(block)`（PR #14260），解决含多张截图的 session 在 OpenAI 原生 context compaction 时因尺寸高估导致压缩请求被拒的问题；`countTokens` 核心接口及文本分词逻辑完全不变。
+- `packages/ai/src/providers/openai-shared.ts`：新增 `withRequiredReasoningText`，为 DeepSeek 等要求每轮必须携带 reasoning 的模型在 warm OpenAI Responses 会话回放时自动补齐缺失的 `reasoning_text`（PR #14294）。
+- `packages/ai/src/dialect/deepseek.ts` 与 `packages/ai/src/utils/stream-markup-healing.ts`：保留不完整或未闭合的 `<｜DSML｜tool_calls>` 包裹文本输出（PR #14273），避免吞掉后续正文，交由 agent 层 leak recovery 机制恢复。
+- `crates/pi-natives/src/{task,ast,glob,grep}.rs`：将文件系统搜索（`ast_grep`、`ast_edit`、`glob`、`grep`）从 libuv worker 线程池移到 Tokio 专用文件系统任务池（`task::filesystem`），避免并发 `skill://` 搜索阻塞其他异步文件 I/O 或拖慢子代理产物发布；并用 `catch_worker_panic` 捕获工作线程 panic（PR #14298）。
+- `packages/coding-agent/src/task/executor.ts`：子代理 IRC wake turn 的输出作为异步 background job 投递，支持被父代理等待与取消，由父代理消息唤醒的 turn 注册跨越整个 turn 的 job（不再重复投递）。
+- `packages/coding-agent/src/exec/exec.ts`：修复被超时或信号强杀的进程误报退出码 `0` 的问题，被杀进程统一上报退出码 `-1` 且 `killed: true`（PR #14290）。
+- `packages/coding-agent/src/slash-commands/builtin-completions.ts`：`/switch` 命令补全与模型选择器保持一致的相关性排序，支持 `@role` 别名。
+- `packages/coding-agent/src/session/{agent-session-types,agent-session,messages}.ts`：`/btw` 临时响应支持 `replyMaxBytes`（`Infinity` 保留长回答，不再硬编码 4 KiB 截断）。
+- `packages/coding-agent/src/tools/browser/relay/*`：增加对升级后陈旧 browser relay / connection refused 的诊断与清理提示（PR #14299）。
+- `packages/tui/src/apps/git/diff-pane.ts`：修复 Git diff 面板中空格键对选中 hunk 的暂存/取消暂存（PR #14329）；Tern 模式下 BTW 历史面板支持独立滚动。
+
+bundle 接口出现次数 18.6.0 → 18.6.1：`getWithCredential` 10 → 10、`markReached` 6 → 6、
+`onGeneration` 8 → 8、`appendResetBoundary` 3 → 3、`session_shutdown` 9 → 9、
+`appendEntry` 19 → 19、`getSessionId` 174 → 174、`session_tree` 5 → 5、
+`tryAcquireSessionLease` 5 → 5、`getSessionOwnersDir` 2 → 2、`session_start` 9 → 9、
+`cancel_subagent` 8 → 8、`steer_subagent` 14 → 14、`predict_word` 15 → 15、
+`message_update` 37 → 37、`session_branch` 8 → 8。全部保持一致。
+
+实机验证（`omp-linux-x64` SHA256
+`c92a6846d02984e84f07c6362d18add3783f528f494ffcf1e0f26e594f327463`，`--version` → `omp/18.6.1`，
+`omp update --check` → Already up to date，`.herdr-omp-original` 与仓库 wrapper 两条解析路径各测一次）：
+
+- 经 `omp-with-tps.mjs --mode rpc --no-session --no-ui` 加载临时探针，runtime 发出
+  `ready`（protocol v1，支持 v1/v2，maxFrameBytes 1048576，maxReassembledFrameBytes 67108864）；
+  `context.agent.kind === 'main'`、`hasUI === false`；`modelRegistry.authStorage` 原型上
+  `credentials`/`keys`/`oauth`/`sessions`/`usage`/`health`/`limits`/`resets`/`blocks` 全部就位；
+  `sessionManager` 与 `pi` 核心接口全部是 function。
+- 20 个事件名全部注册成功（含本扩展消费的 7 个及 `session_branch`、`session_tree` 等）。
+- `omp --print` 真实请求成功完成（`opencode-go/deepseek-v4.1-flash`），assistant 行与 usage 记录完整。
+- `node --test integrations/herdr-tps/test/*.test.mjs`：120 passed；
+  `cargo test -p herdr-usage --offline --locked`：116 + 23 + 3 passed；
+  `npm run herdr:tps:install -- --dry-run`：config、shell、links 均已就绪。
+  扩展与采集代码不需要修改。
+
+### 18.6.0
+
+upstream [`v18.5.0...v18.6.0`](https://github.com/can1357/oh-my-pi/compare/v18.5.0...v18.6.0)
+是 448 个 commit、516 个文件改动加 17 个删除，跨 ai/agent/catalog/coding-agent/browser-relay/crates，
+其中含同日发布的 18.5.1 与 18.6.0 两个 tag。变更集不是补丁规模，因此仍逐个接缝核对。
+
+逐字节未变（两 tag 相同 blob SHA）：`packages/ai/src/auth-storage.ts`、
+`packages/ai/src/auth/{rotation,select,cascade,affinity}.ts`、
+`packages/coding-agent/src/utils/token-rate.ts`、`packages/agent/src/tokenizer.ts`、
+`packages/coding-agent/src/extensibility/shared-events.ts`、
+`packages/coding-agent/src/extensibility/extensions/lifecycle-mirror.ts`、
+`packages/coding-agent/src/session/{session-storage,credential-pin,agent-session-types}.ts`、
+`packages/coding-agent/src/commands/launch.ts`、`packages/coding-agent/src/cli/args.ts`、
+`packages/catalog/src/model-cache.ts`、`packages/utils/src/dirs.ts`。
+因此 18.5.0 记录的“写了 session affinity 但选择路径不读它”继续成立，本地 session 粘性仍然必要；
+`rotation.ts` 未变说明 `limits.rotate` 的 `{ switched }` 契约到本版为止没有再变；`shared-events.ts`
+未变说明本版本没有新增扩展事件（`docs/extensions.md` 只多了一句 advisor 身份的说明）。
+
+被改过但语义不变的接缝：
+
+- `packages/ai/src/auth/blocks.ts`：镜像进 store 的 block 多一条判断——持久化行的截止时间短于
+  本进程镜像过的截止时间时，说明该行已被 sibling 删除重建，本进程的旧 map 项也一并退休。
+  `blocks.list` 与本扩展消费的 block/limit 释放路径形状不变，效果只是少留一个陈旧 backoff 项。
+- `extensions/runner.ts` 与 `extensions/wrapper.ts`：`createContext`、`emitToolCall`、
+  `emitToolResult` 增加可选的 `ExtensionAgentIdentity` 参数；advisor 复用主 session 的 runner
+  时用它把 `ctx.agent` 换成 `{ kind: "sub", name: "advisor" }`。本扩展按
+  `ctx.agent.kind === "main"` 拒绝子代理，advisor 的 `tool_call`/`tool_result` 不再冒充主 agent
+  （本扩展本来就不注册这两个事件）。runner 另在主 agent 的 `session_start`/`session_switch`/
+  `session_branch` 之后调用 `refreshShellConfigCache()`，让扩展注入的环境跟随 session 切换；
+  本扩展不写 `process.env`，无影响。
+- `session/session-manager.ts`：`repairMissingUsage` 换成 `normalizeLoadedUsage`（顺带补全残缺
+  的 usage 字段，不再只是补整块缺失）；release 时清空 `#inMemoryArtifacts`，
+  `allocateArtifactPath`/`saveArtifact` 在 release 后直接拒绝。本扩展读取的 `getSessionId`/
+  `getEntries`/`getSessionFile`/`getCredentialPins`/`appendResetBoundary`/`appendCustomEntry`
+  签名与 session JSONL 行形状不变。
+- `session/agent-session.ts`：compaction 的 `deferredHandoff` 并入 `continuationScheduled`，
+  `agent_end` 的 `willContinue` 仍只在已排定续轮时为真；`ActiveAgentContinue` 增加 `turnEnded`，
+  由本轮 `agent_end` 发起的续接不再被并进已结束的那一轮；延迟自动标题改为累计 40 词后才改写；
+  notice entry 增加 `details`；`waitForManualCompactionCleanup` 改名
+  `waitForManualMaintenanceCleanup`（同时覆盖 `/handoff`）。本扩展读取的 `message_end`
+  （`usage.output`/`duration`/`timestamp`/`content`）与 `agent_end` 形状不变。
+- `session/session-paths.ts`：新增只读的 `sessionDirForCwd`，供 `archive` eval prelude 查询项目而
+  不创建或迁移 session 目录。目录命名规则不变。
+- `session/history-storage.ts`：prompt history 支持按 cwd/session_id 过滤，并新增写入失败监听。
+- `modes/rpc/rpc-mode.ts`：新增 `live_start`/`live_stop`/`live_mute`（GPT 实时语音），`live_start`
+  归入后台命令，断连时先 `liveBridge.stop()` 再关 session。既有命令与帧格式不变。
+
+bundle 接口出现次数 18.5.0 → 18.6.0：`getWithCredential` 10 → 10、`markReached` 6 → 6、
+`onGeneration` 8 → 8、`appendResetBoundary` 3 → 3、`session_shutdown` 9 → 9、
+`appendEntry` 19 → 19、`getSessionId` 174 → 174、`session_tree` 5 → 5、
+`tryAcquireSessionLease` 5 → 5、`getSessionOwnersDir` 2 → 2；`session_start` 8 → 9、
+`cancel_subagent` 7 → 8、`steer_subagent` 13 → 14、`predict_word` 13 → 15、
+`message_update` 33 → 37、`session_branch` 7 → 8。增长全部来自 live/RPC 与 advisor 相关代码，
+没有删改本扩展依赖的任何接口。
+
+实机验证（`omp-linux-x64` SHA256
+`844c640c620ec4c152abe4b3736049f963205da50e9e77bd9bdf2a981a6ead55` 与 release
+`SHA256SUMS.txt` 一致，`--version` → `omp/18.6.0`，`omp update --check` → Already up to date，
+`.herdr-omp-original` 与仓库 wrapper 两条解析路径各测一次）：
+
+- 经 `omp-with-tps.mjs --mode rpc --no-session --no-ui` 加载临时探针，runtime 发出
+  `ready`（protocol v1，支持 v1/v2，maxFrameBytes 1048576，maxReassembledFrameBytes 67108864）；
+  `context.agent.kind === 'main'`、`hasUI === false`；`modelRegistry.authStorage` 原型上是
+  `credentials`/`keys`/`oauth`/`sessions`/`usage`/`health`/`limits`/`resets`/`blocks`
+  （另有 `close`/`getApiKey`/`reload`/`replaceStore`/`setAccountPolicies`），
+  `keys.getWithCredential`、`sessions.release`、`limits.markReached`、`limits.rotate`、
+  `credentials.list`、`credentials.onGeneration`、`blocks.list`、`sessionManager.getSessionId`/
+  `getEntries`/`getSessionFile`/`getCredentialPins`/`getBranch`/`onPersistenceNotice`/
+  `appendResetBoundary`/`appendCustomEntry`、`pi.appendEntry`/`sendMessage` 全部是 function。
+- 20 个事件名全部注册成功：本扩展消费的 7 个（`session_start`、`session_switch`、
+  `session_shutdown`、`message_start`、`message_update`、`message_end`、`agent_end`）、
+  `turn_start`、`turn_end`、`agent_start`、`queue_update`、`assistant_message`、
+  `cache_warming_start`、`cache_warming_end`、`before_provider_request`、`tool_result`、
+  `session_before_branch`、`session_branch`、`session_tree`，以及本扩展不消费的 `goal_updated`。
+- `omp --print` 真实请求成功完成；`opencode-go/deepseek-v4.1-flash` 的真实 session 在生产库落成
+  `source=omp, provider=opencode-go, account_source=session_pin, account_route_reason=initial`，
+  解析与回填链路不变。
+- `node --test integrations/herdr-tps/test/*.test.mjs`：120 passed；
+  `cargo test -p herdr-usage --offline --locked`：116 + 23 + 3 passed；
+  `npm run herdr:tps:install -- --dry-run`：config、shell、links 均已就绪。
+  扩展与采集代码不需要修改。
 
 ### 18.5.0
 

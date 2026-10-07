@@ -127,6 +127,86 @@ test('does not let a subagent with its own UI overwrite root pane metadata', () 
   assert.deepEqual(calls, []);
 });
 
+test('arms the pane metadata once a UI session appears after a headless start', () => {
+  const handlers = new Map();
+  const calls = [];
+  const pi = {
+    on: (event, handler) => handlers.set(event, handler),
+  };
+  const reporterFactory = () => {
+    calls.push(['create-reporter']);
+    return {
+      configureTokenModel: () => {},
+      setModel: (model) => calls.push(['model', model]),
+      setDisplayAgent: (...args) => calls.push(['display-agent', ...args]),
+      refreshDisplayAgent: () => {},
+      start: (...args) => calls.push(['start', ...args]),
+      append: () => {},
+      pause: () => {},
+      seed: () => {},
+      resetSession: () => calls.push(['reset-session']),
+      close: () => calls.push(['close']),
+    };
+  };
+  registerOmpTpsHandlers(pi, reporterFactory, { requireUi: true });
+
+  const headless = { hasUI: false, model: { id: 'gpt-5.6-luna' } };
+  const ui = { hasUI: true, model: { id: 'gpt-5.6-luna' } };
+  const message = { role: 'assistant', timestamp: 1_500, model: 'gpt-5.6-luna' };
+
+  handlers.get('session_start')({}, headless);
+  assert.deepEqual(calls, [], 'a headless start must not publish pane metadata');
+
+  handlers.get('message_start')({ message }, ui);
+  handlers.get('message_end')({ message }, ui);
+
+  assert.deepEqual(calls, [
+    ['create-reporter'],
+    ['model', 'gpt-5.6-luna'],
+    ['display-agent', 'omp'],
+    ['start', '1500', 'gpt-5.6-luna', 1_500],
+  ]);
+});
+
+test('refreshes the model when a branch replaces the session in place', () => {
+  const handlers = new Map();
+  const calls = [];
+  const pi = {
+    on: (event, handler) => handlers.set(event, handler),
+  };
+  const reporterFactory = () => {
+    calls.push(['create-reporter']);
+    return {
+      configureTokenModel: () => {},
+      setModel: (model) => calls.push(['model', model]),
+      setDisplayAgent: (...args) => calls.push(['display-agent', ...args]),
+      refreshDisplayAgent: () => {},
+      start: () => {},
+      append: () => {},
+      pause: () => {},
+      seed: () => {},
+      resetSession: () => calls.push(['reset-session']),
+      close: () => calls.push(['close']),
+    };
+  };
+  registerOmpTpsHandlers(pi, reporterFactory, { requireUi: true });
+
+  const first = { hasUI: true, model: { id: 'gpt-5.6-luna' } };
+  const branched = { hasUI: true, model: { id: 'deepseek-v4.1-flash' } };
+
+  handlers.get('session_start')({}, first);
+  handlers.get('session_branch')({}, branched);
+
+  assert.deepEqual(calls, [
+    ['create-reporter'],
+    ['model', 'gpt-5.6-luna'],
+    ['display-agent', 'omp'],
+    ['reset-session'],
+    ['model', 'deepseek-v4.1-flash'],
+    ['display-agent', 'omp'],
+  ]);
+});
+
 test('tracks only OMP thinking and normal text deltas, then drains shutdown', async () => {
   const handlers = new Map();
   const calls = [];

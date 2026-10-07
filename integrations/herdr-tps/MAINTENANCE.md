@@ -201,22 +201,24 @@ v10（状态 current），
 `agent wait` 不会在续轮边界提前完成。pro2 profile 的扩展目录链接到默认 profile 同一文件，
 一次安装两处生效；运行中的 OMP 不热加载。
 
-生产扩展使用 `requireUi: true`，直到 session context 的 `hasUI === true` 才创建 reporter。
+生产扩展使用 `requireUi: true`，只有 session context 的 `hasUI === true` 且
+`agent.kind !== 'sub'` 才创建 reporter。挂载不是一次性的：`session_start` 早于 TUI 附着时
+`hasUI` 为 false，此后每个事件都会重新判定，因此首个 session 事件无 UI 的 pane 会在第一条
+消息事件上补发模型与显示名，不会整进程静默（该 pane 的 agents 行会一直缺 `$model`/`$tps`）。
 
 | 事件 | 行为 |
 | --- | --- |
-| `session_start`、`session_switch` | 确认 UI root，更新 context 模型和显示名 |
-| `message_start` | 仅 assistant message 建立 generation |
+| `session_start` | 确认 UI root，更新 context 模型和显示名 |
+| `session_switch`、`session_branch`、`session_tree` | 同上，并按新 session 重置采样 |
+| `message_start` | 仅 assistant message 建立 generation；同时补挂载 reporter |
 | `message_update` | 消费 `text_delta` / `thinking_delta` / `toolcall_delta`，不补计快照 |
 | `message_end` | 以 timestamp + duration 结束采样，用 usage.output 校正后立即发布 |
 | `agent_end` | pause |
 | `session_shutdown` | 清除显示刷新 timer、observer 状态并等待 reporter.close |
 
-OMP 18.4.4 新增 `assistant_message`（改写已完成的 assistant 消息）与 `tool_result.additionalContext`；
-18.4.5 新增的 `cache_warming_start` / `cache_warming_end` 属于 RPC/JSON 事件，18.4.6 新增的
-`AfterToolCallResult.additionalContext` 属于工具回调返回值。本扩展均不注册，
-上表已消费事件的投递路径与字段形状在 18.5.0 上不变；18.4.7 至 18.5.0 都没有新增扩展事件
-（`shared-events.ts` 与 `docs/extensions.md` 在 v18.4.12 与 v18.5.0 之间 blob SHA 相同）。
+上表已消费事件的投递路径与字段形状在 18.8.0 上不变；18.4.7 至 18.8.0 都没有新增扩展事件
+（`shared-events.ts` 在 v18.5.0 与 v18.8.0 之间 blob SHA 相同；`docs/extensions.md` 在 18.8.0
+仅增加 provider 自定义 model kind 声明说明，未新增事件）。
 
 模型优先级是 `message.model ?? context.model.id ?? context.model.name`。
 生产 reporter 为 `OmpTpsReporter`，通过 OMP 自身模块导入 `Tokenizer`，按 context.model.tokenizer 选择分词器。
@@ -249,7 +251,7 @@ Codex wrapper 启用 `streamingOnly`：以首个可见 delta 作为片段起点�
 | 非零 TPS TTL | 2500ms | `max(stale, heartbeat) + 2 × sampleInterval` |
 
 生产环境（Codex 与 OMP wrapper）采用 OMP 18.2.5 移植的 `TokenRateMeter` 算法（upstream
-`utils/token-rate.ts` 到 18.5.0 未再改动，仍只有 18.4.2 那次 pending 计数的 memo）：
+`utils/token-rate.ts` 到 18.8.0 未再改动，仍只有 18.4.2 那次 pending 计数的 memo）：
 
 1. **多尺度指数衰减**：在 5s、20s、80s 三个半衰期桶内同时维护 tokens 与 time；使用解析积分 `(halfLife / ln2) * (1 - 2^(-t / halfLife))` 计算流式增长与时间权值。
 2. **词边界分块分词**：流式 delta 按 250ms 周期分块，并在最后空格/换行符处分割（保留末尾最多 32 字符至下一块），消除跨 delta 分词边界误差与突发抖动。

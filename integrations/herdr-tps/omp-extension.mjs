@@ -185,24 +185,13 @@ export function registerOmpTpsHandlers(pi, reporterOrFactory, { requireUi = fals
   let rootSession = !requireUi;
   let displayRefreshTimer;
 
-  const activateRootSession = (context) => {
-    // OMP 18.4.12 reports the running agent on the extension context. A subagent
-    // session (task tool, eval agent(), /tan clone) must never drive the pane,
-    // even when it renders its own UI.
-    if (context?.agent?.kind === 'sub') {
-      return false;
-    }
-    if (rootSession) {
-      return true;
-    }
-    if (context?.hasUI !== true) {
-      return false;
-    }
-    rootSession = true;
-    reporter = reporterFactory();
-    observer = new OmpTpsObserver(reporter);
-    return true;
-  };
+  // Arming is not one-shot. The first session event can arrive before OMP
+  // attaches the TUI (`hasUI` false), and a session that only later gains a
+  // UI would otherwise stay dark for the rest of the process — the pane then
+  // renders without $model/$tps. Every event re-checks, so activation is
+  // self-healing; the subagent rejection below still holds on each attempt.
+  const isRootSessionContext = (context) =>
+    context?.agent?.kind !== 'sub' && context?.hasUI === true;
 
   const updateDisplayAgent = (context) => {
     reporter.setDisplayAgent?.(ompDisplayAgent(context));
@@ -234,43 +223,70 @@ export function registerOmpTpsHandlers(pi, reporterOrFactory, { requireUi = fals
     }
   };
 
-  pi.on('session_start', (_event, context) => {
-    if (!activateRootSession(context)) {
-      return;
-    }
+  const applySessionModel = (context) => {
     reporter.configureTokenModel?.(context?.model);
     reporter.setModel(messageModel(undefined, context));
     updateDisplayAgent(context);
     seedFromHistory(context);
-  });
+  };
 
-  pi.on('session_switch', (_event, context) => {
-    if (!activateRootSession(context)) {
+  const armRootSession = (context) => {
+    if (!isRootSessionContext(context)) {
+      return false;
+    }
+    rootSession = true;
+    reporter = reporterFactory();
+    observer = new OmpTpsObserver(reporter);
+    // Arming can happen on a message event, with no session event before it,
+    // so the model and display name are published here rather than left to the
+    // session handlers below.
+    applySessionModel(context);
+    return true;
+  };
+
+  // Returns true once this session may drive the pane's metadata, creating
+  // the reporter on the first event that proves it is the root TUI session.
+  const ensureRootSession = (context) => rootSession || armRootSession(context);
+
+  const enterSession = (context, { reset = false } = {}) => {
+    const alreadyRoot = rootSession;
+    if (!ensureRootSession(context)) {
       return;
     }
-    reporter.resetSession?.();
-    reporter.configureTokenModel?.(context?.model);
-    reporter.setModel(messageModel(undefined, context));
-    updateDisplayAgent(context);
-    seedFromHistory(context);
-  });
+    if (reset) {
+      reporter.resetSession?.();
+    }
+    if (alreadyRoot) {
+      applySessionModel(context);
+    }
+  };
+
+  pi.on('session_start', (_event, context) => enterSession(context));
+
+  // A branch or tree navigation swaps the session in place. OMP 18.6.0+ emits
+  // these next to session_switch, and the model has to follow the new session.
+  const onSessionReplaced = (_event, context) => enterSession(context, { reset: true });
+
+  pi.on('session_switch', onSessionReplaced);
+  pi.on('session_branch', onSessionReplaced);
+  pi.on('session_tree', onSessionReplaced);
 
   pi.on('message_start', (event, context) => {
-    if (!rootSession) {
+    if (!ensureRootSession(context)) {
       return;
     }
     observer.start(event?.message, context);
   });
 
   pi.on('message_update', (event, context) => {
-    if (!rootSession) {
+    if (!ensureRootSession(context)) {
       return;
     }
     observer.update(event, context);
   });
 
   pi.on('message_end', (event, context) => {
-    if (!rootSession) {
+    if (!ensureRootSession(context)) {
       return;
     }
     observer.end(event, context);

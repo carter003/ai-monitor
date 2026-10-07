@@ -1,7 +1,8 @@
-// OpenCode Go session router and observer. OMP 18.5.0 records API-key affinity
+// OpenCode Go session router and observer. OMP 18.8.0 records API-key affinity
 // but does not read it during selection, so every request is ranked again. This
 // wrapper keeps the first resolved credential for the session until reset,
 // release, store replacement, or an explicit limit/rotation path invalidates it.
+
 const ENTRY_TYPE = 'herdr-api-key-sticky-v1';
 const OBSERVER_STATE = Symbol.for('herdr.ompApiKeyObserver');
 const DEFAULT_PROVIDERS = ['opencode-go'];
