@@ -207,6 +207,157 @@ test('refreshes the model when a branch replaces the session in place', () => {
   ]);
 });
 
+for (const eventName of ['session_switch', 'session_branch', 'session_tree']) {
+  test(`initializes the first UI ${eventName} after resetting the session exactly once`, () => {
+    const handlers = new Map();
+    const calls = [];
+    registerOmpTpsHandlers({ on: (event, handler) => handlers.set(event, handler) }, () => {
+      calls.push(['create-reporter']);
+      return {
+        resetSession: () => calls.push(['reset-session']),
+        configureTokenModel: (model) => calls.push(['token-model', model.id]),
+        setModel: (model) => calls.push(['model', model]),
+        setDisplayAgent: (agent) => calls.push(['display-agent', agent]),
+        seed: (...args) => calls.push(['seed', ...args]),
+      };
+    }, { requireUi: true });
+
+    handlers.get('session_start')({}, { hasUI: false });
+    handlers.get(eventName)({}, {
+      hasUI: true,
+      model: { id: 'deepseek-v4.1-flash' },
+      sessionManager: {
+        getBranch: () => [{
+          type: 'message',
+          message: { role: 'assistant', duration: 10_000, usage: { output: 3_000 } },
+        }],
+      },
+    });
+
+    assert.deepEqual(calls, [
+      ['create-reporter'],
+      ['reset-session'],
+      ['token-model', 'deepseek-v4.1-flash'],
+      ['model', 'deepseek-v4.1-flash'],
+      ['display-agent', 'omp'],
+      ['seed', 3_000, 10_000],
+    ]);
+  });
+}
+
+test('ignores subagent and headless events after the root UI has activated', () => {
+  const handlers = new Map();
+  const calls = [];
+  const reporter = {
+    setModel: (model) => calls.push(['model', model]),
+    setDisplayAgent: (agent) => calls.push(['display-agent', agent]),
+    start: (...args) => calls.push(['start', ...args]),
+    append: (...args) => calls.push(['append', ...args]),
+    pause: () => calls.push(['pause']),
+    resetSession: () => calls.push(['reset-session']),
+    close: () => calls.push(['close']),
+  };
+  registerOmpTpsHandlers({ on: (event, handler) => handlers.set(event, handler) }, reporter, {
+    requireUi: true,
+  });
+  const root = { hasUI: true, model: { id: 'root-model' } };
+  handlers.get('session_start')({}, root);
+  calls.length = 0;
+
+  for (const context of [
+    { hasUI: true, agent: { kind: 'sub' }, model: { id: 'child-model' } },
+    { hasUI: false, model: { id: 'headless-model' } },
+  ]) {
+    const message = { role: 'assistant', timestamp: 1_500, model: context.model.id };
+    for (const eventName of ['session_start', 'session_switch', 'session_branch', 'session_tree']) {
+      handlers.get(eventName)({}, context);
+    }
+    handlers.get('message_start')({ message }, context);
+    handlers.get('message_update')({
+      message,
+      assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'child output' },
+    }, context);
+    handlers.get('message_end')({ message }, context);
+    handlers.get('agent_end')({}, context);
+    handlers.get('session_shutdown')({}, context);
+  }
+  assert.deepEqual(calls, []);
+
+  const message = { role: 'assistant', timestamp: 2_000, model: 'root-model' };
+  handlers.get('message_start')({ message }, root);
+  handlers.get('agent_end')({}, root);
+  handlers.get('session_shutdown')({}, root);
+  assert.deepEqual(calls, [
+    ['start', '2000', 'root-model', 2_000],
+    ['pause'],
+    ['close'],
+  ]);
+});
+
+test('resets completed-message and snapshot state when navigating the session tree', () => {
+  const handlers = new Map();
+  const calls = [];
+  registerOmpTpsHandlers({ on: (event, handler) => handlers.set(event, handler) }, {
+    setModel() {},
+    start: (...args) => calls.push(['start', ...args]),
+    append: (...args) => calls.push(['append', ...args]),
+    pause: () => calls.push(['pause']),
+    resetSession: () => calls.push(['reset-session']),
+  });
+  const context = { model: { id: 'model' } };
+  const message = { role: 'assistant', timestamp: 1_000, model: 'model' };
+  handlers.get('message_start')({ message }, context);
+  handlers.get('message_update')({
+    message,
+    assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'old' },
+  }, context);
+  handlers.get('message_end')({ message }, context);
+
+  handlers.get('session_tree')({}, context);
+  // The restored branch can reuse an earlier message key. Its first event
+  // may be a delta, so stale completion state must not suppress that event.
+  handlers.get('message_update')({
+    message,
+    assistantMessageEvent: { type: 'text_end', contentIndex: 0, content: 'new' },
+  }, context);
+  handlers.get('message_end')({ message }, context);
+
+  assert.deepEqual(calls, [
+    ['start', '1000', 'model', 1_000],
+    ['append', '1000', '1000:text:0', 'old', 'model'],
+    ['pause'],
+    ['reset-session'],
+    ['start', '1000', 'model', 1_000],
+    ['append', '1000', '1000:text:0', 'new', 'model'],
+    ['pause'],
+  ]);
+});
+
+test('accepts a new terminal-only assistant message after the previous message ended', () => {
+  const handlers = new Map();
+  const calls = [];
+  registerOmpTpsHandlers({ on: (event, handler) => handlers.set(event, handler) }, {
+    start: (...args) => calls.push(['start', ...args]),
+    append: (...args) => calls.push(['append', ...args]),
+    pause: () => calls.push(['pause']),
+  });
+  for (const timestamp of [1_000, 2_000]) {
+    const event = {
+      message: { role: 'assistant', timestamp, model: 'model', content: [{ type: 'text', text: 'done' }] },
+    };
+    handlers.get('message_end')(event, {});
+    handlers.get('message_end')(event, {});
+  }
+  assert.deepEqual(calls, [
+    ['start', '1000', 'model', 1_000],
+    ['append', '1000', '1000:text:0', 'done', 'model'],
+    ['pause'],
+    ['start', '2000', 'model', 2_000],
+    ['append', '2000', '2000:text:0', 'done', 'model'],
+    ['pause'],
+  ]);
+});
+
 test('tracks only OMP thinking and normal text deltas, then drains shutdown', async () => {
   const handlers = new Map();
   const calls = [];

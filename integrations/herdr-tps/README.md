@@ -124,11 +124,11 @@ OMP 的 `pro2` profile 会自动显示为 `omp2`。Herdr 冷重启只使用
 发现活动 client/broker/daemon PID 时，wrapper 拒绝切换并退出，不自动终止任务。
 可用 `node integrations/herdr-tps/share-omp-daemons.mjs --dry-run` 单独检查，
 或退出旧客户端后用 `--apply` 单独执行；默认仅检查。原始 runtime 二进制不会运行此启动检查，
-完成链接后它也会使用共享目录。当前本机 OMP 18.8.0 已核对目录解析；启用 XDG state 的布局需另行适配。
+完成链接后它也会使用共享目录。当前本机 OMP 18.8.9 已核对目录解析；启用 XDG state 的布局需另行适配。
 回滚时先退出全部 OMP 客户端并等待 broker 退出，再移除 pro2 的 daemon 符号链接、
 将输出的 `daemons.before-share-*` 备份恢复原名，并撤销 wrapper 的共享启动接线。
 
-OMP 扩展只观察根 session：先按 OMP 18.8.0 的 `ctx.agent.kind` 拒绝子代理 session
+OMP 扩展只观察根 session：先按 OMP 18.8.9 的 `ctx.agent.kind` 拒绝子代理 session
 （task、eval `agent()`、`/tan` clone），再要求带 UI。scout/reviewer 等子代理即使使用不同
 模型或自己渲染 UI，也不会覆盖父 pane 的模型或 TPS；18.6.0 起 advisor 的工具调用也以
 `{ kind: "sub", name: "advisor" }` 上报，因此同样被排除在 pane 元数据之外。同时运行的多个
@@ -201,18 +201,24 @@ OMP 使用与上游一致的 200 tokens / 4000ms 证据门槛；消息结束后�
 
 ## OMP 原生认证与 opencode-go session 粘性
 
-OMP 18.8.0 的 Antigravity 与 opencode-go 认证使用原生 AuthStorage。wrapper 始终
+OMP 18.8.9 的 Antigravity 与 opencode-go 认证使用原生 AuthStorage。wrapper 始终
 直接启动 `.runtime/omp`，禁止修改、重打包或禁用 OMP 可执行文件中的 Bun 字节码。Antigravity
 账号选择完全由 OMP 原生实现，本扩展不再改写 system prompt。
 
-OMP 18.8.0 会写入 API-key session affinity，但 `selectApiKey` 不读取它，导致每次 request 都
+OMP 18.8.9 会写入 API-key session affinity，但 `selectApiKey` 不读取它，导致每次 request 都
 重新进行 usage 排名。`lib/omp-api-key-observer.mjs` 在首次选择后缓存实际 credential；同一
 session 的普通请求直接复用。`/reset`、`/new` 或新的 session ID 才重新排名；block、usage-limit、
 rotation 和显式 release 仍可清除 pin 并进入异常恢复。18.4.0 起 `limits.rotate` 返回
 `{ switched, afterSiblingWait? }` 而不是布尔值，且在没有可用 sibling 时最多等待 5s 才返回
 `switched: false`；只有 `switched` 为真才记为 rotation，否则账号并未变化。pin/release custom
 entry 不含密钥，collector 据此给每次 request 绑定账户并写入 SQLite。恢复旧 session 时通过持久
-credential ID 读取同一 API key，不重新排名。
+credential ID 读取同一 API key，不重新排名。`/branch` 为新 session 绑定独立写入器，
+不复制父 session 的 pin；session restriction 和原生 runtime/config/env/OAuth 凭据优先于缓存，
+其它进程对认证存储的修改通过原生 polling 同步，删除或禁用的 Key 不再复用。
+
+`/reset`、`/fresh` 后 OMP 使用私有 provider routing ID，扩展 API 不提供其与日志 session ID
+的映射；这些请求的 pin 目前只能在进程内保留，无法保证跨进程恢复或精确账户归因。
+原生 Herdr terminal launch 仍不发布 TPS metadata，本项目继续保留认证与 TPS 扩展。
 
 Antigravity 同样完全使用原生 counter 级额度报告、required-drain 排序、session affinity、
 reserve、429 block/rotation，以及标题和子代理 credential 继承。本地不再预选剩余额度最多的
@@ -234,10 +240,13 @@ reserve、429 block/rotation，以及标题和子代理 credential 继承。本�
   清理仍可能等待一个正在发送的 socket 请求完成或超时。
 - reporter 可在未收到 model/text 时安全结束；close 后忽略迟到回调并释放累计文本。
   非零 TTL 为 `max(stale, heartbeat) + 2 × sample interval`，默认 2500ms。
+- OMP 的 switch/branch/tree 先重置采样再恢复模型；历史预热只读取活动分支，并在 reset boundary
+  停止。子代理和无 UI 事件不会覆盖已激活 root pane；退出清理所属认证缓存，后台 session 缓存有界。
 - Codex readiness 探测有单次超时，TUI spawn 错误会进入清理路径；shutdown 关闭代理连接。
   OMP 转发 SIGINT/SIGTERM/SIGHUP，等待子进程退出。两处 profile 解析统一由
   `lib/omp-profile.mjs` 持有。
 
 以上不改变统计口径：GPT-6 tokenizer 匹配和超长单流的重复分词成本仍是明确的后续优化点。
-验证使用 `npm run herdr:tps:test` 和安装 dry-run；
+验证使用 `npm run herdr:tps:test` 和安装 dry-run；有 `.runtime/omp` 时测试还会自动运行假凭据的
+原生 AuthStorage/SessionManager 契约检查，无本地二进制时跳过，可用 `HERDR_TPS_OMP_TEST_BIN` 指定。
 真实安装环境的退出/恢复及侧栏显示仍需重新启动 Codex/OMP 后观察。

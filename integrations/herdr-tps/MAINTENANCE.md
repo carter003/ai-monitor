@@ -204,26 +204,31 @@ v10（状态 current），
 生产扩展使用 `requireUi: true`，只有 session context 的 `hasUI === true` 且
 `agent.kind !== 'sub'` 才创建 reporter。挂载不是一次性的：`session_start` 早于 TUI 附着时
 `hasUI` 为 false，此后每个事件都会重新判定，因此首个 session 事件无 UI 的 pane 会在第一条
-消息事件上补发模型与显示名，不会整进程静默（该 pane 的 agents 行会一直缺 `$model`/`$tps`）。
+消息或 session 切换事件上补发模型与显示名。已挂载后仍检查每条事件的 context，子代理与无 UI
+事件不能覆盖 root pane；首次 switch/branch/tree 先重置，再应用模型和历史速率。
 
 | 事件 | 行为 |
 | --- | --- |
 | `session_start` | 确认 UI root，更新 context 模型和显示名 |
-| `session_switch`、`session_branch`、`session_tree` | 同上，并按新 session 重置采样 |
+| `session_switch`、`session_branch`、`session_tree` | 重置 observer 与采样后，应用新模型、显示名和活动路径历史速率 |
 | `message_start` | 仅 assistant message 建立 generation；同时补挂载 reporter |
 | `message_update` | 消费 `text_delta` / `thinking_delta` / `toolcall_delta`，不补计快照 |
 | `message_end` | 以 timestamp + duration 结束采样，用 usage.output 校正后立即发布 |
 | `agent_end` | pause |
 | `session_shutdown` | 清除显示刷新 timer、observer 状态并等待 reporter.close |
 
-上表已消费事件的投递路径与字段形状在 18.8.0 上不变；18.4.7 至 18.8.0 都没有新增扩展事件
-（`shared-events.ts` 在 v18.5.0 与 v18.8.0 之间 blob SHA 相同；`docs/extensions.md` 在 18.8.0
-仅增加 provider 自定义 model kind 声明说明，未新增事件）。
+上表已消费事件的投递路径与字段形状在 18.8.9 上不变；18.4.7 至 18.8.9 都没有新增扩展事件
+（`shared-events.ts` 在 v18.8.0 与 v18.8.9 之间逐字节相同；`docs/extensions.md` 仅补充
+`deliverAs: "aside"` 结束 interruptible wait 的措辞与 v18.8.9 的 `ctx.ui.openTerminal` 说明，
+事件清单未变）。
 
 模型优先级是 `message.model ?? context.model.id ?? context.model.name`。
 生产 reporter 为 `OmpTpsReporter`，通过 OMP 自身模块导入 `Tokenizer`，按 context.model.tokenizer 选择分词器。
 按与上游相同的消息边界计算，不把旧的 streaming 值保留到 usage 校正之后，不预先取整或放大短响应。
-生产路径只处理 delta，不保留全文；message_end 之后忽略迟到 update。observer 的旧 snapshot 路径只保留给兼容 reporter。
+生产路径只处理 delta，不保留全文；同一消息 message_end 之后忽略迟到 update。observer 的旧 snapshot 路径只保留给兼容 reporter。
+会话切换清理消息去重状态，只有 message_end 的下一条消息也能独立校正 usage。
+原生 resume 在 `session_switch` 之后才应用目标模型，内部 `model_changed` 没有扩展 hook；
+恢复另一模型时可能暂留旧 metadata，下一条 assistant 消息会纠正，fixture 不覆盖实际命令时序。
 
 显示名优先级：`HERDR_TPS_OMP_DISPLAY_AGENT` → `--profile` → session file 中的
 `.omp/profiles/<profile>/agent/sessions/`。`pro2` 显示为 `omp2`，其余为 `omp`。
@@ -251,13 +256,13 @@ Codex wrapper 启用 `streamingOnly`：以首个可见 delta 作为片段起点�
 | 非零 TPS TTL | 2500ms | `max(stale, heartbeat) + 2 × sampleInterval` |
 
 生产环境（Codex 与 OMP wrapper）采用 OMP 18.2.5 移植的 `TokenRateMeter` 算法（upstream
-`utils/token-rate.ts` 到 18.8.0 未再改动，仍只有 18.4.2 那次 pending 计数的 memo）：
+`utils/token-rate.ts` 到 18.8.9 未再改动，仍只有 18.4.2 那次 pending 计数的 memo）：
 
 1. **多尺度指数衰减**：在 5s、20s、80s 三个半衰期桶内同时维护 tokens 与 time；使用解析积分 `(halfLife / ln2) * (1 - 2^(-t / halfLife))` 计算流式增长与时间权值。
 2. **词边界分块分词**：流式 delta 按 250ms 周期分块，并在最后空格/换行符处分割（保留末尾最多 32 字符至下一块），消除跨 delta 分词边界误差与突发抖动。
 3. **实际 Output Usage 校准**：在 `message_end` / `turn/completed` 拿到服务商权威 usage output tokens 时，以 0.8 残差衰减因子校正流式累积误差。
 4. **轮次间保持可见（Rate Retention）**：轮次结束后保持已显示的速度数字，不会在 1 秒后突兀归零；轮次间维持平滑展示，会话重置、模型切换或长久空闲后归零。
-5. **历史会话预热（Seeding）**：会话启动/切换时，若历史中已有含耗时的 assistant 消息，自动以其 usage output 与 duration 预热速率计，实现平滑无缝显示。
+5. **历史会话预热（Seeding）**：会话启动/切换时，将 `getBranch()` 活动路径交给公开 `pi.pi.buildSessionContext` 重建，从其消息逆序寻找含耗时的 assistant，以 usage output 与 duration 预热，复用原生 compaction/reset/retry 过滤。无 helper 时仅使用活动路径并在 `reset_boundary` 停止，不能保证 compaction/retry 完全一致；缺少/读取失败/空路径时不预热，不使用包含其它分支的 `getEntries()` 回退。
 ### Tokenizer 边界
 
 OMP 使用宿主 `@oh-my-pi/pi-agent-core` 的 `Tokenizer`，由 context.model.tokenizer 决定编码，
@@ -387,10 +392,16 @@ git diff --check
 | 改动面 | 必须保留的回归 |
 | --- | --- |
 | Codex 会话/模型 | 不同 ID 的占位与活动 root；system、thread_title、subagent 隔离；response/notification/read；早到模型、迟到响应、关闭清理；用户 delta 仍能产生非零 TPS |
-| OMP | 无界面子代理不发布；profile 恢复；原生 tokenizer、工具参数 delta、上游速率 trace、小数和 usage 校正；shutdown |
+| OMP TPS | 首次 UI switch/branch/tree；已激活 root 的子代理/无 UI 隔离；活动路径历史和 reset boundary；消息去重重置、terminal-only message_end；profile、宿主 tokenizer、工具参数、上游 trace、usage 校正及 shutdown |
+| OMP 认证 | 受限 session 与空允许池；原生来源优先级、外部存储刷新；branch 独立 pin 与恢复；共享/复活 writer 的关闭；有界后台缓存、迟到异步结果及 store replacement |
 | 采样/显示 | 多 stream、token 边界、停顿、新 generation、平滑、短响应 hold、新输出取消归零 |
 | Publisher | 唯一 source、guard、队列合并/过期、TTL 覆盖心跳、错误收敛、退出清理 |
 | Installer/wrapper | 幂等、自定义配置保护、CLI 更新目标、Herdr-only PATH、参数/信号转发和失败清理 |
+
+本机 `.runtime/omp` 存在时，标准测试自动运行 `omp-runtime-contract.test.mjs`：临时配置、假凭据、
+原生 AuthStorage/SessionManager 与宿主 Tokenizer，不发送模型请求。缺失时跳过；
+`HERDR_TPS_OMP_TEST_BIN=/path/to/omp npm run herdr:tps:test` 可显式指定待验证版本。
+fixture 直接投递事件，不能替代真实 TUI 的命令事件与侧栏观察。
 
 4. 行为修改后重启对应 Agent 做 live smoke：比对 TUI 与侧栏，观察有持续可见输出时的非零 TPS、
    完成归零、模型/会话切换；假 App Server 的进程测试不能替代实际 CLI 场景。

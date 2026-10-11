@@ -1,11 +1,15 @@
-// OpenCode Go session router and observer. OMP 18.8.0 records API-key affinity
-// but does not read it during selection, so every request is ranked again. This
-// wrapper keeps the first resolved credential for the session until reset,
-// release, store replacement, or an explicit limit/rotation path invalidates it.
+// OpenCode Go session router and observer. OMP 18.8.9 records API-key affinity
+// but does not read it during selection (only the OAuth path does), so every
+// request is ranked again. This wrapper keeps the first resolved credential for
+// the session until reset, release, store replacement, or an explicit
+// limit/rotation path invalidates it.
 
 const ENTRY_TYPE = 'herdr-api-key-sticky-v1';
 const OBSERVER_STATE = Symbol.for('herdr.ompApiKeyObserver');
 const DEFAULT_PROVIDERS = ['opencode-go'];
+// Sessions without an extension scope (for example background workers) have no
+// shutdown event. Bound their caches while preserving all live scoped sessions.
+const MAX_UNMANAGED_SESSIONS = 128;
 
 function selectionKey(provider, sessionId) {
   return `${provider}\0${sessionId}`;
@@ -13,6 +17,26 @@ function selectionKey(provider, sessionId) {
 
 function debug(pi, message) {
   pi?.logger?.debug?.(`[herdr-tps] ${message}`);
+}
+
+function forgetSession(state, sessionId) {
+  for (const cache of [state.selections, state.resolved, state.inflight, state.pendingReasons]) {
+    for (const key of cache.keys()) {
+      if (key.slice(key.indexOf('\0') + 1) === sessionId) cache.delete(key);
+    }
+  }
+  state.unmanagedSessions.delete(sessionId);
+  state.sessionEpochs.delete(sessionId);
+}
+
+function touchSession(state, sessionId) {
+  if (!state.sessionEpochs.has(sessionId)) state.sessionEpochs.set(sessionId, {});
+  state.unmanagedSessions.delete(sessionId);
+  if (state.writers.has(sessionId)) return;
+  state.unmanagedSessions.set(sessionId, true);
+  while (state.unmanagedSessions.size > MAX_UNMANAGED_SESSIONS) {
+    forgetSession(state, state.unmanagedSessions.keys().next().value);
+  }
 }
 
 function appendState(state, data) {
@@ -27,6 +51,7 @@ function appendState(state, data) {
 }
 
 function loadEntries(state, context) {
+  const sessionId = context?.sessionManager?.getSessionId?.();
   let entries;
   try {
     entries = context?.sessionManager?.getEntries?.();
@@ -41,7 +66,7 @@ function loadEntries(state, context) {
     if (
       !data ||
       typeof data.provider !== 'string' ||
-      typeof data.sessionId !== 'string' ||
+      data.sessionId !== sessionId ||
       !state.providers.has(data.provider)
     ) {
       continue;
@@ -93,9 +118,26 @@ function restoredSelection(state, provider, selectedCredentialId) {
     const apiKey = stored?.disabledCause == null && stored?.credential?.type === 'api_key'
       ? stored.credential.key
       : undefined;
+    // OMP's private config resolver owns commands and environment references.
+    // They are expressions, not bearer keys; let native resolution handle them.
+    if (typeof apiKey === 'string' && (apiKey.startsWith('!') || process.env[apiKey])) return undefined;
     return typeof apiKey === 'string' && apiKey ? { apiKey, credentialId: selectedCredentialId } : undefined;
   } catch {
     return undefined;
+  }
+}
+
+function hasHigherPriorityLogin(state, provider, selectedCredentialId) {
+  try {
+    const rows = state.auth?.credentials?.list?.(provider) ?? [];
+    const selected = rows.find((row) => row.id === selectedCredentialId)?.credential;
+    if (selected?.type !== 'api_key' || selected.source === 'login') return false;
+    return rows.some(({ credential, disabledCause }) =>
+      disabledCause == null && credential?.type === 'api_key' && credential.source === 'login' &&
+      typeof credential.key === 'string' && credential.key.length > 0 &&
+      !state.auth.keys.isKeylessFallback?.(provider, credential));
+  } catch {
+    return false;
   }
 }
 
@@ -108,6 +150,7 @@ function observeSelection(state, provider, sessionId, selectedCredentialId) {
   const key = selectionKey(provider, sessionId);
   const previousCredentialId = state.selections.get(key);
   if (previousCredentialId === id) return;
+  state.sessionEpochs.set(sessionId, {});
   const pending = state.pendingReasons.get(key);
   state.pendingReasons.delete(key);
   const priorCredentialId = previousCredentialId ?? pending?.previousCredentialId;
@@ -129,12 +172,13 @@ function observeSelection(state, provider, sessionId, selectedCredentialId) {
 }
 
 
-function observeRelease(state, provider, sessionId, reason) {
+function observeRelease(state, provider, sessionId, reason, cancelInflight = true) {
   if (!state.providers.has(provider) || typeof sessionId !== 'string' || !sessionId) return;
   const key = selectionKey(provider, sessionId);
   const previousCredentialId = state.selections.get(key);
+  if (state.sessionEpochs.has(sessionId)) state.sessionEpochs.set(sessionId, {});
   state.resolved.delete(key);
-  state.inflight.delete(key);
+  if (cancelInflight) state.inflight.delete(key);
   if (!state.selections.delete(key)) return;
   state.pendingReasons.set(key, { reason, previousCredentialId });
   appendState(state, { action: 'release', provider, sessionId, reason, at: Date.now() });
@@ -152,9 +196,7 @@ function releaseSession(state, sessionId, reason) {
     }
     // A pin may exist only in the local extension state (for example after a
     // store reload), so make cleanup idempotent even when native release says false.
-    if (state.selections.has(key)) {
-      observeRelease(state, provider, sessionId, reason);
-    }
+    observeRelease(state, provider, sessionId, reason);
   }
 }
 
@@ -195,27 +237,62 @@ function wrapNamespaces(auth, state) {
     sessionId,
     ...rest
   ) {
-    if (!state.providers.has(provider) || typeof sessionId !== 'string' || !sessionId) {
+    if (
+      state.namespaces !== namespaces || !state.writers.size ||
+      !state.providers.has(provider) || typeof sessionId !== 'string' || !sessionId ||
+      rest[0]?.recordAffinity === false
+    ) {
       return originalGetWithCredential(provider, sessionId, ...rest);
     }
     const key = selectionKey(provider, sessionId);
-    const selectedCredentialId = state.selections.get(key);
-    if (selectedCredentialId !== undefined && activeBlock(state, provider, selectedCredentialId)) {
-      observeRelease(state, provider, sessionId, 'blocked');
-    } else if (selectedCredentialId !== undefined) {
-      const cached = state.resolved.get(key) ?? restoredSelection(state, provider, selectedCredentialId);
-      if (cached) {
-        state.resolved.set(key, cached);
-        return cached;
-      }
-      observeRelease(state, provider, sessionId, 'credential-unavailable');
-    }
-
+    touchSession(state, sessionId);
     const running = state.inflight.get(key);
     if (running) return running;
+    const nativeReason = () => {
+      if (sessions.isRestricted?.(provider, sessionId)) return 'restricted';
+      // source() is public and does not resolve a key. Runtime/config/env and
+      // OAuth precedence must win over both live secrets and durable pins.
+      const source = keys.source?.(provider, { env: 'aliases' });
+      return source && source.kind !== 'api_key' ? 'auth-source-changed' : undefined;
+    };
+    const isCurrent = () => state.namespaces === namespaces && state.inflight.get(key) === selection;
     const selection = (async () => {
+      try {
+        // Like the native cascade, adopt other processes' store writes before
+        // reading credentials. Unchanged local stores do only version checks.
+        await auth.credentials?.poll?.();
+      } catch {
+        // Native polling also keeps the in-memory pool usable after a failure.
+      }
+      if (!isCurrent()) return originalGetWithCredential(provider, sessionId, ...rest);
+      const reason = nativeReason();
+      if (reason) {
+        observeRelease(state, provider, sessionId, reason);
+        return originalGetWithCredential(provider, sessionId, ...rest);
+      }
+      const selectedCredentialId = state.selections.get(key);
+      if (selectedCredentialId !== undefined && hasHigherPriorityLogin(state, provider, selectedCredentialId)) {
+        // source() groups both tiers as api_key; a deliberate /login still
+        // outranks an existing non-login key, as it does in the native cascade.
+        observeRelease(state, provider, sessionId, 'auth-source-changed', false);
+      } else if (selectedCredentialId !== undefined && activeBlock(state, provider, selectedCredentialId)) {
+        observeRelease(state, provider, sessionId, 'blocked', false);
+      } else if (selectedCredentialId !== undefined) {
+        const cached = state.resolved.get(key) ?? restoredSelection(state, provider, selectedCredentialId);
+        if (cached) {
+          state.resolved.set(key, cached);
+          return cached;
+        }
+        observeRelease(state, provider, sessionId, 'credential-unavailable', false);
+      }
+      const generation = state.generation;
       const selected = await originalGetWithCredential(provider, sessionId, ...rest);
-      if (state.namespaces === namespaces) {
+      const changedReason = nativeReason();
+      if (changedReason) {
+        if (isCurrent()) observeRelease(state, provider, sessionId, changedReason);
+        return originalGetWithCredential(provider, sessionId, ...rest);
+      }
+      if (isCurrent() && state.generation === generation) {
         observeSelection(state, provider, sessionId, selected?.credentialId);
         if (credentialId(selected?.credentialId) !== undefined && typeof selected?.apiKey === 'string') {
           state.resolved.set(key, selected);
@@ -234,7 +311,7 @@ function wrapNamespaces(auth, state) {
   const originalRelease = sessions.release.bind(sessions);
   sessions.release = function releaseSessionCredential(provider, sessionId) {
     const released = originalRelease(provider, sessionId);
-    if (released && state.namespaces === namespaces) {
+    if (state.namespaces === namespaces) {
       const reason = state.releaseReasons.get(selectionKey(provider, sessionId)) ?? 'reselection';
       observeRelease(state, provider, sessionId, reason);
     }
@@ -243,10 +320,11 @@ function wrapNamespaces(auth, state) {
 
   const originalMark = limits.markReached.bind(limits);
   limits.markReached = async function markReached(provider, sessionId, ...rest) {
+    const epoch = state.sessionEpochs.get(sessionId);
     try {
       return await originalMark(provider, sessionId, ...rest);
     } finally {
-      if (state.namespaces === namespaces) {
+      if (state.namespaces === namespaces && state.sessionEpochs.get(sessionId) === epoch) {
         observeRelease(state, provider, sessionId, 'usage-limit');
       }
     }
@@ -254,10 +332,11 @@ function wrapNamespaces(auth, state) {
 
   const originalRotate = limits.rotate.bind(limits);
   limits.rotate = async function rotate(provider, sessionId, ...rest) {
+    const epoch = state.sessionEpochs.get(sessionId);
     // OMP 18.4.0 returns a CredentialRotation object, which is truthy even when
     // no sibling was available, so only an actual switch releases the pin.
     const rotated = await originalRotate(provider, sessionId, ...rest);
-    if (rotated?.switched && state.namespaces === namespaces) {
+    if (rotated?.switched && state.namespaces === namespaces && state.sessionEpochs.get(sessionId) === epoch) {
       observeRelease(state, provider, sessionId, 'rotation');
     }
     return rotated;
@@ -276,6 +355,7 @@ function wrapAuthStorage(auth, state) {
   wrapNamespaces(auth, state);
   auth.credentials?.onGeneration?.(() => {
     state.resolved.clear();
+    state.generation += 1;
     wrapNamespaces(auth, state);
   });
   Object.defineProperty(auth, OBSERVER_STATE, { value: state, configurable: false });
@@ -292,6 +372,9 @@ export function registerOmpApiKeyObserver(pi, { providers = DEFAULT_PROVIDERS } 
     pendingReasons: new Map(),
     releaseReasons: new Map(),
     writers: new Map(),
+    unmanagedSessions: new Map(),
+    sessionEpochs: new Map(),
+    generation: 0,
     sessionManagers: new WeakSet(),
     auth: undefined,
   };
@@ -301,6 +384,10 @@ export function registerOmpApiKeyObserver(pi, { providers = DEFAULT_PROVIDERS } 
   const detachWriter = () => {
     if (writerState && writerState.writers.get(writerSessionId) === writer) {
       writerState.writers.delete(writerSessionId);
+      forgetSession(writerState, writerSessionId);
+      if (!writerState.writers.size) {
+        for (const sessionId of writerState.unmanagedSessions.keys()) forgetSession(writerState, sessionId);
+      }
     }
     writerState = undefined;
     writerSessionId = undefined;
@@ -332,7 +419,14 @@ export function registerOmpApiKeyObserver(pi, { providers = DEFAULT_PROVIDERS } 
     ) {
       detachWriter();
       writer = { pi, sessionManager: manager };
+      // A new scope can revive a session while its previous scope is still
+      // unwinding. Cancel the old scope's work without discarding durable pins.
+      for (const provider of activeState.providers) {
+        activeState.inflight.delete(selectionKey(provider, sessionId));
+      }
       activeState.writers.set(sessionId, writer);
+      activeState.sessionEpochs.set(sessionId, {});
+      activeState.unmanagedSessions.delete(sessionId);
       writerState = activeState;
       writerSessionId = sessionId;
     }
@@ -341,6 +435,7 @@ export function registerOmpApiKeyObserver(pi, { providers = DEFAULT_PROVIDERS } 
   };
   pi.on('session_start', activate);
   pi.on('session_switch', activate);
+  pi.on('session_branch', activate);
   pi.on('session_shutdown', detachWriter);
   return state;
 }

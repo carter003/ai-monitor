@@ -9,12 +9,13 @@ class Tokenizer {
 }
 function fixture() {
   const rates = [];
+  const models = [];
   const publisher = {
-    resetForAgent: async () => {}, publishModel: async () => {},
+    resetForAgent: async () => {}, publishModel: async (model) => models.push(model),
     publishRate: async (rate) => rates.push(rate), clearModel: async () => {},
-    clearAll: async () => {},
+    publishDisplayAgent: async () => {}, clearAll: async () => {},
   };
-  return { rates, reporter: new OmpTpsReporter({ publisher, Tokenizer, autoStart: false }) };
+  return { rates, models, reporter: new OmpTpsReporter({ publisher, Tokenizer, autoStart: false }) };
 }
 
 test('OMP matches upstream working-row trace including decimal precision and usage correction', async () => {
@@ -77,4 +78,158 @@ test('OMP feeds tool arguments but not tool results or duplicate snapshots to it
   handlers.get('message_end')({ message: { ...message, content: [{ type: 'text', text: 'answer' }] } }, context);
   assert.deepEqual(appended.map(args => args[2]), ['think', 'answer', '{"path":"a"}']);
   assert.deepEqual(models, [model]);
+});
+
+for (const eventName of ['session_switch', 'session_branch', 'session_tree']) {
+  test(`OMP retains the initialized model and rate when ${eventName} first attaches the UI`, async () => {
+    const { reporter, models } = fixture();
+    const handlers = new Map();
+    registerOmpTpsHandlers({ on: (event, handler) => handlers.set(event, handler) }, () => reporter, {
+      requireUi: true,
+    });
+
+    handlers.get('session_start')({}, { hasUI: false });
+    assert.equal(reporter.currentModel, undefined);
+    handlers.get(eventName)({}, {
+      hasUI: true,
+      model: { id: 'deepseek-v4.1-flash' },
+      sessionManager: {
+        getBranch: () => [{
+          type: 'message',
+          message: { role: 'assistant', duration: 10_000, usage: { output: 3_000 } },
+        }],
+      },
+    });
+
+    assert.equal(reporter.currentModel, 'deepseek-v4.1-flash');
+    assert.equal(reporter.lastRate, 300);
+    assert.deepEqual(models, ['deepseek-v4.1-flash']);
+    await handlers.get('session_shutdown')();
+  });
+}
+
+test('OMP tree navigation seeds only the current branch and clears history at an empty root', async () => {
+  const { reporter } = fixture();
+  const handlers = new Map();
+  registerOmpTpsHandlers({ on: (event, handler) => handlers.set(event, handler) }, reporter);
+  const previous = {
+    type: 'message',
+    message: { role: 'assistant', duration: 20_000, usage: { output: 2_000 } },
+  };
+  const current = {
+    type: 'message',
+    message: { role: 'assistant', duration: 10_000, usage: { output: 3_000 } },
+  };
+  const sibling = {
+    type: 'message',
+    message: { role: 'assistant', duration: 1_000, usage: { output: 9_000 } },
+  };
+  let branch = [previous, current, { type: 'label' }, { type: 'message', message: { role: 'user' } }];
+  let allEntriesReads = 0;
+  const context = {
+    model: { id: 'model' },
+    sessionManager: {
+      getBranch: () => branch,
+      getEntries: () => { allEntriesReads++; return [previous, current, sibling]; },
+    },
+  };
+
+  handlers.get('session_start')({}, context);
+  assert.equal(reporter.lastRate, 300);
+  branch = [previous];
+  handlers.get('session_tree')({}, context);
+  assert.equal(reporter.lastRate, 100);
+  branch = [];
+  handlers.get('session_tree')({}, context);
+  assert.equal(reporter.lastRate, 0);
+  assert.equal(reporter.currentModel, 'model');
+  assert.equal(allEntriesReads, 0);
+  await handlers.get('session_shutdown')();
+});
+
+test('OMP skips unsafe history fallback when the active branch cannot be read', async () => {
+  const { reporter } = fixture();
+  const handlers = new Map();
+  registerOmpTpsHandlers({ on: (event, handler) => handlers.set(event, handler) }, reporter);
+  let allEntriesReads = 0;
+  const getEntries = () => {
+    allEntriesReads++;
+    return [{ role: 'assistant', duration: 1_000, usage: { output: 9_000 } }];
+  };
+  for (const sessionManager of [
+    { getEntries },
+    { getEntries, getBranch: () => { throw new Error('branch unavailable'); } },
+    { getEntries, getBranch: () => undefined },
+  ]) {
+    reporter.seed(3_000, 10_000);
+    handlers.get('session_switch')({}, { model: { id: 'model' }, sessionManager });
+    assert.equal(reporter.lastRate, 0);
+    assert.equal(reporter.currentModel, 'model');
+  }
+  assert.equal(allEntriesReads, 0);
+  await handlers.get('session_shutdown')();
+});
+
+test('OMP history seeding stops at the latest reset boundary on the active branch', async () => {
+  const { reporter } = fixture();
+  const handlers = new Map();
+  registerOmpTpsHandlers({ on: (event, handler) => handlers.set(event, handler) }, reporter);
+  const branch = [{
+    type: 'message',
+    message: { role: 'assistant', duration: 10_000, usage: { output: 3_000 } },
+  }];
+  const context = { model: { id: 'model' }, sessionManager: { getBranch: () => branch } };
+  handlers.get('session_start')({}, context);
+  assert.equal(reporter.lastRate, 300);
+
+  branch.push({ type: 'reset_boundary' }, { type: 'message', message: { role: 'user' } });
+  handlers.get('session_tree')({}, context);
+  assert.equal(reporter.lastRate, 0, 'a reset must hide rates from earlier ancestor messages');
+
+  branch.push({
+    type: 'message',
+    message: { role: 'assistant', duration: 6_000, usage: { output: 1_500 } },
+  });
+  handlers.get('session_switch')({}, context);
+  assert.equal(reporter.lastRate, 250, 'a completed turn after reset can seed its own rate');
+
+  branch.push({ type: 'reset_boundary' });
+  handlers.get('session_branch')({}, context);
+  assert.equal(reporter.lastRate, 0, 'only the latest reset boundary defines visible history');
+  assert.equal(reporter.currentModel, 'model');
+  await handlers.get('session_shutdown')();
+});
+
+test('OMP uses the public resolved context when native compaction removes earlier completions', async () => {
+  const { reporter } = fixture();
+  const handlers = new Map();
+  const branch = [
+    {
+      id: 'old-assistant', parentId: null, type: 'message',
+      message: { role: 'assistant', duration: 10_000, usage: { output: 3_000 } },
+    },
+    { id: 'user', parentId: 'old-assistant', type: 'message', message: { role: 'user' } },
+    { id: 'compact', parentId: 'user', type: 'compaction', firstKeptEntryId: 'user' },
+  ];
+  const resolved = [{ role: 'compactionSummary' }, branch[1].message];
+  let resolutions = 0;
+  registerOmpTpsHandlers({
+    on: (event, handler) => handlers.set(event, handler),
+    pi: {
+      buildSessionContext: (entries) => {
+        assert.equal(entries, branch, 'the native resolver receives only the active path');
+        resolutions++;
+        return { messages: resolved };
+      },
+    },
+  }, reporter);
+  const context = { model: { id: 'model' }, sessionManager: { getBranch: () => branch } };
+  handlers.get('session_start')({}, context);
+  assert.equal(reporter.lastRate, 0, 'discarded ancestor messages cannot seed TPS');
+
+  resolved.push({ role: 'assistant', duration: 10_000, usage: { output: 2_000 } });
+  handlers.get('session_switch')({}, context);
+  assert.equal(reporter.lastRate, 200, 'only resolved native messages supply the restored rate');
+  assert.equal(resolutions, 2);
+  await handlers.get('session_shutdown')();
 });

@@ -65,6 +65,11 @@ class OmpTpsObserver {
   constructor(reporter) {
     this.reporter = reporter;
     this.seen = new Map();
+    this.reset();
+  }
+
+  reset() {
+    this.seen.clear();
     this.activeMessageKey = undefined;
     this.ended = false;
   }
@@ -151,11 +156,14 @@ class OmpTpsObserver {
 
   end(event, context) {
     const message = event?.message;
-    if (message?.role !== 'assistant' || this.ended) {
+    if (message?.role !== 'assistant') {
       return;
     }
 
     this.ensureStarted(message, context);
+    if (this.ended) {
+      return;
+    }
     const model = messageModel(message, context);
     if (!this.reporter.usesOmpNativeSemantics && Array.isArray(message.content)) {
       message.content.forEach((content, contentIndex) => {
@@ -185,13 +193,11 @@ export function registerOmpTpsHandlers(pi, reporterOrFactory, { requireUi = fals
   let rootSession = !requireUi;
   let displayRefreshTimer;
 
-  // Arming is not one-shot. The first session event can arrive before OMP
-  // attaches the TUI (`hasUI` false), and a session that only later gains a
-  // UI would otherwise stay dark for the rest of the process — the pane then
-  // renders without $model/$tps. Every event re-checks, so activation is
-  // self-healing; the subagent rejection below still holds on each attempt.
-  const isRootSessionContext = (context) =>
-    context?.agent?.kind !== 'sub' && context?.hasUI === true;
+  // OMP can attach the TUI after its first session event. Check eligibility
+  // on every event, including after activation, so child events cannot take
+  // over an already active root pane.
+  const acceptsContext = (context) =>
+    context?.agent?.kind !== 'sub' && (!requireUi || context?.hasUI === true);
 
   const updateDisplayAgent = (context) => {
     reporter.setDisplayAgent?.(ompDisplayAgent(context));
@@ -207,10 +213,22 @@ export function registerOmpTpsHandlers(pi, reporterOrFactory, { requireUi = fals
 
   const seedFromHistory = (context) => {
     try {
-      const entries = context?.sessionManager?.getEntries?.();
+      // getEntries() includes sibling branches. If the active path cannot be
+      // read, keep the reset rate instead of borrowing another branch's TPS.
+      const branch = context?.sessionManager?.getBranch?.();
+      if (!Array.isArray(branch)) return;
+      // The public SDK resolver applies OMP's compaction, reset and recovery
+      // rules. Its last entry is the active leaf because the input is one path.
+      // Older runtimes without the helper retain the path-only fallback below.
+      const entries = typeof pi?.pi?.buildSessionContext === 'function'
+        ? pi.pi.buildSessionContext(branch)?.messages
+        : branch;
       if (!Array.isArray(entries)) return;
       for (let i = entries.length - 1; i >= 0; i--) {
         const item = entries[i];
+        // getBranch() retains full ancestry across /clear; OMP's resolved
+        // conversation starts after the latest durable reset boundary.
+        if (item?.type === 'reset_boundary') return;
         const msg = item?.type === 'message' ? item.message : item;
         if (msg?.role !== 'assistant') continue;
         if (typeof msg?.duration === 'number' && typeof msg?.usage?.output === 'number') {
@@ -230,35 +248,40 @@ export function registerOmpTpsHandlers(pi, reporterOrFactory, { requireUi = fals
     seedFromHistory(context);
   };
 
-  const armRootSession = (context) => {
-    if (!isRootSessionContext(context)) {
+  const ensureRootSession = (context) => {
+    if (!acceptsContext(context)) {
       return false;
+    }
+    if (rootSession) {
+      return true;
     }
     rootSession = true;
     reporter = reporterFactory();
     observer = new OmpTpsObserver(reporter);
-    // Arming can happen on a message event, with no session event before it,
-    // so the model and display name are published here rather than left to the
-    // session handlers below.
-    applySessionModel(context);
     return true;
   };
 
-  // Returns true once this session may drive the pane's metadata, creating
-  // the reporter on the first event that proves it is the root TUI session.
-  const ensureRootSession = (context) => rootSession || armRootSession(context);
-
   const enterSession = (context, { reset = false } = {}) => {
+    if (!ensureRootSession(context)) {
+      return;
+    }
+    observer.reset();
+    if (reset) {
+      reporter.resetSession?.();
+    }
+    applySessionModel(context);
+  };
+
+  const observeMessage = (method, event, context) => {
     const alreadyRoot = rootSession;
     if (!ensureRootSession(context)) {
       return;
     }
-    if (reset) {
-      reporter.resetSession?.();
-    }
-    if (alreadyRoot) {
+    // Activation may happen without a session event once the TUI attaches.
+    if (!alreadyRoot) {
       applySessionModel(context);
     }
+    observer[method](event, context);
   };
 
   pi.on('session_start', (_event, context) => enterSession(context));
@@ -272,35 +295,26 @@ export function registerOmpTpsHandlers(pi, reporterOrFactory, { requireUi = fals
   pi.on('session_tree', onSessionReplaced);
 
   pi.on('message_start', (event, context) => {
-    if (!ensureRootSession(context)) {
-      return;
-    }
-    observer.start(event?.message, context);
+    observeMessage('start', event?.message, context);
   });
 
   pi.on('message_update', (event, context) => {
-    if (!ensureRootSession(context)) {
-      return;
-    }
-    observer.update(event, context);
+    observeMessage('update', event, context);
   });
 
   pi.on('message_end', (event, context) => {
-    if (!ensureRootSession(context)) {
-      return;
-    }
-    observer.end(event, context);
+    observeMessage('end', event, context);
   });
 
-  pi.on('agent_end', () => {
-    if (!rootSession) {
+  pi.on('agent_end', (_event, context) => {
+    if (!rootSession || (context !== undefined && !acceptsContext(context))) {
       return;
     }
     reporter.pause();
   });
 
-  pi.on('session_shutdown', () => {
-    if (!rootSession) {
+  pi.on('session_shutdown', (_event, context) => {
+    if (!rootSession || (context !== undefined && !acceptsContext(context))) {
       return;
     }
     if (displayRefreshTimer) {
@@ -308,8 +322,7 @@ export function registerOmpTpsHandlers(pi, reporterOrFactory, { requireUi = fals
       displayRefreshTimer = undefined;
     }
     rootSession = false;
-    observer.seen.clear();
-    observer.activeMessageKey = undefined;
+    observer.reset();
     return reporter.close();
   });
 }
