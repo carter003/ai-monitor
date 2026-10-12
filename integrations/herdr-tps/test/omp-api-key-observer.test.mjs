@@ -71,6 +71,7 @@ function fixture({ entries = [], selected = ['account-a', 'account-a', 'account-
     },
     sessions: {
       isRestricted: (_provider, id) => restricted.has(id),
+      permits: (_provider, id) => !restricted.has(id),
       release: () => nativeRelease,
     },
     limits: {

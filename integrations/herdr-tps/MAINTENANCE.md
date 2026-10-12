@@ -217,10 +217,10 @@ v10（状态 current），
 | `agent_end` | pause |
 | `session_shutdown` | 清除显示刷新 timer、observer 状态并等待 reporter.close |
 
-上表已消费事件的投递路径与字段形状在 18.8.9 上不变；18.4.7 至 18.8.9 都没有新增扩展事件
-（`shared-events.ts` 在 v18.8.0 与 v18.8.9 之间逐字节相同；`docs/extensions.md` 仅补充
-`deliverAs: "aside"` 结束 interruptible wait 的措辞与 v18.8.9 的 `ctx.ui.openTerminal` 说明，
-事件清单未变）。
+上表已消费事件的投递路径与字段形状在 18.10.1 上不变；18.4.7 至 18.10.1 都没有新增扩展事件
+（`shared-events.ts` 在 v18.8.0 与 v18.10.1 之间逐字节相同；`docs/extensions.md` 补充
+`deliverAs: "aside"` 结束 interruptible wait 的措辞、v18.8.9 的 `ctx.ui.openTerminal` 说明
+与 v18.9.0 的 `ctx.annotations`，事件清单未变）。
 
 模型优先级是 `message.model ?? context.model.id ?? context.model.name`。
 生产 reporter 为 `OmpTpsReporter`，通过 OMP 自身模块导入 `Tokenizer`，按 context.model.tokenizer 选择分词器。
@@ -256,7 +256,7 @@ Codex wrapper 启用 `streamingOnly`：以首个可见 delta 作为片段起点�
 | 非零 TPS TTL | 2500ms | `max(stale, heartbeat) + 2 × sampleInterval` |
 
 生产环境（Codex 与 OMP wrapper）采用 OMP 18.2.5 移植的 `TokenRateMeter` 算法（upstream
-`utils/token-rate.ts` 到 18.8.9 未再改动，仍只有 18.4.2 那次 pending 计数的 memo）：
+`utils/token-rate.ts` 到 18.10.1 未再改动，仍只有 18.4.2 那次 pending 计数的 memo）：
 
 1. **多尺度指数衰减**：在 5s、20s、80s 三个半衰期桶内同时维护 tokens 与 time；使用解析积分 `(halfLife / ln2) * (1 - 2^(-t / halfLife))` 计算流式增长与时间权值。
 2. **词边界分块分词**：流式 delta 按 250ms 周期分块，并在最后空格/换行符处分割（保留末尾最多 32 字符至下一块），消除跨 delta 分词边界误差与突发抖动。

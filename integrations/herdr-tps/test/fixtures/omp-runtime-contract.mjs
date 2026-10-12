@@ -72,6 +72,8 @@ export default function contractProbe(pi) {
       auth.sessions.restrict('opencode-go', restrictedId, []);
       const nativeGet = auth.keys.getWithCredential.bind(auth.keys);
       await assert.rejects(nativeGet('opencode-go', restrictedId), { name: 'MissingApiKeyError' });
+      assert.equal(typeof auth.sessions.permits, 'function');
+      assert.equal(auth.sessions.permits('opencode-go', restrictedId, id), false);
       const restrictedBus = eventBus(restricted);
       registerOmpApiKeyObserver(restrictedBus);
       await restrictedBus.emit('session_start', {
@@ -94,6 +96,7 @@ export default function contractProbe(pi) {
       await bus.emit('session_start', authContext);
       const parentId = manager.getSessionId();
       await auth.keys.getWithCredential('opencode-go', parentId);
+      assert.equal(auth.sessions.permits('opencode-go', parentId, id), true);
       manager.createBranchedSession(leaf);
       const branchId = manager.getSessionId();
       assert.notEqual(branchId, parentId);
