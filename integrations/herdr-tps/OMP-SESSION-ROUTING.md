@@ -1,6 +1,6 @@
 # OMP 原生认证与 opencode-go session 粘性
 
-OMP 18.10.2 的认证、额度报告、reserve、block、rotation 和 429 恢复继续使用原生 AuthStorage。
+OMP 18.10.4 的认证、额度报告、reserve、block、rotation 和 429 恢复继续使用原生 AuthStorage。
 扩展只补齐 opencode-go API Key 的 session 粘性，不固定 Antigravity credential、不执行跨
 provider fallback，也不覆盖原生 `health.model`。
 
@@ -25,7 +25,7 @@ credential ID 作为 `herdr-api-key-sticky-v1` custom entry 写入所属 session
 选择写入器，不能复用最后激活的扩展 API。`session_branch` 会重新绑定新 session 的写入器，
 只恢复该 ID 自己的记录，不复制父 session 的 pin。恢复同一子 session 会替换写入器，旧实例退出不会移除新实例。
 
-OMP 18.10.2 的 `/reset` 与 `/fresh` 会生成不同于日志 session ID 的内部 provider routing ID。
+OMP 18.10.4 的 `/reset` 与 `/fresh` 会生成不同于日志 session ID 的内部 provider routing ID。
 公开 ExtensionContext 和请求事件没有提供这一映射，因此这些请求仍可在进程内保持粘性，
 但对应 pin 无法可靠写入所属日志，也不能承诺跨进程恢复或 collector 的精确账户归因。
 不从请求 payload 的 `prompt_cache_key` 猜测映射；修复需要上游公开有效 routing ID 或认证 hook。
@@ -35,7 +35,7 @@ OMP 18.10.2 的 `/reset` 与 `/fresh` 会生成不同于日志 session ID 的内
 `store-replaced` release、清理旧存储的选择缓存。新存储即使复用相同 credential ID，也会
 重新记录 pin；旧存储尚未完成的异步调用不会覆盖新存储的观察状态。
 
-OMP 18.10.2 仍然只写 API key 的 session affinity，API-key 选择路径（`CredentialSelector.selectApiKey`）
+OMP 18.10.4 仍然只写 API key 的 session affinity，API-key 选择路径（`CredentialSelector.selectApiKey`）
 不读这份 affinity；只有 OAuth 路径（`resolveOAuth`）读。因此本地路由补丁依旧必要，继续位于公开的
 `keys.getWithCredential`、`sessions.release` 和 reset boundary 接口，不修改 Bun runtime。
 普通 request 不再因额度样本刷新或排序分数变化而换号。
@@ -74,7 +74,7 @@ credential ID 捕获（peer 重排行不再错位）。本扩展的粘性 pin �
 generator 管理。
 
 ## OMP 升级
-路由器不依赖 bundle 字节偏移或 minified 私有方法名，只依赖 OMP 18.10.2 的：
+路由器不依赖 bundle 字节偏移或 minified 私有方法名，只依赖 OMP 18.10.4 的：
 
 
 - `keys.getWithCredential`、`keys.source`、`sessions.release`、`sessions.isRestricted`、`sessions.permits`、`limits.markReached`、`limits.rotate`；
@@ -92,7 +92,7 @@ Antigravity 账号选择完全由 OMP 原生实现，本扩展不再改写 syste
 为真才表示真的换了账号。观察器因此只在 `rotated.switched` 时记录 `rotation` release。
 没有可用 sibling 时 rotate 最多等待 5s（`SIBLING_UNBLOCK_WAIT_MAX_MS`）等短暂 block 的
 sibling 恢复，随后返回 `switched: false`——此时账号没变，按旧的真值判断会被误记成 rotation。
-`packages/ai/src/auth/rotation.ts` 在 18.8.1 至 18.10.2 逐字节相同；18.8.1 起新增 `sessionId` 参数并用
+`packages/ai/src/auth/rotation.ts` 在 18.8.1 至 18.10.4 逐字节相同；18.8.1 起新增 `sessionId` 参数并用
 `affinity.allows()` 过滤 sibling，但 `CredentialRotation` 的 `{ switched }` 契约没有再变。
 
 升级后必须验证这些公开接口与 reset boundary 行为：
@@ -138,7 +138,7 @@ node --test integrations/herdr-tps/test/omp-runtime-contract.test.mjs
 该测试调用原生 AuthStorage、SessionManager、上下文重建 helper 和宿主 Tokenizer，事件由 fixture 投递，
 不等同于实际 TUI 命令、在线账户恢复或侧栏现场验证。
 
-本轮验证：`npm run herdr:tps:test` 155/155 通过（含本机 18.10.2 的七组契约检查）；
+本轮验证：`npm run herdr:tps:test` 155/155 通过（含本机 18.10.4 的七组契约检查）；
 `cargo test -p herdr-usage --offline --locked` 116 + 23 + 3 通过；安装 dry-run 的 config/shell/links
 均已就绪，daemon 共享 dry-run 为 `already-shared`，`git diff --check` 通过。
 交互进程仍需在任务结束后重启，再观察真实会话切换与侧栏显示。
@@ -212,6 +212,109 @@ bundle 接口出现次数 18.8.4 → 18.8.6（`grep -ao` 对两份二进制分�
   `npm run herdr:tps:install -- --dry-run`：config、shell、links 均已就绪；
   `share-omp-daemons.mjs --dry-run` → `already-shared`（pro2 daemons 仍共享）。
   本地 sticky pin、TPS reporter 及 herdr-usage 采集链路全部通过，扩展与采集代码无需修改。
+
+### 18.10.4
+
+upstream [`v18.10.3...v18.10.4`](https://github.com/can1357/oh-my-pi/compare/v18.10.3...v18.10.4)
+compare API 显示 105 个 commit、191 个文件。变更主要集中在 `pi-agent-core`（工具审批参数行数感知、loop context 传递与 summarizer 模型支持、跨模型 snapcompact reasoning 剔除）、`pi-ai`（Codex 网络安全策略错误重试保留 Daybreak、移除 toolNamespacesInfo 流式选项与 Codex Code Mode 彻底移除）、`pi-catalog` 与 `snapcompact`（Muse Wonder 订阅定价、Gemini 4 Argon 定价与 2026-12-01 生效排期、支持阶梯费率排期卡片、Devin 缓存写入与长上下文计价修复、Kilo 与 NanoGPT 动态价格与模型元数据拉取、snapcompact 支持 reasoning 剔除归档变体）、`pi-coding-agent`（扩展支持交互式 Plan Review 监听、重新打开与角色 tier 选择、`omp gc --compress` 透明压缩闲置会话、工具审批弹窗整合进输入区）、`pi-natives` 与 `pi-tui`：
+
+- `packages/agent-core` & `packages/ai`：
+  - **工具审批参数详情**：`AgentTool.formatApprovalDetails` 接收 `ApprovalDetailsOptions`（`compact: true` 允许紧凑审批框统计行数，PR #15550）；
+  - **模型调用钩子上下文**：Before-model-call hooks 接收 loop context 作为第二参数，`buildProviderContext` 接收 summarizer 模型（PR #15436）；
+  - **跨模型思考上下文过滤**：修复 Claude 压缩与分支摘要读取 snapcompact 跨模型带 reasoning 的归档导致 `reasoning_extraction` 被拒问题（PR #15436）；
+  - **Codex 策略错误处理**：修复 Codex 网络安全策略错误时误重试关闭 Daybreak 模式的问题（PR #15472）；
+  - **移除 Codex Code Mode**：移除 `toolNamespacesInfo` 流式选项，不再发送 `tool_namespaces_info` / `code_mode_tool_names` 客户端元数据；彻底移除 Codex Code Mode 及其 `providers.openai-codex.codeMode` / `codeModeDirectTools` 配置与代码模式声明生成器，Codex 模型全面使用统一的直接工具接口。
+- `packages/catalog` & `packages/snapcompact`：
+  - **新增定价与模型阶梯**：新增 Muse Code 的 Muse Wonder Full（$4/$0.20/$20）与 Wonder contributor（$1.60/$0.08/$8）订阅定价（PR #15522）；新增 Cursor 与 Google Antigravity 上的 Gemini 4 Argon 定价（2026-12-01 统一调整为 $4/$0.20/$20）；
+  - **阶梯排期费率卡片**：支持未来生效日期的阶梯费率排期卡片（`effective-rates` card），构建与查询时精准按请求当时生效卡片计价，非周期性生效排期不显示高峰状态标记（PR #15620）；
+  - **定价缺陷修复**：修复 Devin 模型的 prompt-cache write 计价（1.25x input）、长上下文阶梯定价（>200K / 272K tokens）及 Fusion 配对规则丢失问题（PR #14891）；修复 Kilo 与 NanoGPT 模型价格、上下文窗口与输出上限丢失问题，改从网关 live model list 动态获取（PR #15623）；
+  - **无思考归档视图**：snapcompact 新增 `viewWithoutThinking()`、`textWithoutThinking()`、`readerIncludesThinking()` 及 `Archive.withoutThinking` 归档变体，使不能见 reasoning 的模型安全消费压缩归档（PR #15436）。
+- `packages/coding-agent` & `packages/tui`：
+  - **交互式计划审批扩展扩展点**：扩展系统可监听并响应交互式 Plan Review（`plan_review_requested`、`plan_review_resolved` 事件），支持提供 refinement 反馈或直接 save-and-quit（PR #14250）；会话空闲时扩展可通过 `ctx.openPlanReview()` 主动重新打开，并通过 `ctx.resolvePlanReview` 选择执行角色 tier（PR #15552）；
+  - **闲置会话透明压缩**：新增 `omp gc --compress`（或 `gc.compress` 配置），对空闲超过 `gc.compressAfterDays`（默认 7 天）的会话透明使用文件系统压缩（APFS, NTFS），同时保持可 resume 与全文可搜（PR #15600, #15616）；
+  - **工具审批交互重构**：审批弹窗替换 composer 输入区（类似 `ask`），支持逐行展示详情，默认快捷键调整为 `Ctrl+Enter` / `Ctrl+Q`（PR #15548）；
+  - **会话与浏览器修复**：修复会话恢复时 late probe 探针倒回对话历史以及陈旧历史扫描降低 parked 子代理开销的问题（PR #15594）；修复独立共享浏览器（headless/headed）崩溃或重启时重新打开前次全部未关闭页面的问题，禁止通过 `proc://<name>/mode` 进行 detach（PR #15561）；
+  - **TUI 细节修复**：修复原生终端 `/btw` 复制按钮复制按钮标签文本而非回复内容的缺陷（PR #15547）；修复 tmux 嵌套无 client SIXEL 支持时显示六角图像占位符问题（PR #15513）；修复 `pwsh` 代码块语法高亮缺失问题（PR #15010）。
+
+逐字节未变（两 tag compare 完全不含这些路径）：
+`packages/ai/src/auth/` 全部文件（`auth-storage.ts`、`select.ts`、`affinity.ts`、`rotation.ts`、`blocks.ts`、`cascade.ts`、`types.ts`、`oauth.ts`、`store.ts`、`resets.ts`、`usage.ts`、`sqlite-credential-store.ts`）、
+`packages/ai/src/provider-session-state.ts`、
+`packages/coding-agent/src/utils/token-rate.ts`、
+`packages/coding-agent/src/extensibility/shared-events.ts`、
+`packages/coding-agent/src/session/{session-paths.ts}`、
+`commands/launch.ts`、`cli/args.ts`。
+扩展核心监控事件定义、`TokenRateMeter` 算法、认证底层、SessionManager 核心路径、Session JSONL 结构继续逐字节一致；“API-key 选择路径不读 session affinity”继续成立，本地 session 粘性路由补丁继续完全适用。
+
+bundle 接口出现次数 18.10.3 → 18.10.4（`grep -ao` 对两份二进制分别计数）：
+`getWithCredential` 10 → 10、`markReached` 6 → 6、`onGeneration` 8 → 8、`appendResetBoundary` 3 → 3、
+`appendEntry` 19 → 17（因 Codex Code Mode 彻底移除，清理了 `session/code-mode.ts` 内部调用）、
+`session_shutdown` 9 → 9、`session_start` 9 → 9、`message_update` 39 → 39、
+`message_end` 64 → 64、`agent_end` 59 → 57（同因 Code Mode 移除减少）、
+`session_branch` 8 → 8、`session_switch` 8 → 8、`session_tree` 5 → 5、`isRestricted` 9 → 9、
+`permits` 20 → 16、`getCredentialPins` 5 → 5、`getSessionFile` 97 → 92、
+`getSessionId` 187 → 173、`selectApiKey` 4 → 4、`resolveOAuth` 8 → 8。核心契约逐项保持稳定。
+
+实机验证与增量补丁升级（`omp-linux-x64` SHA256
+`ff59fc1b484c1308a7247ad208305005627b3fac62b440737c2b1835ac32074e`，与 release 构建一致，
+`--version` → `omp/18.10.4`）：
+
+- 本次升级命中 Stencil 增量二进制补丁机制：`.runtime/omp update` 检查到版本差异后，自动下载针对 `18.10.3` 的增量补丁 `omp-linux-x64.patch`（44.0 MB，相比全量 264 MB 节省约 83.3% 带宽）；通过原生 `applyBinaryPatch`（HDiffPatch + zstd）就地应用并校验生成目标二进制 sha256 `ff59fc1b484c1308a7247ad208305005627b3fac62b440737c2b1835ac32074e` 后原子替换。
+- 经 `omp-with-tps.mjs --version` 加载 wrapper，正确解析到 18.10.4 runtime（输出 `18.10.4`）。
+- `omp-with-tps.mjs --print "respond with pong only"` 真实请求正常返回 `pong`。
+- `node --test integrations/herdr-tps/test/*.test.mjs`：155 passed（含本机 18.10.4 的七组契约检查）；
+  `cargo test --offline --locked`：ai-monitor 183 + 0、herdr-usage 116 + 23 + 3 passed；
+  `npm run herdr:tps:install -- --dry-run`：config、shell、links 均已就绪；
+  `share-omp-daemons.mjs --dry-run` → `status: already-shared`。
+
+### 18.10.3
+
+upstream [`v18.10.2...v18.10.3`](https://github.com/can1357/oh-my-pi/compare/v18.10.2...v18.10.3)
+compare API 显示变更主要集中在 `pi-agent-core`（分词估算与图像定价统一、思考轮次 token 计量修复）、`pi-ai`（端点判定与 `elidedOutputTokens`）、`pi-catalog` 与 `snapcompact`（模型图像预算策略、Cursor / Antigravity 图像与历史截断修正）、`pi-coding-agent`（子代理 soft request budget、兄弟子代理 prompt cache 共享、`omp --restore` 恢复模式）以及 `pi-tui`：
+
+- `packages/agent-core` & `packages/ai`：
+  - **图像 token 计量统一**：移除 `@oh-my-pi/pi-agent-core/image-tokens` 中的 `estimateImageContentTokens()`，统一采用 `Tokenizer.imageTokens(size, detail)` 按 catalog 模型图像定价规则核算；
+  - **历史重写与思考轮次统计**：`applyShakeRegion(s)` 支持 replacement 的 token 计数，block rewrite 扣除的 token 计入 `elidedOutputTokens`；修复 Claude 重放思考轮次在重新加载后按输出计费尺寸而非签名尺寸统计的问题（解决 Opus 5.5 输入 context 虚高 ~55%）；
+  - **OpenAI Responses 与 Codex 推理统计**：重放的加密思考按报告的 reasoning tokens 计入，会话 compaction 与 snapcompact 精确贴合账单；
+  - **端点判定**：`isOfficialCodexApiUrl` 迁移至 `@oh-my-pi/pi-catalog/wire/codex`；新增 `reachesOfficialEndpoint(model)`，遵循 `ANTHROPIC_BASE_URL` 与 `FOUNDRY_BASE_URL` 重定向判定是否直连官方端点。
+- `packages/catalog` & `packages/snapcompact`：
+  - **图像数量与体积预算规则**：引入 `image-count-budget`（Anthropic 90、Codex 200）与官方端点 override（Anthropic 600、Codex 2000）；Codex 支持 24 MB 行内图像预算；
+  - **Cursor 与 Antigravity 限制校正**：Cursor 下 Claude/GPT snapcompact 帧按宿主 `image-max-edge`（1024px）缩放，防止 Cursor 压缩导致不可读；修复 Claude 在 Google Antigravity 超过 5 MiB 单图上限失败问题；
+  - **Muse Wonder 模型支持**：新增 Meta / Muse Code 的 `muse-wonder-1.0` 模型定义与 pricing，未分类模型支持 `thinking-unverified` 推理阶梯。
+- `packages/coding-agent` & `packages/tui`：
+  - **子代理独立请求预算**：新增配置 `task.agentSoftRequestBudget`，允许为命名子代理独立配置 soft request budget；
+  - **兄弟子代理 prompt-cache 共享**：在 Muse Code 等兼容提供商上为并行兄弟子代理启用 prompt-cache key 共享（同时保持对话独立），私有 cache key 不泄露至共享会话导出；
+  - **会话崩溃恢复命令**：新增 `omp --restore <session>` 命令，在客户端崩溃或被 kill 时不仅恢复会话，还能自动继续未完成的 turn 与子代理执行；
+  - **工具输出精简**：移除 bash 毫秒级耗时输出与冗余任务尺寸元数据，降低工具结果 token 占用；
+  - **修复**：修复 `snapcompact.toolResults` 重复将已发送结果图片化破坏 prompt cache 和 Anthropic 签名思考的问题；模型选择器对未验证模型提供手动 effort 选择。
+
+逐字节未变（两 tag compare 完全不含这些路径）：
+`packages/ai/src/auth/` 全部文件（`auth-storage.ts`、`select.ts`、`affinity.ts`、`rotation.ts`、`blocks.ts`、`cascade.ts`、`types.ts`、`oauth.ts`、`store.ts`、`resets.ts`、`usage.ts`、`sqlite-credential-store.ts`）、
+`packages/ai/src/provider-session-state.ts`、
+`packages/coding-agent/src/utils/token-rate.ts`、
+`packages/coding-agent/src/extensibility/shared-events.ts`、
+`packages/coding-agent/src/extensibility/extensions/{types,lifecycle-mirror,runner,wrapper}.ts`、
+`packages/coding-agent/src/session/{session-storage,credential-pin,session-context,session-paths,session-manager}.ts`、
+`commands/launch.ts`、`cli/args.ts`。
+因此扩展事件定义、`TokenRateMeter` 算法、认证底层、SessionManager 接口、session 目录与 JSONL 形状、launcher 与参数解析全部未变；“API-key 选择路径不读 session affinity”继续成立，本地 session 粘性路由补丁继续完全适用。
+
+bundle 接口出现次数 18.10.2 → 18.10.3（`grep -ao` 对两份二进制分别计数）：
+`getWithCredential` 10 → 10、`markReached` 6 → 6、`onGeneration` 8 → 8、`appendResetBoundary` 3 → 3、
+`appendEntry` 19 → 19、`session_shutdown` 9 → 9、`session_start` 9 → 9、`message_update` 39 → 39、
+`message_end` 64 → 64、`agent_end` 59 → 59、`session_branch` 8 → 8、`session_switch` 8 → 8、
+`session_tree` 5 → 5、`isRestricted` 9 → 9、`permits` 20 → 20、`getCredentialPins` 5 → 5；
+`getSessionFile` 97 → 97、`getSessionId` 187 → 187。消费的核心契约逐项保持一致。
+
+实机验证与增量补丁升级（`omp-linux-x64` SHA256
+`366ffcda80db57b825921b6ff4b0e5e623bc62cf18478f2828cd8a322fc72ff9`，与 release 构建一致，
+`--version` → `omp/18.10.3`）：
+
+- 本次升级命中 Stencil 增量二进制补丁机制：`.runtime/omp update` 检查到版本差异后，自动下载针对 `18.10.2` 的增量补丁 `omp-linux-x64.patch`（6.4 MB，相比全量 264 MB 节省约 97.6% 带宽）；通过原生 `applyBinaryPatch`（HDiffPatch + zstd）就地应用并校验生成目标二进制 sha256 `366ffcda...` 后原子替换。
+- 经 `omp-with-tps.mjs --version` 加载 wrapper，正确解析到 18.10.3 runtime（输出 `18.10.3`）。
+- `omp-with-tps.mjs --print "respond with pong only"` 真实请求正常返回 `pong`。
+- `node --test integrations/herdr-tps/test/*.test.mjs`：155 passed（含本机 18.10.3 的七组契约检查）；
+  `cargo test --offline --locked`：ai-monitor 183 + 0、herdr-usage 116 + 23 + 3 passed；
+  `npm run herdr:tps:install -- --dry-run`：config、shell、links 均已就绪；
+  `share-omp-daemons.mjs --dry-run` → `status: already-shared`。
 
 ### 18.10.2
 
