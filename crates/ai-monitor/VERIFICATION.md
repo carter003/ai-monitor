@@ -1,5 +1,59 @@
 # 验证记录
 
+## AGY CLI 额度口径修复（2026-10-16，替代上午的修复）
+
+- 上午的验证只确认 production 返回了 Gemini，没有对照 WSL 原生 CLI 的 `/usage`。
+  production 的周剩余约 `78.04%`／`77.53%` 对应另一套数值，不能用于补齐 daily 的 Gemini 组。
+- 用隔离的 CLI 配置副本运行本机 AGY CLI 1.4.0，仅打开 `/usage`，未发送模型请求。
+  通过本地诊断代理核对原生请求：`loadCodeAssist` 使用
+  `{"metadata":{"ideType":"ANTIGRAVITY"}}`，从响应读取 `cloudaicompanionProject`；
+  `retrieveUserQuotaSummary` 携带该项目，端点均为 `daily-cloudcode-pa.googleapis.com`。
+  原生 `User-Agent` 为
+  `antigravity/cli/1.4.0 (aidev_client; os_type=linux; arch=amd64; cl=1000494485; auth_method=consumer)`。
+- 同令牌对照：无版本的 `antigravity` 请求即使携带项目也缺少 Gemini；带 CLI 版本的请求返回
+  Gemini 的 5H／周窗口。修复恢复 daily，使用完整原生请求标识并动态解析各账户项目。
+  不再请求 production，不硬编码共享项目，不改写客户端凭据。
+- 新增 4 项 HTTP 回归，覆盖固定端点与完整请求标识、账户项目隔离、项目缺失时停止查询，
+  以及两个请求阶段的 401／429 传播；新增原生 CLI 响应解析回归，覆盖百分比与重置时间。
+- 完整离线测试：188 项库测试、1 项 main 测试、4 项终端退出集成测试通过，2 项联网测试默认忽略。
+  显式运行双账户联网验证：两个账户各续期一次并查询两次，均返回 Gemini 5H／周额度，
+  原始登录文件字节不变。联网快照：AGY `98.29%`／`97.87%`，AGY2 `98.99%`／`99.01%`。
+- 上游还存在快照差异：相同令牌、完整请求标识和请求体连续查询时，AGY 观察到
+  `98.29%`／`97.87%` 与 `97.99%`／`97.36%` 两组数值；AGY2 观察到
+  `98.99%`／`99.01%` 与 `99.96%`／`99.99%`。原生 `/usage` 也观察到这些变化。
+  因而不能用不同时间的固定百分比断言界面始终完全相等；本次修复确保请求来源与口径一致，
+  保留上游实际返回的精度和重置时间。
+- 严格 Clippy（`--all-targets --no-deps -- -D warnings`）、修改 Rust 文件的格式检查、
+  `git diff --check`、Release 构建通过。独立 tmux 中的 Release TUI 返回 Gemini 5H／周窗口，
+  无「未返回 Gemini」或「本地服务备用」；其他凭据路径与数据库路径隔离。
+- 已原子替换 `~/.local/bin/ai-monitor`，SHA-256 与验证过的 Release 二进制一致。
+  旧版备份：`/tmp/ai-monitor-agy-quota-vww8vmum/ai-monitor.before`。
+  已运行的监控进程仍为旧版，退出并重新运行 `ai-monitor` 后生效。
+
+## AGY 额度接口上午修复记录（2026-10-16，端点改动已撤销）
+
+- 根因：同一账号、同一访问令牌和空 JSON 请求体查询 `retrieveUserQuotaSummary` 时，
+  `daily-cloudcode-pa.googleapis.com` 只返回 `Claude and GPT models`（`3p-weekly`／`3p-5h`），
+  缺少 Gemini 组；`cloudcode-pa.googleapis.com` 正常返回 `Gemini Models` 及
+  `gemini-weekly`／`gemini-5h`。旧解析器按预期拒绝将第三方模型额度当成 Gemini 额度，因而报
+  「未返回 Gemini 共享额度」。修复 `src/http.rs` 的请求地址，统一使用生产端点。
+- 新增两项离线回归：生产响应的 Gemini 组选择、5H／周排序、比例精度与各自重置时间，
+  以及仅含第三方模型组时明确报错；直接响应、`summary` 包装和原有 `response` 包装均覆盖。
+- `cargo test --locked -p ai-monitor`：183 项库测试、1 项 main 测试、4 项终端退出集成测试通过，
+  2 项联网测试默认忽略。
+- 显式执行 `live_two_profiles_renew_without_client_or_file_writes`：通过。两个真实账号各续期后
+  连续查询两次，均返回 Gemini 的 5H／周额度及账号名称；两个登录文件字节保持不变。
+- `cargo clippy --locked -p ai-monitor --all-targets --no-deps -- -D warnings`、修改 Rust 文件的
+  `rustfmt --check --edition 2024`、`git diff --check`：通过。含依赖的严格 Clippy 检查仍被
+  `herdr-usage` 既有的参数数量、冗余闭包、类型复杂度及 `almost_swapped` 等问题阻断；
+  全工作区 `cargo fmt --check` 存在既有格式差异，本次未修改这些无关文件。
+- `cargo build --release --locked -p ai-monitor --bin ai-monitor`：通过。真实账号 Release TUI
+  （独立 tmux socket，180×54，其他凭据和数据库路径隔离）：AGY 显示 5H `99.96%`／周 `78.04%`，
+  AGY2 显示 5H `100%`／周 `77.53%`，无「本地服务备用」或 Gemini 缺失错误。
+  按 `q` 后进程退出、验证用 HTTP 端口释放。数值仅为验证时快照。
+- 已原子替换 `~/.local/bin/ai-monitor`，并校验安装文件与验证过的 Release 二进制 SHA-256 一致；
+  旧版保留在 `/tmp/ai-monitor-agy-verify-vu8beg8k/ai-monitor.before`，重启已有监控界面即可使用修复。
+
 ## 0.7.0
 
 日期：2026-09-15，本机 Linux x86_64（WSL2）。

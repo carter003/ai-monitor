@@ -307,6 +307,81 @@ mod tests {
         assert!((cards[0].meters[1].remaining.unwrap() - 67.24).abs() < 0.001);
     }
     #[test]
+    fn agy_production_summary_keeps_gemini_windows_separate_from_third_party() {
+        // Quota fields captured from production on 2026-10-16, with the
+        // unrelated group first so group ordering cannot choose the pool.
+        let summary = json!({"groups":[
+            {"displayName":"Claude and GPT models","buckets":[
+                {"bucketId":"3p-weekly","window":"weekly","remainingFraction":1},
+                {"bucketId":"3p-5h","window":"5h","remainingFraction":1}
+            ]},
+            {"displayName":"Gemini Models","buckets":[
+                {"bucketId":"gemini-weekly","displayName":"Weekly Limit Remaining",
+                 "window":"weekly","resetTime":"2026-10-21T03:05:11Z",
+                 "remainingFraction":0.7804007},
+                {"bucketId":"gemini-5h","displayName":"Five Hour Limit Remaining",
+                 "window":"5h","resetTime":"2026-10-16T03:04:12Z",
+                 "remainingFraction":0.99959034}
+            ]}
+        ]});
+        for value in [summary.clone(), json!({"summary":summary})] {
+            let cards = agy(&value, "AGY").unwrap();
+            assert_eq!(cards.len(), 1);
+            assert_eq!(cards[0].title, "AGY");
+            assert_eq!(cards[0].meters.len(), 2);
+            for (meter, label, remaining, reset) in [
+                (&cards[0].meters[0], "5H", 99.959034, "2026-10-16T03:04:12Z"),
+                (&cards[0].meters[1], "周", 78.04007, "2026-10-21T03:05:11Z"),
+            ] {
+                assert_eq!(meter.label, label);
+                assert!((meter.remaining.unwrap() - remaining).abs() < 0.000001);
+                assert_eq!(meter.resets_at, timestamp(&json!(reset)));
+                assert_eq!(meter.decimals, 2);
+                assert!(!meter.available);
+            }
+        }
+    }
+    #[test]
+    fn agy_cli_summary_matches_native_usage_percentages_and_resets() {
+        // Native CLI 1.4.0 /usage and its daily response, captured 2026-10-16.
+        // Production's legacy Gemini percentages are deliberately not used.
+        for title in ["AGY", "AGY2"] {
+            let cards = agy(
+                &json!({"groups":[{"displayName":"Gemini Models","buckets":[
+                    {"bucketId":"gemini-weekly","window":"weekly",
+                     "resetTime":"2026-10-23T00:13:33Z","remainingFraction":0.97870505},
+                    {"bucketId":"gemini-5h","window":"5h",
+                     "resetTime":"2026-10-16T10:13:33Z","remainingFraction":0.98290926}
+                ]}]}),
+                title,
+            )
+            .unwrap();
+            assert_eq!(cards[0].title, title);
+            assert_eq!(cards[0].meters.len(), 2);
+            for (meter, label, percent, reset) in [
+                (&cards[0].meters[0], "5H", 98.290926, "2026-10-16T10:13:33Z"),
+                (&cards[0].meters[1], "周", 97.870505, "2026-10-23T00:13:33Z"),
+            ] {
+                assert_eq!(meter.label, label);
+                assert!((meter.remaining.unwrap() - percent).abs() < 0.000001);
+                assert_eq!(meter.resets_at, timestamp(&json!(reset)));
+                assert_eq!(meter.decimals, 2);
+            }
+        }
+    }
+    #[test]
+    fn agy_third_party_only_summary_does_not_report_gemini_quota() {
+        // An unversioned User-Agent on daily returns this incomplete summary.
+        let summary = json!({"groups":[
+            {"displayName":"Claude and GPT models","buckets":[
+                {"bucketId":"3p-weekly","window":"weekly","remainingFraction":1},
+                {"bucketId":"3p-5h","window":"5h","remainingFraction":1}
+            ]}
+        ]});
+        let error = agy(&summary, "AGY").unwrap_err();
+        assert_eq!(error.message, "未返回 Gemini 共享额度");
+    }
+    #[test]
     fn openrouter_is_account_credit_less_account_usage() {
         let card =
             openrouter(&json!({"data":{"total_credits":100.5,"total_usage":25.75}})).unwrap();

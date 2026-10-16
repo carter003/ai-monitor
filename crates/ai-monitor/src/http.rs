@@ -7,6 +7,10 @@ use serde_json::Value;
 use std::{io::Read, time::Duration};
 
 const MAX_RESPONSE: u64 = 2 * 1024 * 1024;
+const AGY_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com/v1internal:";
+// Quota-summary routing depends on the CLI product AND version. A bare
+// "antigravity" omits Gemini on daily; production returns a different quota pool.
+const AGY_USER_AGENT: &str = "antigravity/cli/1.4.0 (aidev_client; os_type=linux; arch=amd64; cl=1000494485; auth_method=consumer)";
 
 #[derive(Clone)]
 pub struct Http {
@@ -48,15 +52,32 @@ impl Http {
     }
 
     pub(crate) fn agy_quota(&self, token: &str) -> Result<Value, FetchError> {
+        self.agy_quota_at(token, AGY_ENDPOINT)
+    }
+
+    fn agy_quota_at(&self, token: &str, endpoint: &str) -> Result<Value, FetchError> {
+        // Match the native CLI: resolve the signed-in account's project before
+        // querying its summary. Never substitute a project from another account.
+        let account = json_response(
+            self.agy_request(token, endpoint, "loadCodeAssist")
+                .json(&serde_json::json!({"metadata":{"ideType":"ANTIGRAVITY"}})),
+        )?;
+        let project = account
+            .get("cloudaicompanionProject")
+            .and_then(Value::as_str)
+            .filter(|project| !project.trim().is_empty())
+            .ok_or_else(|| FetchError::new("AGY 未返回账户项目"))?;
         json_response(
-            self.remote
-                .post(
-                    "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
-                )
-                .bearer_auth(token)
-                .header("User-Agent", "antigravity")
-                .json(&serde_json::json!({})),
+            self.agy_request(token, endpoint, "retrieveUserQuotaSummary")
+                .json(&serde_json::json!({"project":project})),
         )
+    }
+
+    fn agy_request(&self, token: &str, endpoint: &str, method: &str) -> RequestBuilder {
+        self.remote
+            .post(format!("{endpoint}{method}"))
+            .bearer_auth(token)
+            .header("User-Agent", AGY_USER_AGENT)
     }
 
     pub(crate) fn agy_refresh(&self, refresh: &str) -> Result<Value, FetchError> {
@@ -198,4 +219,178 @@ fn response_bytes(mut response: Response) -> Result<Vec<u8>, FetchError> {
         return Err(FetchError::new("服务未返回额度"));
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::{
+        io::{BufRead, BufReader, Write},
+        net::TcpListener,
+        thread::{self, JoinHandle},
+        time::Instant,
+    };
+
+    struct Request {
+        line: String,
+        headers: Vec<String>,
+        body: Value,
+    }
+
+    fn mock_agy(responses: Vec<(u16, Value)>) -> (String, JoinHandle<Vec<Request>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}/v1internal:", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let mut requests = vec![];
+            for (status, value) in responses {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut socket = loop {
+                    match listener.accept() {
+                        Ok((socket, _)) => break socket,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "missing AGY request");
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("accept: {error}"),
+                    }
+                };
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(&socket);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let mut headers = vec![];
+                let mut length = 0;
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    if header == "\r\n" {
+                        break;
+                    }
+                    let header = header.trim().to_ascii_lowercase();
+                    if let Some(value) = header.strip_prefix("content-length: ") {
+                        length = value.parse().unwrap();
+                    }
+                    headers.push(header);
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                requests.push(Request {
+                    line,
+                    headers,
+                    body: serde_json::from_slice(&body).unwrap(),
+                });
+                let body = value.to_string();
+                write!(
+                    socket,
+                    "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+            requests
+        });
+        (endpoint, server)
+    }
+
+    #[test]
+    fn agy_targets_the_native_cli_backend() {
+        let request = Http::new()
+            .unwrap()
+            .agy_request("test", AGY_ENDPOINT, "retrieveUserQuotaSummary")
+            .build()
+            .unwrap();
+        assert_eq!(
+            request.url().as_str(),
+            "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+        );
+        assert_eq!(
+            request.headers()["user-agent"],
+            "antigravity/cli/1.4.0 (aidev_client; os_type=linux; arch=amd64; cl=1000494485; auth_method=consumer)"
+        );
+    }
+
+    #[test]
+    fn agy_resolves_each_accounts_project_and_sends_cli_version() {
+        let http = Http::new().unwrap();
+        for project in ["account-project-one", "account-project-two"] {
+            let summary = json!({"groups":[{"displayName":"Gemini Models","buckets":[
+                {"bucketId":"gemini-5h","remainingFraction":0.98290926},
+                {"bucketId":"gemini-weekly","remainingFraction":0.97870505}
+            ]}]});
+            let (endpoint, server) = mock_agy(vec![
+                (200, json!({"cloudaicompanionProject":project})),
+                (200, summary.clone()),
+            ]);
+            assert_eq!(http.agy_quota_at("test-token", &endpoint).unwrap(), summary);
+            let requests = server.join().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(
+                requests[0].line,
+                "POST /v1internal:loadCodeAssist HTTP/1.1\r\n"
+            );
+            assert_eq!(
+                requests[0].body,
+                json!({"metadata":{"ideType":"ANTIGRAVITY"}})
+            );
+            assert_eq!(
+                requests[1].line,
+                "POST /v1internal:retrieveUserQuotaSummary HTTP/1.1\r\n"
+            );
+            assert_eq!(requests[1].body, json!({"project":project}));
+            for request in requests {
+                assert!(
+                    request
+                        .headers
+                        .contains(&format!("user-agent: {AGY_USER_AGENT}"))
+                );
+                assert!(
+                    request
+                        .headers
+                        .contains(&"authorization: bearer test-token".into())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn agy_missing_project_never_queries_an_unscoped_summary() {
+        for project in [Value::Null, json!(""), json!(" "), json!(123)] {
+            let (endpoint, server) =
+                mock_agy(vec![(200, json!({"cloudaicompanionProject":project}))]);
+            let error = Http::new()
+                .unwrap()
+                .agy_quota_at("test", &endpoint)
+                .unwrap_err();
+            assert_eq!(error.message, "AGY 未返回账户项目");
+            assert_eq!(server.join().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn agy_auth_and_rate_limit_errors_survive_both_requests() {
+        for status in [401, 429] {
+            for quota_error in [false, true] {
+                let mut responses = vec![];
+                if quota_error {
+                    responses.push((200, json!({"cloudaicompanionProject":"account-project"})));
+                }
+                responses.push((status, json!({})));
+                let (endpoint, server) = mock_agy(responses);
+                let error = Http::new()
+                    .unwrap()
+                    .agy_quota_at("test", &endpoint)
+                    .unwrap_err();
+                assert_eq!(error.invalidate, status == 401);
+                assert_eq!(error.retry_after.is_some(), status == 429);
+                assert_eq!(
+                    server.join().unwrap().len(),
+                    if quota_error { 2 } else { 1 }
+                );
+            }
+        }
+    }
 }

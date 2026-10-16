@@ -1,6 +1,6 @@
 # OMP 原生认证与 opencode-go session 粘性
 
-OMP 18.11.0 的认证、额度报告、reserve、block、rotation 和 429 恢复继续使用原生 AuthStorage。
+OMP 18.11.1 的认证、额度报告、reserve、block、rotation 和 429 恢复继续使用原生 AuthStorage。
 扩展只补齐 opencode-go API Key 的 session 粘性，不固定 Antigravity credential、不执行跨
 provider fallback，也不覆盖原生 `health.model`。
 
@@ -25,7 +25,7 @@ credential ID 作为 `herdr-api-key-sticky-v1` custom entry 写入所属 session
 选择写入器，不能复用最后激活的扩展 API。`session_branch` 会重新绑定新 session 的写入器，
 只恢复该 ID 自己的记录，不复制父 session 的 pin。恢复同一子 session 会替换写入器，旧实例退出不会移除新实例。
 
-OMP 18.11.0 的 `/reset` 与 `/fresh` 会生成不同于日志 session ID 的内部 provider routing ID。
+OMP 18.11.1 的 `/reset` 与 `/fresh` 会生成不同于日志 session ID 的内部 provider routing ID。
 公开 ExtensionContext 和请求事件没有提供这一映射，因此这些请求仍可在进程内保持粘性，
 但对应 pin 无法可靠写入所属日志，也不能承诺跨进程恢复或 collector 的精确账户归因。
 不从请求 payload 的 `prompt_cache_key` 猜测映射；修复需要上游公开有效 routing ID 或认证 hook。
@@ -35,7 +35,7 @@ OMP 18.11.0 的 `/reset` 与 `/fresh` 会生成不同于日志 session ID 的内
 `store-replaced` release、清理旧存储的选择缓存。新存储即使复用相同 credential ID，也会
 重新记录 pin；旧存储尚未完成的异步调用不会覆盖新存储的观察状态。
 
-OMP 18.11.0 仍然只写 API key 的 session affinity，API-key 选择路径（`CredentialSelector.selectApiKey`）
+OMP 18.11.1 仍然只写 API key 的 session affinity，API-key 选择路径（`CredentialSelector.selectApiKey`）
 不读这份 affinity；只有 OAuth 路径（`resolveOAuth`）读。因此本地路由补丁依旧必要，继续位于公开的
 `keys.getWithCredential`、`sessions.release` 和 reset boundary 接口，不修改 Bun runtime。
 普通 request 不再因额度样本刷新或排序分数变化而换号。
@@ -74,7 +74,7 @@ credential ID 捕获（peer 重排行不再错位）。本扩展的粘性 pin �
 generator 管理。
 
 ## OMP 升级
-路由器不依赖 bundle 字节偏移或 minified 私有方法名，只依赖 OMP 18.11.0 的：
+路由器不依赖 bundle 字节偏移或 minified 私有方法名，只依赖 OMP 18.11.1 的：
 
 
 - `keys.getWithCredential`、`keys.source`、`sessions.release`、`sessions.isRestricted`、`sessions.permits`、`limits.markReached`、`limits.rotate`；
@@ -92,7 +92,7 @@ Antigravity 账号选择完全由 OMP 原生实现，本扩展不再改写 syste
 为真才表示真的换了账号。观察器因此只在 `rotated.switched` 时记录 `rotation` release。
 没有可用 sibling 时 rotate 最多等待 5s（`SIBLING_UNBLOCK_WAIT_MAX_MS`）等短暂 block 的
 sibling 恢复，随后返回 `switched: false`——此时账号没变，按旧的真值判断会被误记成 rotation。
-`packages/ai/src/auth/rotation.ts` 在 18.8.1 至 18.11.0 逐字节相同；18.8.1 起新增 `sessionId` 参数并用
+`packages/ai/src/auth/rotation.ts` 在 18.8.1 至 18.11.1 逐字节相同；18.8.1 起新增 `sessionId` 参数并用
 `affinity.allows()` 过滤 sibling，但 `CredentialRotation` 的 `{ switched }` 契约没有再变。
 
 升级后必须验证这些公开接口与 reset boundary 行为：
@@ -138,7 +138,7 @@ node --test integrations/herdr-tps/test/omp-runtime-contract.test.mjs
 该测试调用原生 AuthStorage、SessionManager、上下文重建 helper 和宿主 Tokenizer，事件由 fixture 投递，
 不等同于实际 TUI 命令、在线账户恢复或侧栏现场验证。
 
-本轮验证：`npm run herdr:tps:test` 155/155 通过（含本机 18.11.0 的七组契约检查）；
+本轮验证：`npm run herdr:tps:test` 155/155 通过（含本机 18.11.1 的七组契约检查）；
 `cargo test -p herdr-usage --offline --locked` 116 + 23 + 3 通过；安装 dry-run 的 config/shell/links
 均已就绪，daemon 共享 dry-run 为 `already-shared`，`git diff --check` 通过。
 交互进程仍需在任务结束后重启，再观察真实会话切换与侧栏显示。
@@ -212,6 +212,58 @@ bundle 接口出现次数 18.8.4 → 18.8.6（`grep -ao` 对两份二进制分�
   `npm run herdr:tps:install -- --dry-run`：config、shell、links 均已就绪；
   `share-omp-daemons.mjs --dry-run` → `already-shared`（pro2 daemons 仍共享）。
   本地 sticky pin、TPS reporter 及 herdr-usage 采集链路全部通过，扩展与采集代码无需修改。
+
+### 18.11.1
+
+upstream [`v18.11.0...v18.11.1`](https://github.com/can1357/oh-my-pi/compare/v18.11.0...v18.11.1)
+官方 release 日期 2026-10-15。主要涵盖模型推理与工具交互重试、流式渲染与排版平滑、后台作业树形视图、多模态判决与评测支持、Git 子模块及文件系统健壮性、终端键位与长文本粘贴性能优化：
+
+- **模型适配与推理交互**：
+  - **多模态与图像评测**：`judge()` 与 `judge_batch()` 支持图像附件（本地路径或内嵌图像），跳过不支持视觉的模型；原生 OpenAI Decisions 与 Workers AI 支持图像输入，超限（如 Clef 4 张/4 MiB 限制）时在本地安全拒绝（PR #15471）；
+  - **Anthropic 轮次与重放对齐**：新增 `Tokenizer.countLatestTurn` 与 `isSurvivingAssistant`，修复 Claude 轮次在 `stop`/`length` 截断时的 reasoning 缓存重放与压缩截断点 token 统计（PR #15791）；
+  - **Cursor 稳定性与会话重试**：修复 Cursor 服务端重试工具调用时写入重复 ID 结果的错误（最新结果覆盖旧结果，Issue #15749）；修复 Cursor 轮次流式中断后连续报 `PROVIDER_ERROR` 的问题，重试时自动开启新对话（Issue #15830）；
+  - **提供商重试增强**：对服务商偶发的“暂时不可用”及 `unknown`/`other`/`unspecified` 结束原因启用自动重试（PR #15424）；修复网关在 `response.completed` 前提前关闭 WebSocket 导致轮次异常终止的问题（PR #15628）；
+  - **Vertex 与模型目录参数对齐**：启用 Google Vertex 上 Claude 模型的 1 小时长缓存保留（`cacheRetention: "long"`，PR #15505）；Gemini 4 Argon 在 Vertex/Gemini API 上改用 `thinkingLevel`（PR #15643）；移除 Antigravity 已下线的 Gemini 3.5 Flash 及其别名（PR #15445）；从模型列表中过滤后端标记为 `disabled: true` 的不可用模型（PR #15684）；修正 xAI Grok 4.20 的上下文窗口为 1M（PR #15443）；
+  - **Auth Gateway 内存控制**：修复 broker-backed auth-gateway 在高并发长连接下无界缓存 client session 的问题（Issue #15841）。
+- **任务、作业树与子代理控制**：
+  - **后台作业树形层级**：`/jobs`、`/jobs full` 及 TUI jobs 面板新增树形布局，子代理的后台作业嵌套展示在其所属任务节点下，最活跃的分支排在前面，且仅允许取消当前 agent 自身的作业（PR #15854）；
+  - **子代理查看时的审批 steer**：在子代理视图中输入的 steer 消息可直接引导等待审批的主会话，拒绝工具调用的消息优先于队列中的旧消息投递（PR #15642）；
+  - **批处理容错与 Handle 跨 Cell 解析**：修复 `workpool` 单项报错导致整批作业中断的问题，现继续执行剩余项并分别汇总结果（Issue #15860）；修复 JS Eval 中跨 Cell 的 `completion()` handle 无法解析导致 `wait()` 超时挂起的问题（Issue #15756）。
+- **文件系统、工具与 Git 修复**：
+  - **目录读取与权限保护**：`read` 读取不可读目录时显式报错并将不可读子目录标记为 `[unreadable: …]`（Issue #15769）；`write` 写入以 `#![...]` 开头的 Rust 源码时保留原生文件权限，不再误设为可执行（Issue #15858）；`read :raw` 精确返回闭合行号范围（Issue #15810）；
+  - **Grep 与 AST 匹配**：`grep` 与 `ast_grep` 的 glob 过滤支持匹配目录并自动递归其子目录（如 `src/{api,web}`，Issue #15760）；修复 Tree-sitter 容错恢复模式下可能漏掉语法解析错误导致改写损坏文件的问题（Issue #15530, PR #15851）；
+  - **Git 子模块支持**：修复隔离任务中新增 submodule 的 commit 丢失以及绝对路径/跳转路径死循环问题；修复子模块 pin 补丁应用失败与重命名补丁识别（PR #15459）。
+- **TUI、流式展示与终端兼容性**：
+  - **流式排版防抖**：修复流式 Markdown 表格在行追加过程中列宽抖动跳跃的问题；流式链接与内联 LaTeX 数学公式在闭合前保持闭合格式预渲染，消除闭合时的段落重排（PR #15856, #15864）；
+  - **终端键位与粘贴优化**：修复 Windows Terminal / WSL 环境下退出全屏界面后 Shift+Enter 与 Ctrl+Enter 键位映射失效的问题（PR #15868）；优化单字符逐键投递终端（如 JetBrains Windows Terminal）的大段粘贴性能，避免逐键向终端写出（Issue #15757）；
+  - **转录图片交互**：TUI 转录中的图片占位符与图片节点支持直接点击链接打开源文件（PR #15872）。
+
+逐字节未变（两版本比较中核心契约路径继续一致）：
+`packages/ai/src/auth/` 全部文件（`auth-storage.ts`、`select.ts`、`affinity.ts`、`rotation.ts`、`blocks.ts`、`cascade.ts`、`types.ts`、`oauth.ts`、`store.ts`、`resets.ts`、`usage.ts`、`sqlite-credential-store.ts`）、
+`packages/ai/src/provider-session-state.ts`、
+`packages/coding-agent/src/utils/token-rate.ts`、
+`packages/coding-agent/src/extensibility/shared-events.ts`、
+`packages/coding-agent/src/session/{session-paths.ts}`、
+`commands/launch.ts`、`cli/args.ts`。
+扩展核心监控事件定义、`TokenRateMeter` 算法、认证底层、SessionManager 核心路径、Session JSONL 结构继续保持一致；“API-key 选择路径不读 session affinity”继续成立，本地 session 粘性路由补丁继续完全适用。
+
+bundle 接口出现次数 18.11.0 → 18.11.1（`grep -ao` 对两份二进制分别计数）：
+`getWithCredential` 10 → 10、`markReached` 6 → 6、`onGeneration` 8 → 8、`appendResetBoundary` 3 → 3、
+`appendEntry` 19 → 19、`session_shutdown` 9 → 9、`session_start` 9 → 9、`message_update` 39 → 39、
+`message_end` 64 → 64、`TokenRateMeter` 2 → 2、`willContinue` 39 → 39、`awaitingAsyncWork` 12 → 12。
+核心契约逐项保持稳定。
+
+实机验证与增量补丁升级（`omp-linux-x64` SHA256
+`bf1e86a935b1ea26166a5280001eccea1205e6c21efe1b5853f0fd368c754974`，与 release 构建一致，
+`--version` → `omp/18.11.1`）：
+
+- 本次升级命中 Stencil 增量二进制补丁机制：`.runtime/omp update` 检查到版本差异后，自动下载针对 `18.11.0` 的增量补丁 `omp-linux-x64.patch`（58.9 MB，相比全量 265 MB 节省约 77.8% 带宽）；通过原生 `applyBinaryPatch`（HDiffPatch + zstd）就地应用并校验生成目标二进制 sha256 `bf1e86a935b1ea26166a5280001eccea1205e6c21efe1b5853f0fd368c754974` 后原子替换。
+- 经 `omp-with-tps.mjs --version` 加载 wrapper，正确解析到 18.11.1 runtime（输出 `18.11.1`）。
+- `omp-with-tps.mjs --print "respond with pong only"` 真实请求正常返回 `pong`。
+- `node --test integrations/herdr-tps/test/*.test.mjs`：155 passed（含本机 18.11.1 的七组契约检查）；
+  `cargo test --offline --locked`：ai-monitor 185 + 0、herdr-usage 116 + 23 + 3 passed；
+  `npm run herdr:tps:install -- --dry-run`：config、shell、links 均已就绪；
+  `share-omp-daemons.mjs --dry-run` → `status: already-shared`。
 
 ### 18.11.0
 
