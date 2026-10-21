@@ -6,7 +6,7 @@ use std::{
 };
 /// 配置文件里出现的键。声明为常量而不是结构体字段：解析器是手写的平面
 /// reader（见 `parse_config`），这个表既驱动解析也充当未知键守卫。
-const KEYS: [&str; 17] = [
+const KEYS: [&str; 18] = [
     "refresh_seconds",
     "network_enabled",
     "network_interval_seconds",
@@ -14,6 +14,7 @@ const KEYS: [&str; 17] = [
     "agy_home",
     "agy2_home",
     "opencode_home",
+    "omp_home",
     "grok_home",
     "openrouter_key_file",
     "go2_key_file",
@@ -36,6 +37,7 @@ struct FileConfig {
     agy_home: Option<String>,
     agy2_home: Option<String>,
     opencode_home: Option<String>,
+    omp_home: Option<String>,
     grok_home: Option<String>,
     openrouter_key_file: Option<String>,
     go2_key_file: Option<String>,
@@ -117,6 +119,7 @@ fn parse_config(text: &str) -> Result<FileConfig, String> {
                 "agy_home" => config.agy_home = Some(unquoted.to_owned()),
                 "agy2_home" => config.agy2_home = Some(unquoted.to_owned()),
                 "opencode_home" => config.opencode_home = Some(unquoted.to_owned()),
+                "omp_home" => config.omp_home = Some(unquoted.to_owned()),
                 "grok_home" => config.grok_home = Some(unquoted.to_owned()),
                 "usage_db" => config.usage_db = Some(unquoted.to_owned()),
                 "usage_start" => config.usage_start = Some(unquoted.to_owned()),
@@ -141,6 +144,7 @@ pub struct Config {
     pub agy: PathBuf,
     pub agy2: PathBuf,
     pub opencode: PathBuf,
+    pub omp: PathBuf,
     pub grok: PathBuf,
     pub openrouter_key: PathBuf,
     /// 第二把 OpenCode Go 订阅 Key 的文件，一行纯文本。
@@ -196,6 +200,12 @@ impl Config {
                     .map(PathBuf::from)
                     .unwrap_or_else(|| home.join(".local/share"))
                     .join("opencode"),
+            ),
+            omp: expand(
+                file.omp_home,
+                env::var_os("OMP_HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| home.join(".omp")),
             ),
             grok: expand(
                 file.grok_home,
@@ -261,6 +271,7 @@ codex_home = "/tmp/codex"
 agy_home = "/tmp/agy"
 agy2_home = "/tmp/agy2"
 opencode_home = "/tmp/opencode"
+omp_home = "/tmp/omp"
 grok_home = "/tmp/grok"
 openrouter_key_file = "/tmp/key"
 go2_key_file = "/tmp/go2.key"
@@ -274,6 +285,7 @@ cloudflare_billing_day = 8
         assert_eq!(parsed.refresh_seconds, Some(120));
         assert_eq!(parsed.web_port, Some(8788));
         assert_eq!(parsed.usage_db.as_deref(), Some("/tmp/usage.db"));
+        assert_eq!(parsed.omp_home.as_deref(), Some("/tmp/omp"));
         assert_eq!(parsed.cloudflare_account_id.as_deref(), Some("test_acc"));
         assert_eq!(parsed.cloudflare_api_token.as_deref(), Some("test_token"));
         assert_eq!(parsed.cloudflare_plan.as_deref(), Some("paid"));
