@@ -20,6 +20,8 @@ const REQUEST_BACKFILL_KIND: &str = "omp-request-metadata-backfill-v1";
 // v3 recovers sibling-file pins and clears cache-only account guesses left by
 // earlier account/timeline migrations; usage and price fields are unchanged.
 const API_KEY_TIMELINE_BACKFILL_KIND: &str = "omp-api-key-attribution-backfill-v3";
+const OMP_MODEL_USAGE_BACKFILL_KIND: &str = "omp-model-usage-backfill-v1";
+const CODEX_RECONCILE_BACKFILL_KIND: &str = "codex-reconcile-backfill-v1";
 
 fn main() {
     let database = db_path();
@@ -44,7 +46,7 @@ fn main() {
     );
 
     let roots = paths.omp_session_roots();
-    let mut collector = sources::Collector::new(paths);
+    let mut collector = sources::Collector::new(paths.clone());
     match backfill_once(&mut connection, &roots) {
         Ok(Some(rows)) => println!("provider 回填：{rows} 行"),
         Ok(None) => {}
@@ -61,6 +63,38 @@ fn main() {
         Ok(Some(rows)) => println!("OpenCode Go 账户时间线回填：{rows} 行"),
         Ok(None) => {}
         Err(error) => eprintln!("[warn] OpenCode Go 账户时间线回填失败：{error}（下次启动重试）"),
+    }
+    let mut needs_hourly_reset = false;
+    match omp_model_usage_backfill_once(&mut connection, &roots) {
+        Ok(Some(rows)) => {
+            println!("omp model_usage 回填：{rows} 行");
+            if rows > 0 {
+                needs_hourly_reset = true;
+            }
+        }
+        Ok(None) => {}
+        Err(error) => eprintln!("[warn] omp model_usage 回填失败：{error}（下次启动重试）"),
+    }
+    match codex_reconcile_backfill_once(&mut connection, &paths.codex) {
+        Ok(Some((inserted, deleted))) => {
+            println!("codex 对账回填：插入压缩 {inserted} 行，清理重复 {deleted} 行");
+            if inserted > 0 || deleted > 0 {
+                needs_hourly_reset = true;
+            }
+        }
+        Ok(None) => {}
+        Err(error) => eprintln!("[warn] codex 对账回填失败：{error}（下次启动重试）"),
+    }
+    if needs_hourly_reset {
+        println!("正在重建 usage_hourly 小时归档缓存...");
+        if let Err(e) = connection.execute_batch(
+            "DELETE FROM usage_hourly;
+             UPDATE collect_offset SET cursor = '0' WHERE kind = 'hourly-rollup';"
+        ) {
+            eprintln!("[warn] 重置 hourly 缓存失败: {e}");
+        } else {
+            let _ = db::rollup_closed_hours(&mut connection, sources::now_ms());
+        }
     }
     let mut first = true;
     while !STOPPED.load(Ordering::Relaxed) {
@@ -150,6 +184,30 @@ fn api_key_timeline_backfill_once(
     let rows = sources::backfill_omp_api_key_timeline(connection, roots)?;
     db::save_offset(connection, API_KEY_TIMELINE_BACKFILL_KIND, "1")?;
     Ok(Some(rows))
+}
+
+fn omp_model_usage_backfill_once(
+    connection: &mut rusqlite::Connection,
+    roots: &[std::path::PathBuf],
+) -> rusqlite::Result<Option<usize>> {
+    if db::offset(connection, OMP_MODEL_USAGE_BACKFILL_KIND)?.is_some() {
+        return Ok(None);
+    }
+    let rows = sources::backfill_omp_model_usage(connection, roots)?;
+    db::save_offset(connection, OMP_MODEL_USAGE_BACKFILL_KIND, "1")?;
+    Ok(Some(rows))
+}
+
+fn codex_reconcile_backfill_once(
+    connection: &mut rusqlite::Connection,
+    codex_dir: &std::path::Path,
+) -> rusqlite::Result<Option<(usize, usize)>> {
+    if db::offset(connection, CODEX_RECONCILE_BACKFILL_KIND)?.is_some() {
+        return Ok(None);
+    }
+    let result = sources::backfill_codex_records(connection, codex_dir)?;
+    db::save_offset(connection, CODEX_RECONCILE_BACKFILL_KIND, "1")?;
+    Ok(Some(result))
 }
 
 /// Sleep in short slices so a signal is honoured promptly.

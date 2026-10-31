@@ -1,6 +1,6 @@
 # OMP 原生认证与 opencode-go session 粘性
 
-OMP 18.12.5 的认证、额度报告、reserve、block、rotation 和 429 恢复继续使用原生 AuthStorage。
+OMP 18.14.1 的认证、额度报告、reserve、block、rotation 和 429 恢复继续使用原生 AuthStorage。
 扩展只补齐 opencode-go API Key 的 session 粘性，不固定 Antigravity credential、不执行跨
 provider fallback，也不覆盖原生 `health.model`。
 
@@ -25,7 +25,7 @@ credential ID 作为 `herdr-api-key-sticky-v1` custom entry 写入所属 session
 选择写入器，不能复用最后激活的扩展 API。`session_branch` 会重新绑定新 session 的写入器，
 只恢复该 ID 自己的记录，不复制父 session 的 pin。恢复同一子 session 会替换写入器，旧实例退出不会移除新实例。
 
-OMP 18.12.5 的 `/reset` 与 `/fresh` 会生成不同于日志 session ID 的内部 provider routing ID。
+OMP 18.14.1 的 `/reset` 与 `/fresh` 会生成不同于日志 session ID 的内部 provider routing ID。
 公开 ExtensionContext 和请求事件没有提供这一映射，因此这些请求仍可在进程内保持粘性，
 但对应 pin 无法可靠写入所属日志，也不能承诺跨进程恢复或 collector 的精确账户归因。
 不从请求 payload 的 `prompt_cache_key` 猜测映射；修复需要上游公开有效 routing ID 或认证 hook。
@@ -35,7 +35,7 @@ OMP 18.12.5 的 `/reset` 与 `/fresh` 会生成不同于日志 session ID 的内
 `store-replaced` release、清理旧存储的选择缓存。新存储即使复用相同 credential ID，也会
 重新记录 pin；旧存储尚未完成的异步调用不会覆盖新存储的观察状态。
 
-OMP 18.12.5 仍然只写 API key 的 session affinity，API-key 选择路径（`CredentialSelector.selectApiKey`）
+OMP 18.14.1 仍然只写 API key 的 session affinity，API-key 选择路径（`CredentialSelector.selectApiKey`）
 不读这份 affinity；只有 OAuth 路径（`resolveOAuth`）读。因此本地路由补丁依旧必要，继续位于公开的
 `keys.getWithCredential`、`sessions.release` 和 reset boundary 接口，不修改 Bun runtime。
 普通 request 不再因额度样本刷新或排序分数变化而换号。
@@ -74,7 +74,7 @@ credential ID 捕获（peer 重排行不再错位）。本扩展的粘性 pin �
 generator 管理。
 
 ## OMP 升级
-路由器不依赖 bundle 字节偏移或 minified 私有方法名，只依赖 OMP 18.12.5 的：
+路由器不依赖 bundle 字节偏移或 minified 私有方法名，只依赖 OMP 18.14.1 的：
 
 
 - `keys.getWithCredential`、`keys.source`、`sessions.release`、`sessions.isRestricted`、`sessions.permits`、`limits.markReached`、`limits.rotate`；
@@ -92,7 +92,7 @@ Antigravity 账号选择完全由 OMP 原生实现，本扩展不再改写 syste
 为真才表示真的换了账号。观察器因此只在 `rotated.switched` 时记录 `rotation` release。
 没有可用 sibling 时 rotate 最多等待 5s（`SIBLING_UNBLOCK_WAIT_MAX_MS`）等短暂 block 的
 sibling 恢复，随后返回 `switched: false`——此时账号没变，按旧的真值判断会被误记成 rotation。
-`packages/ai/src/auth/rotation.ts` 在 18.8.1 至 18.12.5 逐字节相同；18.8.1 起新增 `sessionId` 参数并用
+`packages/ai/src/auth/rotation.ts` 在 18.8.1 至 18.14.1 核心契约与返回结构相同；18.8.1 起新增 `sessionId` 参数并用
 `affinity.allows()` 过滤 sibling，但 `CredentialRotation` 的 `{ switched }` 契约没有再变。
 
 升级后必须验证这些公开接口与 reset boundary 行为：
@@ -138,8 +138,8 @@ node --test integrations/herdr-tps/test/omp-runtime-contract.test.mjs
 该测试调用原生 AuthStorage、SessionManager、上下文重建 helper 和宿主 Tokenizer，事件由 fixture 投递，
 不等同于实际 TUI 命令、在线账户恢复或侧栏现场验证。
 
-本轮验证：`npm run herdr:tps:test` 155/155 通过（含本机 18.12.5 的七组契约检查）；
-`cargo test -p herdr-usage --offline --locked` 116 + 23 + 3 通过（ai-monitor 195 通过）；安装 dry-run 的 config/shell/links
+本轮验证：`npm run herdr:tps:test` 155/155 通过（含本机 18.14.1 的七组契约检查）；
+`cargo test --offline --locked`：ai-monitor 198 passed（193+1+4，2 ignored）、herdr-usage 145 passed（117+25+3）；安装 dry-run 的 config/shell/links
 均已就绪，daemon 共享 dry-run 为 `already-shared`，`git diff --check` 通过。
 交互进程仍需在任务结束后重启，再观察真实会话切换与侧栏显示。
 
@@ -212,6 +212,373 @@ bundle 接口出现次数 18.8.4 → 18.8.6（`grep -ao` 对两份二进制分�
   `npm run herdr:tps:install -- --dry-run`：config、shell、links 均已就绪；
   `share-omp-daemons.mjs --dry-run` → `already-shared`（pro2 daemons 仍共享）。
   本地 sticky pin、TPS reporter 及 herdr-usage 采集链路全部通过，扩展与采集代码无需修改。
+
+### 18.14.1
+
+upstream [`v18.14.0...v18.14.1`](https://github.com/can1357/oh-my-pi/compare/v18.14.0...v18.14.1)
+官方 release 日期 2026-10-31（Tag 与 Release 发布于 2026-10-31 01:13 UTC，基于 release tree `c29f7c5`）。包含 21 个 PR / 提交。主要涵盖 Cursor auth-gateway 长连接同道工具执行与 DeepSeek V4.1 Flash 计价、Anthropic 响应体排空连接复用与 128 MB 请求体/图像预算适配、模型 reasoning effort 别名与 mandatory 校验、Codex 原生 steering 记忆与 Daybreak 配置、原生判断凭据脱敏、Factory Droid 路由级图像尺寸计算、`limits.rotate` 选项 `waitForSibling` 与账号策略循环轮换修复、`pi-agent-core` 的 `withInactiveTools` 替代 `SentToolDefinitions.inactiveFor`、超长 intent 追踪放行、启动 prewalk 候选回退对齐、`omp session lease` 会话租约查询 RPC/CLI 与 `FileLock.isHeld`、Ctrl+Q 排队 compaction、`title.refreshAfterPrompts` 标题智能刷新、网页 read 提取 meta 精简降 token、粗粒度时间戳归档缓存修复、Windows 原生搜索与路径符号链接修复、富文本 Slate/Lexical 浏览器 fill、TUI 图形 maxRows 高度约束回调、会话树行重叠与特殊字符处理、BTW 历史 IME 硬件光标定标修复、后台任务详情视图保持：
+
+- **模型适配、推理网关与结构化输出**：
+  - **Cursor auth-gateway 长连接与工具传参修正**：通过 `omp auth-gateway` 接入的 Cursor 运行限定为客户端自身工具（全部通过 MCP 广播），不再暴露文件、终端等 Cursor 内置工具（PR #17382）；修复 Cursor 工具调用形态与参数校验失败问题，网关保持 Cursor 连接开放并支持同道交付客户端执行结果（保持最长 30 分钟），解决 Composer 盲调用与空 stop 缺陷；定价库补充 Cursor DeepSeek V4.1 Flash 1017 计费支持（PR #17390）；
+  - **Anthropic 响应体排空连接复用与 128 MB 载荷/图片预算**：Anthropic 兼容 endpoint 在 `message_stop` 后最多 drain 2.5 秒响应体以保留底层 TCP 连接，避免逐轮重新握手建连（PR #17432）；跟随 Anthropic Messages API 请求体上限提升至 128 MB（原 32 MB），将长对话内联图像预算从 32 MB 提升至 120 MB，最新消息图片可使用 8 MB 预留缓冲区；当文本/参数/工具定义过长可能超限时自动丢弃最旧图像（PR #17492）；
+  - **推理努力映射（Reasoning Effort & EffortMap）**：模型请求思考努力程度 clamping 优先经过模型的 `effortMap` 别名解析，避免被降级到不被支持的更低档位；网关保留 `/v1/models` 暴露的 `reasoning_effort_map` 与 `reasoning_required` 特性（例如仅支持 low/high/max 时，medium 映射到 high，关闭思考仍发送合法档位）（PR #17395）；
+  - **Codex 原生 Steering 记忆与 Daybreak 配置**：记录 Codex 原生 lane 拒绝 live steering 的状态，并在同账号/同 endpoint/同模型会话中排队后续操作 4 小时，避免会话丢失响应并盲目重试（Issue #14158, PR #17438）；新增 `providers.openai-codex.daybreak` 配置项（默认开启）及 `codexAccessPrograms` 流选项，允许关闭 ChatGPT 账号自动请求 Daybreak Blue cyber access program（PR #17508）；
+  - **原生判断凭据脱敏**：修复 TypeSafe、OpenRouter Decisions、OpenAI Decisions、Workers AI 原生判断请求中未脱敏状态暴露凭据的问题（PR #17443）；
+  - **Factory Droid 路由级图像预算计算**：按各路由实际发送内容计算图片大小（Gemini 模型计入展开工具 schema，不因其它模型思考扣减；Claude 模型计入撤回工具定义）（PR #17492）。
+- **任务规划、工具审批与子代理控制**：
+  - **账号策略轮换与 `limits.rotate` 选项扩充**：修复账号策略恢复中在凭据被拒后循环轮换被拒绝的凭据且在额度耗尽后无谓等待 sibling 解封的问题；`RotateCredentialOptions` 新增 `waitForSibling` 可选参数（设为 `false` 可在拉黑失败凭据时跳过等待 sibling 解封）（PR #17439）；
+  - **工具定义与失活工具处理（Breaking Change）**：`@oh-my-pi/pi-agent-core` 中 `SentToolDefinitions.inactiveFor(messages, tools)` 替换为 `withInactiveTools(context)`，并清理陈旧的 `inactiveTools`；`transformProviderContext` 接收请求的 `inactiveTools`（PR #17492）；
+  - **超长 Intent 追踪放行**：移除超长 intent 长度限制，长 tool-call intent 在开启 tracing 时不再阻塞工具执行（Issue #13140, PR #17486）；
+  - **Prewalk 候选回退对齐**：启动期 prewalk 在 `prewalk.into` 对应角色首选候选不可用时正确预置后续 fallback 候选，与 `/prewalk` 和 `/new` 行为对齐（PR #17373）；
+  - **会话租约查询 RPC & CLI**：新增 `omp session lease [--json] -- <session-id>...` 及 RPC 命令 `get_session_lease`，可安全检查并报告会话租约归属（`{"held": [...], "unknown": [...]}`）而不触发 fork 或抢占所有权；底层增加 `FileLock.isHeld(path)` 与 `isFileLockHeld`（PR #17428）；
+  - **排队 Compaction**：支持在执行过程中通过 Ctrl+Q 发送排队 `/compact`，在 agent yield 时执行而不是立即打断当前轮次（PR #17397）；
+  - **会话标题自适应重生成**：新增 opt-in 选项 `title.refreshAfterPrompts`，每隔 N 次操作员输入由 judge 模型评估当前标题是否契合对话并自动重新生成（用户手动设置的标题永不覆盖）（PR #17443）。
+- **工具链、LSP 与系统性能优化**：
+  - **Web 读取 meta 标签精简降 token**：网页 `read` 仅完整保留 title、description、author 和 dates 等 meta 标签，其余仅保留标签名，页面 token 消耗降低约 6%（PR #17393）；
+  - **归档文件读取缓存一致性修复**：修复在 ext4 等粗时间戳文件系统上，毫秒内原地覆写同尺寸 zip/tar/asar/ISO 归档后 `read` 工具读取到旧内容的陈旧缓存问题（PR #17389）；
+  - **Windows 原生工具与符号链接修复**：修复 Windows 上原生搜索（bash 内部 `fd`、grep、glob）在遇到 `.`/`..` 或 `/` 路径分隔符时的语法错误；修复 Windows 上 glob 和 find 将软链接自身元数据而非目标文件大小及 mtime 上报的问题；修复 bash 内置 `rsync` 忽略跨级 filter 的问题（PR #17428 等）；
+  - **浏览器自动化交互增强**：修复 Chrome 中 `fill` 富文本编辑器（Slate/Lexical）时内容残留或编辑器崩溃的问题，支持空内容清空（PR #17417）；Computer-use 脚本支持等待操作触发弹出的窗口并在单次调用中读取（`wait`）（PR #17391）；
+  - **插件 Git 安装源标准化**：修复 `omp install git:github.com/user/repo` 误将 `git` 识别为主机名的问题（Issue #17436, PR #17437）。
+- **TUI 终端与排版显示**：
+  - **图表与图形高度约束适配（maxRows）**：`FigureMarkdown`、`SvgFigure` 和 `TableChartFigure` 引入 `maxRows` 回调，使低于屏幕高度的表面能够自适应缩放图表，设置为 0 时隐藏图表且不拖慢 transcript 渲染完成（Issue #15661, PR #15853）；
+  - **会话树行重叠与特殊字符处理**：会话树列表行在遇到消息、工具参数或标签含有 `\r`（Carriage Return）或 Unicode 行/段分隔符（`U+2028`, `U+2029`）时自动折叠处理，防止列表行重叠错位，同时保留预览窗口内的多行排版格式（PR #17430）；
+  - **BTW 输入法光标定标修复**：修复硬件光标开启时，BTW 历史的 `Follow up:` 输入框中 IME 候选拼写文字显示在左边界而不是输入光标处的问题（Issue #17427, PR #17429）；
+  - **后台任务列表视图保持**：修复 Background jobs 面板在用户阅读已完成任务详情时自动移出列表的问题；当前选中任务保持展示直到手动切换（PR #17506）。
+
+逐字节未变（两版本比较中核心契约路径继续一致）：
+`packages/ai/src/auth/` 核心契约文件（`auth-storage.ts`、`affinity.ts`、`rotation.ts`、`blocks.ts`、`store.ts`、`resets.ts`、`usage.ts`、`sqlite-credential-store.ts`）、
+`packages/ai/src/provider-session-state.ts`、
+`packages/coding-agent/src/utils/token-rate.ts`、
+`packages/coding-agent/src/extensibility/shared-events.ts`、
+`packages/coding-agent/src/session/session-paths.ts`、
+`commands/launch.ts`、`cli/args.ts`。
+认证模块中 `selectApiKey`（API-key 路径）依旧不读 session affinity；`rotation.ts` 契约不变，`limits.rotate` 新增的可选参数 `waitForSibling?: boolean` 不影响签名解构（本地包装层采用 `...rest` 参数无感透明透传），`CredentialRotation` 的 `{ switched }` 契约不变；`TokenRateMeter` 算法与事件定义未受任何影响，本地 session 粘性路由补丁继续完全适用。
+
+bundle 接口出现次数 18.14.0 → 18.14.1（`grep -ao` 对两份二进制分别计数）：
+`getWithCredential` 8 → 8、`markReached` 6 → 6、`onGeneration` 8 → 8、`appendResetBoundary` 3 → 3、
+`appendEntry` 19 → 19、`session_shutdown` 9 → 9、`session_start` 11 → 11、`message_update` 39 → 39、
+`message_end` 64 → 64、`TokenRateMeter` 2 → 2、`willContinue` 39 → 39、`awaitingAsyncWork` 12 → 12。
+全部 12 个核心接缝符号计数 100% 保持一致（差值为 0），核心认证与 TPS 接缝符号全部健康。
+
+实机验证与增量补丁升级（`omp-linux-x64` SHA256
+`02d76a0cfeee473ffa387f50cf0378b0de1c44684c83e67ca27ba4d717cfb0d0`，体积 276,416,688 bytes / 263.61 MB，与 release 构建一致，
+`--version` → `omp/18.14.1`）：
+
+- 本次升级命中 Stencil 增量二进制补丁机制：`.runtime/omp update` 检查到版本差异后，自动下载针对 `18.14.0` 的增量补丁 `omp-linux-x64.patch`（62.0 MB，相比完整二进制约 263.61 MB 节省约 76.48% 带宽）；通过原生 `applyBinaryPatch`（HDiffPatch + zstd）就地应用并校验生成目标二进制 sha256 `02d76a0cfeee473ffa387f50cf0378b0de1c44684c83e67ca27ba4d717cfb0d0` 后原子替换。
+- 经 `omp-with-tps.mjs --version` 加载 wrapper，正确解析到 18.14.1 runtime（输出 `18.14.1`）。
+- `node --test integrations/herdr-tps/test/*.test.mjs`：155 passed（含本机 18.14.1 的七组契约检查）；
+  `cargo test --offline --locked`：ai-monitor 198 passed（193+1+4，2 ignored）、herdr-usage 145 passed（117+25+3）；
+  `npm run herdr:tps:install -- --dry-run`：config、shell、links 均已就绪；
+  `share-omp-daemons.mjs --dry-run` → `status: already-shared`。
+
+### 18.14.0
+
+upstream [`v18.13.3...v18.14.0`](https://github.com/can1357/oh-my-pi/compare/v18.13.3...v18.14.0)
+官方 release 日期 2026-10-29（Tag 与 Release 发布于 2026-10-29 18:25 UTC）。包含 50 个 PR / 提交（基于 release tree `31147f9`）。主要涵盖 Auth Gateway 模型按需加载与 scoped client 精确解析（`ModelResolveOptions`）、账号策略 priority 优先于缺失用量报告、凭据用量会话初始化预取、Anthropic mTLS 双向认证支持、Codex capacity 错误遵循 `Retry-After`、Mistral 思考回放与 DeepSeek 思考内容持久化兼容、受限目录审批路径覆盖（`AgentTool.approvalRestrictionPaths`）、Computer 审批三态与无人值守控制、任务文件输入支持（`task.file=true`）、Prewalk 规划与交接模型配置（`prewalk.from`/`into`）、会话拾取器置顶 Pin/Unpin（Alt+K）、内置原生 rsync 与 ast-grep（sg）、自动监控文件系统变动（移除手动扫描缓存）、LSP 跨工作树引用与诊断防漏报、带提供商前缀模型精确选择校验、Git Guard 多工作树共享保护、Chrome 原生 WebMCP 控制、TSP `json` 交互式展开展示、流式代码块滚动回滚保留、TspEditorProps.typeahead 提前键入缓存、远程会话桌面协议文件链接（`PI_LINK_SCHEME`）、扩展自定义 Assistant 文本渲染与交互链接 scheme、`out://` 多达 64KiB 中间流式输出支持：
+
+- **模型适配、推理网关与结构化输出**：
+  - **Auth Gateway 模型解析与按需加载**：auth-gateway 模型解析器升级接收 `ModelResolveOptions`（含原生 API wire 与 scoped client accepted grants），限定 scoped client ID 不再回退扫描全部模型，而是挑选最佳授权候选；Provider 改为按需加载（load on demand），显著降低冷启动开销与内存占用；
+  - **账号策略优先级与凭据用量预取**：当用量信息临时不可用时，账号策略 `priority` 优先于缺失的 usage report 生效，保证新会话停留在首选账号（PR #15124）；凭据用量信息在会话初始化阶段预取，不触发选择、pinning 或提前推进 OAuth 轮换；
+  - **Anthropic mTLS 支持与模块拆分**：支持通过 `CLAUDE_CODE_CLIENT_CERT` 和 `CLAUDE_CODE_CLIENT_KEY` 环境变量启用 Anthropic mTLS 连接；重构拆分 Anthropic 请求头与端点助手模块；
+  - **Codex 与 Claude 速率限制及流式错误修复**：Codex 在 WebSocket 与 SSE 上的容量错误（capacity-error）重试正确遵循上游 `Retry-After` 延迟，修复忽略延迟过早重试的问题（PR #17362）；Codex 和 Claude 速率限制重置提示改为仅在最后 6 小时内跨对话/窗口提醒一次；
+  - **Mistral 思考回放与 DeepSeek 推理兼容**：修复 LiteLLM 上 Mistral 思考消息回放导致 `422 extra_forbidden` 错误的问题；修复 Mistral 托管 DeepSeek 会话包含 assistant reasoning history 时后续轮次的 HTTP 422 报错（PR #17366, PR #17377）；Mistral 推理模型的思考流式内容完整呈现在会话转录并持久保留给后续回合；
+  - **Cursor 系统提示词与 400 轮换恢复**：修复 Cursor 模型在后续轮次或在已有消息前置时丢失包含上下文文件、skills、rules 的 OMP 系统提示词的问题（PR #17325）；修复 Cursor 跨中途中断恢复自动重试收到 0-token 提供商错误时中断的问题，重试自动在轮换会话上继续（PR #17319）；
+  - **Factory Droid 角色默认与图片模型回退**：Factory Droid 图像模型成为 `image` 角色的首选，使得只需 Factory 登录即可直接使用 `generate_image`（PR #17351）；修复 Publisher 命名空间模型 ID（如 `ds/deepseek-flash`）的 DeepSeek V4.1 Flash 图像附件被意外丢弃的问题（PR #16470）；Factory 图像预算主动驱逐旧的计算机屏幕截图，避免 GPT/Grok 遭遇 HTTP 413 载荷超大错误（PR #16564）；
+  - **原生 Judge API User-Agent 与 TypeSafe 认证**：原生 Judge 请求补齐 `omp/<version>` User-Agent（PR #17311）；修复配置 `TYPESAFE_BASE_URL` 时 TypeSafe 认证校验失败的问题；
+  - **长连接与心跳保活**：修复长时间运行的 pi-native 轮次在收到首个事件前被 fetch/proxy 超时终止的问题，提供 keepalive 支持和可配置的首事件超时（PR #17364）。
+- **任务规划、工具审批与子代理控制**：
+  - **受限目录审批覆盖（`approvalRestrictionPaths`）**：`@oh-my-pi/pi-agent-core` 新增 `AgentTool.approvalRestrictionPaths`，允许工具主动上报所读取的路径列表，使受限目录审批能一次性覆盖所涉路径，无需逐个路径单独审批；修复缓存目录授权未完整覆盖请求中所有目标的问题（PR #17309）；
+  - **Computer 审批三态与无人值守控制**：新增 `tools.approval["computer.control"]` 审批模式，支持在专用机器上允许无人值守前台控制或静默拒绝，避免每次弹出交互提示（PR #16917）；
+  - **任务文件输入支持（`task.file=true`）**：子代理指令支持直接从 UTF-8 文件路径或 `local://` URL 读取，自动记录提交路径及其 SHA-256 哈希（PR #17133）；
+  - **Prewalk 规划与交接模型配置**：新增 `prewalk.from` 与 `prewalk.into` 设置项选择规划模型与交接目标模型（默认 `@default` → `@smol`）；支持通过 `/prewalk [into]` 与 `/prewalk restart [from] [into]` 临时覆写单次指令（PR #17373）；
+  - **会话拾取器会话 Pin/Unpin**：在 resume picker 中支持通过 Alt+K / Alt+Shift+K（或映射 `app.session.pin`/`app.session.unpin`）固定或取消固定会话，已固定的会话置顶且在搜索中优先排序（PR #9837）；
+  - **子代理与作业通信可靠性**：修复 wait 工具在对等节点回复到达前将对等任务确认误判为最终答案的问题，确保 wait 正确阻塞等待真正的 reply（PR #17176）；修复已取消 OAuth refresh 请求级联导致整个会话中断的问题（PR #17290）；
+  - **Hindsight 记忆检索失败显式告警**：Hindsight 记忆召回与保留失败时产生显式警告通知，取代以往无感丢失（PR #17278）。
+- **工具链、LSP 与系统性能优化**：
+  - **移除 Bun 事件循环让渡 Workaround**：`@oh-my-pi/pi-agent-core` 移除 `pi-agent-core/utils/yield` 中的 Bun 事件循环变通逻辑，流式传输或工具调用之间不再插入协作性休眠；
+  - **内置原生 rsync 与 ast-grep（sg）**：Bash 工具内建与 rsync 3.5.1 协议（v29-33）兼容的原生 `rsync`（支持本地拷贝、SSH `-e` 远程 shell、`rsync://` 守护进程，跨 Linux/macOS/Windows）；原生内置 `ast-grep`（别名 `sg`），提供结构化代码搜索与重构；
+  - **文件系统自动监控与搜索优化**：移除手动文件系统扫描缓存 API（`invalidateFsScanCache`）与环境变量；原生引擎自动追踪文件系统变动；原生搜索、glob 与 bash 内置 `rg`/`grep`/`fd`/`find`/`ast-grep` 支持在取消或超时时即时停止；内置 `rg` 与递归 `grep` 支持并行搜索并保证路径有序输出；
+  - **LSP 诊断稳定性与多工作树支持**：全面改进 LSP 诊断在冷启动、push-diagnostics、save-only 服务器及多文件编辑下的可靠性；防止未响应的诊断文件被虚假标记为 clean（PR #17293）；支持同级 Git worktrees 跨工作区符号引用解析（PR #16271）；
+  - **精确模型选择器与报错建议**：通过 `--model`、配置文件、roles 或 subagent 指定带 provider 前缀的模型名时，强制要求精确匹配模型 ID 或 alias，不再隐式选择 sibling 模型，不匹配时提供清晰建议（PR #16297）；
+  - **Git Guard 多工作树共享保护**：开启 `bash.gitGuard` 时，安全运行 checkout/switch/restore/reset/stash，并将拒绝操作限制在与其他会话共享的签出树，保留未提交修改防止意外丢失（PR #17349）；
+  - **Chrome 原生 WebMCP 控制**：WebMCP 改用通过 Chrome 原生 WebMCP（WebMcpController，基于 Puppeteer Page）支持，移除旧版页面 Hook 注入方案（PR #16756）；
+  - **自定义工具加载器重构**：自定义工具加载器构造函数首个参数调整为当前工作目录 `cwd`，由加载器自身解析宿主 SDK；
+  - **Stats 性能提升与端口冲突解决**：`omp stats` 大历史同步性能提升 2-5 倍；修复多控制面板同步冲突与端口占用问题，自动挑选空闲端口。
+- **TUI 终端与排版显示**：
+  - **交互式 JSON 树展开展示（TSP `json`）**：新增 TSP `json` 类型，终端将 raw JSON（如 eval 中返回的 Python 字典和列表）渲染为交互式可折叠的树形视图；
+  - **流式代码块滚动回滚保护**：修复终端在闭合代码块 fence 到达前将滚出屏幕的行丢失的问题，已完成代码行在 scrollback 中完整保留（PR #17333）；
+  - **提前键入缓存（TspEditorProps.typeahead）**：支持在终端程序尚无法读取输入时保留用户键入文本并在光标处显示，待可接收时自动提交；
+  - **远程会话主机限定文件链接**：新增 `PI_LINK_SCHEME` 与 `PI_LINK_HOST`，支持 SSH/tmux 远程会话的文件链接通过桌面协议处理器在本地打开（PR #15855）；
+  - **扩展自定义 Assistant 文本渲染与交互链接**：支持扩展通过 `extensionRenderers.assistantText` 自定义渲染并在单个回复上重新渲染（PR #16238）；支持注册自定义交互链接 scheme（PR #16239）；
+  - **即时流式输出 `out://`**：支持智能体通过向 `out://` 写入 Markdown（或 bash `> out://`）发送多达 64 KiB 的阶段性反馈，而无需结束当前任务；
+  - **智能图表判断（Judge-driven Auto Graph）**：`tui.autoGraph` 默认启用 `auto`，利用本地 TypeSafe Judge 模型优化图表方向识别，避免错误将页面号、步骤号等普通数字绘制成图表；
+  - **终端退出标题恢复**：修复在不支持 title-stack 的终端（包括 Windows 控制台）退出后无法恢复原始终端标题的问题（PR #17321）。
+
+逐字节未变（两版本比较中核心契约路径继续一致）：
+`packages/ai/src/auth/` 核心契约文件（`auth-storage.ts`、`affinity.ts`、`rotation.ts`、`blocks.ts`、`store.ts`、`resets.ts`、`usage.ts`、`sqlite-credential-store.ts`）、
+`packages/ai/src/provider-session-state.ts`、
+`packages/coding-agent/src/utils/token-rate.ts`、
+`packages/coding-agent/src/extensibility/shared-events.ts`、
+`packages/coding-agent/src/session/session-paths.ts`、
+`commands/launch.ts`、`cli/args.ts`。
+认证模块中 `selectApiKey`（API-key 路径）依旧不读 session affinity；`rotation.ts` 契约不变，`CredentialRotation` 的 `{ switched }` 契约不变；`TokenRateMeter` 算法与事件定义未受任何影响，本地 session 粘性路由补丁继续完全适用。
+
+bundle 接口出现次数 18.13.3 → 18.14.0（`grep -ao` 对两份二进制分别计数）：
+`getWithCredential` 8 → 8、`markReached` 6 → 6、`onGeneration` 8 → 8、`appendResetBoundary` 3 → 3、
+`appendEntry` 19 → 19、`session_shutdown` 9 → 9、`session_start` 11 → 11、`message_update` 39 → 39、
+`message_end` 64 → 64、`TokenRateMeter` 2 → 2、`willContinue` 39 → 39、`awaitingAsyncWork` 12 → 12。
+全部 12 个核心接缝符号计数 100% 保持一致（差值为 0），核心认证与 TPS 接缝符号全部健康。
+
+实机验证与增量补丁升级（`omp-linux-x64` SHA256
+`e7dd2b606c4ebe9d1a7bcfad1b8820db968cd6b05409fed1c6bc8db0b6a95a8f`，体积 276,244,656 bytes / 263.45 MB，与 release 构建一致，
+`--version` → `omp/18.14.0`）：
+
+- 本次升级命中 Stencil 增量二进制补丁机制：`.runtime/omp update` 检查到版本差异后，自动下载针对 `18.13.3` 的增量补丁 `omp-linux-x64.patch`（66.1 MB，相比完整二进制约 263.45 MB 节省约 74.91% 带宽）；通过原生 `applyBinaryPatch`（HDiffPatch + zstd）就地应用并校验生成目标二进制 sha256 `e7dd2b606c4ebe9d1a7bcfad1b8820db968cd6b05409fed1c6bc8db0b6a95a8f` 后原子替换。
+- 经 `omp-with-tps.mjs --version` 加载 wrapper，正确解析到 18.14.0 runtime（输出 `18.14.0`）。
+- `node --test integrations/herdr-tps/test/*.test.mjs`：155 passed（含本机 18.14.0 的七组契约检查）；
+  `cargo test --offline --locked`：ai-monitor 198 passed（193+1+4，2 ignored）、herdr-usage 142 passed（116+23+3）；
+  `npm run herdr:tps:install -- --dry-run`：config、shell、links 均已就绪；
+  `share-omp-daemons.mjs --dry-run` → `status: already-shared`。
+
+### 18.13.3
+
+upstream [`v18.13.2...v18.13.3`](https://github.com/can1357/oh-my-pi/compare/v18.13.2...v18.13.3)
+官方 release 日期 2026-10-28（Tag 与 Release 发布于 2026-10-28 12:49 UTC）。包含 49 个 PR / 提交（基于 release tree `413d278`）。主要涵盖 OpenAI 兼容 chat-completions 丢弃思考（no reasoning replay）上下文估算与过早自动压缩修复、Claude 签名思考遇到 429 速率限制快速链式回退（`retry.rateLimitWalksChain`）、Kimi Code 模型权威发现与按凭据缓存（并入 K3.1 Pro / K3.1 Pro Highspeed 及思考元数据）、DeepSeek V4.1 Flash 1017 接入 Factory Droid 且关闭思考时不降级、Codex 402 付费阻断容错与 LiteLLM 多页全量模型发现、RPC 手动压缩进度感知事件（`manual_compaction_start`/`manual_compaction_end`）、会话拾取器就地重命名（F2）、`/annotate` 代码批注草稿暂存恢复与精确行号标记、终端增强粘贴与图片拖拽挂载、全套核心包 Bun 依赖升级至 ≥1.4.4、单次中断自唤醒抑制修复与 prewalk/plan-yolo 交接模型保持：
+
+- **模型适配、推理网关与结构化输出**：
+  - **Chat-completions 思考丢弃上下文估算修复**：修复在不回放思考（no reasoning replay）的 OpenAI 兼容提供商上，估算上下文时将本该丢弃的思考计入、导致远未达到阈值即过早触发自动压缩的问题（Issue #15797, PR #17231）；
+  - **Claude 带签意思考 429 快速链式回退**：新增配置 `retry.rateLimitWalksChain`（默认 false），开启后在带有 Claude 签名思考的回合遇到 429 速率限制时，立即切换到 `retry.fallbackChains` 中的下一个模型，无需耗尽 `retry.maxRetries` 反复重试当前受限模型（PR #17232）；
+  - **Kimi Code 权威发现与缓存**：模型发现转为权威发现并按凭据缓存；将 K3.1 Pro 和 K3.1 Pro Highspeed 纳入内建 Kimi Code 目录，并保留实时思考元数据（PR #17224）；
+  - **DeepSeek V4.1 Flash 1017 接入 Factory Droid**：为拥有 Factory 1017 标识的账号接入 DeepSeek V4.1 Flash 1017；其 Baseten 路由关闭思考时直接禁用推理，不再降级为 low effort（PR #17234）；
+  - **Codex 402 付费阻断容错与 LiteLLM 全页模型发现**：Codex 模型刷新在部分账号返回 HTTP 402 时，仍正常列出拥有权限账号的模型（Issue #17198, PR #17200）；LiteLLM 发现完整读取 `/v2/model/info` 全部页面后再决定模型名册，修复先前仅读取前 50 条导致后续模型被隐藏的问题，且分页异常时不缓存不完整页（PR #17237）；
+  - **OpenAI Responses 与 Codex Responses 托管搜索模型修正**：修正托管搜索选择模型，由 GPT-5.6 Luna 纠正为 GPT-6 Luna；修复当活动模型本身即为搜索目标且为克隆/重构对象时的重复请求问题（PR #17202）。
+- **任务规划、工具审批与子代理控制**：
+  - **RPC 手动压缩进度感知事件**：手动压缩（RPC `compact`、`/compact`、扩展 `ctx.compact()`）发射 `manual_compaction_start` 和 `manual_compaction_end` 会话事件，供 RPC 宿主跟踪压缩进度（PR #17247）；
+  - **Prewalk / Plan-YOLO 模型与 Effort 状态保持**：修复在 prewalk 或 plan-yolo 交接后恢复会话、或唤醒已挂起/恢复的子代理时回退到规划模型的问题，正确继承交接后切换的目标模型与思考预算（PR #17229）；
+  - **后台作业中断与唤醒隔离**：修复单次中断（Esc、RPC `abort`、ACP cancel、collab guest stop、扩展 `ctx.abort()`）导致会话静默停止自唤醒后台作业结果的问题；未中断实际运行或排队作业的信号不再压制唤醒，且中断恢复后后续轮次正常唤醒（PR #17243）；
+  - **子代理 `/tan` 克隆 Ask 工具运行保持**：修复 `/tan` 克隆在调用 `ask` 工具时意外退出且返回空结果的问题，克隆持续运行并将最终答案交付父代理（PR #17223）；
+  - **RPC 会话就绪状态（`session_settled`）准确上报**：RPC 会话在 failed `todo` 调用为下个 prompt 排队提醒后，正确上报 settled（`isSettled: true`、`session_settled`），不再虚假保持繁忙（PR #17238）；
+  - **Ask 提示词决策上下文前置提醒**：更新 `ask` 系统提示，引导模型在弹出交互对话框前先向用户阐述缺失的关键决策上下文（PR #17242）。
+- **工具链、LSP 与系统性能优化**：
+  - **全套核心包 Bun 引擎版本要求升级**：所有核心包（`@oh-my-pi/pi-agent-core`、`pi-ai`、`browser-relay`、`pi-catalog`、`pi-coding-agent`、`collab-web`、`pi-mnemopi`、`pi-natives`、`omptype`、`snapcompact`、`omp-stats`、`pi-tui`、`pi-utils`、`pi-wire`）Bun engine 要求升级至 `≥1.4.4`；
+  - **Eval 工具网桥别名支持**：`tool.<name>(…)` 完整支持 `xd://<name>` 与 Claude Code 风格 `mcp__<server>__<tool>` 拼写，未就绪工具精准报错而非笼统报 "Unknown tool"（Issue #17250, PR #17252）；
+  - **Managed-skills 根目录符号链接放行**：受管技能根目录保护逻辑放行目标为目录的符号链接，只拒绝断链或非目录软链（PR #17201）；
+  - **嵌入式 Shell 交互式 PTY 输入直通**：修复 zsh/fish 环境下 `!` 交互式命令（如更新确认）因未透传按键无限等待的问题，运行中按键直通子进程，Esc 取消（Issue #17210, PR #17213）；
+  - **浏览器中继标签 Worker 隔离清理**：修复终止或崩溃的行内浏览器 tab worker 未断开 relay 连接导致 Chrome 持续提示 "started debugging this browser" 的问题（PR #17212）；
+  - **上下文 Rollover 避免无效死循环**：修复在固定 prompt 与工具 schemas 已超出恢复区间时，实验性 context rollover 反复触发的无益消耗（Issue #17205, PR #17206）；
+  - **启动 Ctrl+D 优雅退出**：修复延迟扩展启动过程中按下 Ctrl+D 报扩展退出错误并以退出码 1 退出的问题，现干净退出（Issue #17259, PR #17260）；
+  - **配置分层检视 `omp config list --scope`**：新增 `--scope global|project` 选项，仅输出指定层级配置原生值，保留路径作用域配置结构便于全局编辑（PR #17246）；
+  - **MCP 挂载通知开关 `tools.xdevNotices`**：新增 `tools.xdevNotices: false`，可单独隐藏 MCP 服务器挂载时的 `xd://: mounted …` 提示，无需开启全局静默启动（PR #17263）；
+  - **GitHub `/review` PR Diff 快照冻结**：修复后台拉取刷新导致 diff 链接打开错位文件的问题，Diff URL 锁定至构建请求时的冻结快照（PR #16310）。
+- **TUI 终端与排版显示**：
+  - **会话拾取器就地重命名（F2）**：在 resume picker 中支持按 F2 打开重命名对话框，直接保存用户标题无需加载会话，并禁止对正在运行的会话改名以防分叉（PR #17262）；
+  - **顾问卡片折叠行数限制**：新增 `display.advisorCollapsedLines` 配置项，允许限制折叠态 Advisor 预览卡片的最大行数（PR #17228）；
+  - **`/annotate` 代码批注草稿暂存与恢复**：批注浮层在未提交直接退出（Esc/关闭）时保留草稿，支持恢复任意会话草稿或显式放弃；反馈消息精确标记来源行号，即使空行或重复行亦清晰可辨（PR #17271, PR #17230）；
+  - **终端增强粘贴（Enhanced Paste）与拖拽图片原生挂载**：在 Tern/kitty 等支持增强粘贴的终端中，粘贴操作精准路由至当前激活对话框输入框（而非底层隐藏提示词区）；粘贴或拖入图片文件直接作为附件挂载，而非键入文件路径；
+  - **实时工具卡片保留模型 `i` 意图字段**：运行中工具卡片保留并展示模型的 `i` 意图说明（此前在参数剥离时遗失），实时呈现具体行为描述（PR #17197）；
+  - **作业进度卡片绘制完整比例**：修复作业监控卡片在 `140/190` 进度时仅重绘分子 `140` 的问题，HUD pill 与状态栏完整呈现 `140/190`（PR #17226）；
+  - **Kitty 协议图片注销延迟**：Kitty 滚动条中 WebP/JPEG 图像在会话恢复后保持可见，图像退役保留至格式转换完成（Issue #17220, PR #17221）；
+  - **终端退出 DA1 哨兵同步排空**：退出 omp 时等待终端回复最后的 DA1 哨兵响应，消除类似 Tern `tsp;e;{"ev":"ack",…}` 的终端应答残留在退出后 shell 提示符中的现象；
+  - **TUI 选择列表禁用裸 `j`/`k` 导航**：修复未配置 `j`/`k` 时扩展 `ui.select` 对话框将其作为导航键、导致输入 `ok` 时默认选项意外反转的问题（PR #17255）；
+  - **移除弃用协议 TSP `t` (theme) 主题同步**：清理不再需要的 surface theme 同步协议及 `TspPalette` 定义。
+
+逐字节未变（两版本比较中核心契约路径继续一致）：
+`packages/ai/src/auth/` 核心契约文件（`auth-storage.ts`、`affinity.ts`、`rotation.ts`、`blocks.ts`、`store.ts`、`resets.ts`、`usage.ts`、`sqlite-credential-store.ts`）、
+`packages/ai/src/provider-session-state.ts`、
+`packages/coding-agent/src/utils/token-rate.ts`、
+`packages/coding-agent/src/extensibility/shared-events.ts`、
+`packages/coding-agent/src/session/{session-paths.ts}`、
+`commands/launch.ts`、`cli/args.ts`。
+认证模块中 `selectApiKey`（API-key 路径）依旧不读 session affinity；`rotation.ts` 逐字节未变，`CredentialRotation` 的 `{ switched }` 契约不变；`TokenRateMeter` 算法与事件定义未受任何影响，本地 session 粘性路由补丁继续完全适用。
+
+bundle 接口出现次数 18.13.2 → 18.13.3（`grep -ao` 对两份二进制分别计数）：
+`getWithCredential` 8 → 8、`markReached` 6 → 6、`onGeneration` 8 → 8、`appendResetBoundary` 3 → 3、
+`appendEntry` 19 → 19、`session_shutdown` 9 → 9、`session_start` 11 → 11、`message_update` 39 → 39、
+`message_end` 64 → 64、`TokenRateMeter` 2 → 2、`willContinue` 39 → 39、`awaitingAsyncWork` 12 → 12。
+全部 12 个核心接缝符号计数 100% 保持一致（差值为 0），核心认证与 TPS 接缝符号全部健康。
+
+实机验证与增量补丁升级（`omp-linux-x64` SHA256
+`42d39fa8996fed9f999e26306e60e2fdbea0c0de0d0b2d68feba275f44c41d04`，体积 277,133,488 bytes / 264.29 MB，与 release 构建一致，
+`--version` → `omp/18.13.3`）：
+
+- 本次升级命中 Stencil 增量二进制补丁机制：`.runtime/omp update` 检查到版本差异后，自动下载针对 `18.13.2` 的增量补丁 `omp-linux-x64.patch`（6.1 MB，相比完整二进制约 264.29 MB 节省约 97.69% 带宽）；通过原生 `applyBinaryPatch`（HDiffPatch + zstd）就地应用并校验生成目标二进制 sha256 `42d39fa8996fed9f999e26306e60e2fdbea0c0de0d0b2d68feba275f44c41d04` 后原子替换。
+- 经 `omp-with-tps.mjs --version` 加载 wrapper，正确解析到 18.13.3 runtime（输出 `18.13.3`）。
+- `node --test integrations/herdr-tps/test/*.test.mjs`：155 passed（含本机 18.13.3 的七组契约检查）；
+  `cargo test --offline --locked`：ai-monitor 198 passed（193+1+4，2 ignored）、herdr-usage 142 passed（116+23+3）；
+  `npm run herdr:tps:install -- --dry-run`：config、shell、links 均已就绪；
+  `share-omp-daemons.mjs --dry-run` → `status: already-shared`。
+
+### 18.13.2
+
+upstream [`v18.13.1...v18.13.2`](https://github.com/can1357/oh-my-pi/compare/v18.13.1...v18.13.2)
+官方 release 日期 2026-10-27（Tag 与 Release 发布于 2026-10-27 18:07 UTC）。包含 63 个 PR / 提交（基于 release tree `e996e1c`）。主要涵盖全新交互式 `/context` 上下文检视器（废弃旧静态报告）、LM Studio 决策模型发现与 Judge 角色支持、模型 Reasoning Ladder 自定义声明透传（`discovery.advertisedReasoning`）、Anthropic 带签意思考跨模型重试回退穿透与系统提示词缓存稳定保护、Google RPC 配额失败精确分类与非容量限制退避、阿里云多模态与 Copilot 认证容错、未配置视觉模型时最低成本优先路由、扩展交互模式直接控制（`ctx.sessionModes`）、Advisor 会话作用域（`main`/`subagent`/`all`）与推理过滤、子代理中断处理标志（`handlesToolInterrupt`）、会话跨文件最新副本恢复与追加式日期/目录提醒、只读 `scout` 子代理工具集补齐 `ast_grep`、ACP 工具调用显式传递名称、原生 Myers Diff 算法扁平 Arena 优化、内建 Shell 内存与递归保护（`sort -S`、大单行 `grep`/`rg`、防深层栈溢出 `rm -r`/`du`、`shopt -s globstar`）、`apply_patch` 严格上下文行匹配与 move-only 块支持、后台空闲会话自动压缩（`gc.autoCompress`）、`ask` 提问对话框草稿让渡与 Agent Hub 常驻：
+
+- **模型适配、推理网关与结构化输出**：
+  - **LM Studio 决策模型发现与 Judge 角色**：模型目录服务（`pi-catalog`）支持 LM Studio `type: "decision"` 模型，通过 `/v1/decisions` 端点接入并支持配置为 `modelRoles.judge: lm-studio/<model>`（PR #17169）；
+  - **提供商推理阶梯与自定义推理声明**：新增 `discovery.advertisedReasoning`（默认 true），`discovery: proxy` 允许自定义提供商通过 `/v1/models` 行自身声明的 reasoning ladder、`none` 开关或 `reasoning: false` 动态调整思考能力，不再强制依赖打包目录写死规则（PR #17077）；
+  - **Anthropic 思考签名与回退链穿透**：修复重试回退链（`retry.fallbackChains`）在带有 signed thinking 的 Claude 回合中跨模型回退被跳过的问题；修复重试回退和子代理 peer list 变更时重建系统提示词导致 Anthropic 重新写入全部 Prompt Cache 的问题；composer 预测与 `/btw` 跟进复用会话持久缓存前缀（PR #17014, #17115, #17186, #17188）；
+  - **Google RPC 配额失败分类与容量退避**：准确识别并分类 Google RPC `QuotaFailure`、`RetryInfo` 及 `MODEL_CAPACITY_EXHAUSTED` 错误，非容量限制 429 采用标准短延迟重试而非 45-75s 长退避，且不触发非必要账号轮换（PR #17127）；
+  - **Aliyun 多模态网关与 GitHub Copilot 认证容错**：自动重试阿里云 DashScope 偶发的 `InvalidParameter` 400 图片参数错误；被吊销或认证失效的 Copilot 凭据立即清理过期配额缓存（PR #17086, #17101）；
+  - **视觉模型最低成本路由与 markit 文档转换**：未显式配置 vision 模型时默认路由至目录中成本最低的视觉模型（而非字母序首个）；`@path` 引用原生支持通过 `markit` 将 `.pdf`、`.docx`、`.xlsx`、`.pptx`、`.epub` 自动转换为 Markdown（PR #17193, #17196）；
+  - **Schema 属性定义缓存优化**：`pi-ai` 对 schema identity 缓存属性定义检查（`schemaDefinesProperty`），显著降低复杂 JSON Schema 处理的 CPU 开销（PR #16780）。
+- **任务规划、工具审批与子代理控制**：
+  - **工具中断处理标志 `AgentTool.handlesToolInterrupt`**：新增 `handlesToolInterrupt`，使 `wait` 等可中断工具在循环内部中断排队时仍可无阻塞执行以排空唤醒事件，不再被误判定为 skipped tool；用户手动取消依然正常跳过（PR #17174）；
+  - **交互模式直接控制与状态观测**：TUI 扩展支持通过 `ctx.sessionModes` 直接读取并切换 plan、vibe、goal、loop 等内置模式，并监听 `mode_changed` 事件，无需拼接斜杠命令；可通过 `extensionHandlers.modeControl: false` 禁用（PR #15753）；
+  - **Advisor 会话作用域与推理过滤**：`WATCHDOG.yml` 新增 `scope`（`main` / `subagent` / `all`，默认 `all`）控制 advisor 生效层级，支持 `includeReasoning: false` 在审核 delta 中过滤主助理的 `_thinking:_` 内容（PR #17058）；
+  - **会话持久化与分支/跨文件恢复稳固**：`--resume`、`--continue` 及 RPC `open_session` 智能识别因写锁冲突分裂出的最新文件副本，自动加载包含最新回合的会话副本；目录级会话选择器 `session.worktreeScope`；会话首个请求跨午夜或变更工作目录时改用 append-only 追加时间/目录提醒，不覆写首条消息以保护 Prompt Cache 与上下文链（PR #17061, #17117, #17159）；
+  - **子代理工具与命名对齐**：内置 `scout` 只读子代理默认工具集补充 `ast_grep`（与 AST 搜索指令对齐，保持 read-only 不加入 `lsp`）；Task 作业命名对齐，`wait` 与后台作业分发在任务 ID 与 Agent ID 不一致时正确上报 `history://<name>` 与 `agent://<name>`（PR #17112, #17151）；
+  - **ACP 工具调用显式传名**：`tool_call` 消息显式附带工具名称，使泛型工具（`task`、`wait`、`ask`）在客户端直观呈现而非统一显示为 "tool"（PR #17162）；
+  - **扩展输入密文掩码与 MCP 元数据透传**：`ctx.ui.input` 支持 `{ secret: true }` 掩码显示（`•`）；`getAllTools()` 向扩展开放 `mcpServerName`、`mcpToolName` 及 `mcpReadOnlyHint`（PR #17080, #17120）。
+- **工具链、LSP 与系统性能优化**：
+  - **原生 Myers Diff 性能提升与内存扁平化**：`myers_diff` 算法将 `Rc` 链表重构为扁平 Arena 数组，显著加快大文件大型编辑的行级/词级/结构化 patch 计算（PR #17015）；
+  - **嵌入式 Shell 深度递归与内存保护**：内建 `sort` 遵循 GNU 规范限制 `-S` 内存占比，支持取消与长行不截断；内建 `grep`/`rg` 对超过 256 MiB 的无换行单行文件标记 `not searched` 避免 OOM；`rm -r` 与 `du` 采用显式栈遍历，彻底消除数千层深度目录的栈溢出并安全防御循环符号链接；`shopt -s globstar` 完整支持 `**` 递归匹配（PR #17021, #17108, #17111, #17155）；
+  - **Apply Patch 严格上下文匹配与移动块支持**：`apply_patch` 要求完整上下文行匹配以防误删，同时原生支持纯移动（move-only）与移动追加封包；Seen-line 保护在陈旧标签恢复路径上生效（PR #17033, #17184）；
+  - **原生 Glob 符号链接跟踪与 Git Worktree 隔离**：原生 `glob` 新增可选 `followLinks` 且防循环；目录末尾 `/` 精准限定目录匹配；Worktree 克隆隔离源目录专属环境（虚拟环境、CMake 构建产物与针对性忽略项）（PR #17180, #17181）；
+  - **SSH 路径与文件归档选择器增强**：`ssh://` 支持远端家目录 `~` 相对路径与目录范围检索；支持直接读取归档内 PDF 文本与大型 TAR 懒加载索引；JSON 选择器适配带 BOM、备份文件与 SSH 目标（PR #17171, #17175, #17179, #17182）；
+  - **后台空闲会话压缩 `gc.autoCompress`**：新增 `gc.autoCompress`（默认关），每日在空闲时后台低优先级压缩历史会话；对不支持透明压缩的文件系统自动跳过（PR #17189, #17195）；
+  - **本地嵌入向量多线程限制**：`pi-mnemopi` 限制 ONNX Runtime 本地 embedding 线程池，消除多核机器单次召回打满所有 CPU 核心的性能损耗（PR #17109）。
+- **TUI 终端与排版显示**：
+  - **全新交互式 `/context` 上下文检视器**：废弃静态报告，引入支持 ANSI 与原生终端的交互式 `/context` 查看器，提供分类导航、内容检视、Token 开销透视、压缩预估与跨终端键盘/鼠标自适应控制（PR #16160）；
+  - **Ask 提问对话框与草稿让渡**：修复提示词输入框已有草稿时 `ask` 选项无法操作的问题，支持方向键让渡焦点操作问答，并在完成后恢复草稿输入（PR #17215）；
+  - **输入自动补全与 Agent Hub 焦点修复**：修复换行或光标移动后 emoji/符号补全弹窗悬挂的问题；子代理全部结束后保持 Agent Hub 入口常驻并支持 `/subagents` 别名（PR #17215）；
+  - **Markdown 列表内嵌表格与实时语音流平滑**：修复列表项内 Markdown 表格被吞的问题；修复 `/live` 模式助手短暂停顿时在 listening/speaking 之间剧烈抖动的问题，实时语音缓冲吸收抖动（PR #17114, #17168）；
+  - **SIGTERM 退出恢复提示**：收到 SIGTERM 时在交还终端后输出 `omp --resume <id>` 恢复引导，提升命令行与异常中断的可恢复性（PR #17119）。
+
+逐字节未变（两版本比较中核心契约路径继续一致）：
+`packages/ai/src/auth/` 核心契约文件（`auth-storage.ts`、`affinity.ts`、`rotation.ts`、`blocks.ts`、`store.ts`、`resets.ts`、`usage.ts`、`sqlite-credential-store.ts`）、
+`packages/ai/src/provider-session-state.ts`、
+`packages/coding-agent/src/utils/token-rate.ts`、
+`packages/coding-agent/src/extensibility/shared-events.ts`、
+`packages/coding-agent/src/session/{session-paths.ts}`、
+`commands/launch.ts`、`cli/args.ts`。
+认证模块中 `selectApiKey`（API-key 路径）依旧不读 session affinity；`rotation.ts` 逐字节未变，`CredentialRotation` 的 `{ switched }` 契约不变；`TokenRateMeter` 算法与事件定义未受任何影响，本地 session 粘性路由补丁继续完全适用。
+
+bundle 接口出现次数 18.13.1 → 18.13.2（`grep -ao` 对两份二进制分别计数）：
+`getWithCredential` 10 → 8 (-2)、`markReached` 6 → 6、`onGeneration` 8 → 8、`appendResetBoundary` 3 → 3、
+`appendEntry` 19 → 19、`session_shutdown` 9 → 9、`session_start` 10 → 11 (+1)、`message_update` 40 → 39 (-1)、
+`message_end` 66 → 64 (-2)、`TokenRateMeter` 2 → 2、`willContinue` 39 → 39、`awaitingAsyncWork` 12 → 12。
+核心接缝符号总体高度稳定（`getWithCredential` -2 因 catalog 发现内部合并，`session_start` +1 因 idle maintenance 与 scheduler 接管，`message_update` / `message_end` 微调因 RPC rebuildable delta 优化），核心认证与 TPS 接缝符号全部健康。
+
+实机验证与增量补丁升级（`omp-linux-x64` SHA256
+`dc499ea63082181a4734e5a197d61f04394e7cc0191ef7ba192d110abca0d6c4`，体积 277,039,280 bytes / 264.21 MB，与 release 构建一致，
+`--version` → `omp/18.13.2`）：
+
+- 本次升级命中 Stencil 增量二进制补丁机制：`.runtime/omp update` 检查到版本差异后，自动下载针对 `18.13.1` 的增量补丁 `omp-linux-x64.patch`（60.4 MB，相比完整二进制约 264.21 MB 节省约 77.14% 带宽）；通过原生 `applyBinaryPatch`（HDiffPatch + zstd）就地应用并校验生成目标二进制 sha256 `dc499ea63082181a4734e5a197d61f04394e7cc0191ef7ba192d110abca0d6c4` 后原子替换。
+- 经 `omp-with-tps.mjs --version` 加载 wrapper，正确解析到 18.13.2 runtime（输出 `18.13.2`）。
+- `node --test integrations/herdr-tps/test/*.test.mjs`：155 passed（含本机 18.13.2 的七组契约检查）；
+  `cargo test --offline --locked`：ai-monitor 198 passed（193+1+4，2 ignored）、herdr-usage 142 passed（116+23+3）；
+  `npm run herdr:tps:install -- --dry-run`：config、shell、links 均已就绪；
+  `share-omp-daemons.mjs --dry-run` → `status: already-shared`。
+
+### 18.13.1
+
+upstream [`v18.12.6...v18.13.1`](https://github.com/can1357/oh-my-pi/compare/v18.12.6...v18.13.1)
+官方 release 日期 2026-10-27（`v18.13.0` 发布于 2026-10-26 20:29 UTC，`v18.13.1` 发布于 2026-10-27 00:56 UTC）。包含 646 个 commit（基于 release tree `0838d2a`，v18.13.0 为 `011ab73`）。主要涵盖受限目录强审批机制 `tools.restrictedFolders`（任何审批模式下强制确认）、OpenCode Go 跨任务共享 Prompt Cache（`x-opencode-session`）、Google Antigravity 官方 2.26.0 协议标签与 PKCE 认证对齐、Anthropic API 2026-10-21 版本支持与思考兼容性、GPT-6.1 Terra 与 Kimi K3.1 Pro/Pro Highspeed 模型支持、Codex Spend cap credits 额度与容量 429 Retry-After 规避修复、子代理状态感知 `Agent.isPaused` 与 `/pause` 未决 turns/jobs 实时透视、LSP 闲置 5 分钟文档内存回收与外部编辑重命名同步、原生 Grep 排除语法（`!` 前缀）与多项 C++/Rust 密集计算加速、Bun 1.4.4 安全修复（CVE-2026-91403 / CVE-2026-111497）：
+
+- **模型适配、推理网关与结构化输出**：
+  - **GPT-6.1 Terra 与 Kimi K3.1 Pro / Pro Highspeed 支持**：内置 `openai/gpt-6.1-terra`（1.05M 窗口，$1/$5，922K 扩展上下文路由）；Kimi Code 与 Moonshot API 引入 `kimi-k3.1-pro` / `kimi-k3.1-pro-highspeed`（131K 输出上限，K3 reasoning wire 契约，PR #16901）；
+  - **OpenCode Go 跨任务共享 Prompt Cache**：在支持的通道（`muse-spark-1.3-contributor`、`gpt-5.6-luna`、`deepseek-v4-pro` 等）引入 `x-opencode-session` header，使 Task siblings、forks 与 parent 共享网关 prompt cache，大幅提升多智能体协作下的缓存命中率（PR #16988）；
+  - **Google Antigravity 官方 2.26.0 协议对齐与 PKCE 认证**：请求携带官方 2.26.0 标签（`cascade_id`, `root_cascade_id`, `request_id`），支持各 tier 独立 `model_enum` 与 thinking 预算，新增 PKCE 与 `aicode` scope，User-Agent 采用本地宿主真实架构，默认启用 append-only 上下文保护缓存（PR #17012）；
+  - **Anthropic API 2026-10-21 版本与 Prompt Cache / 降级退款**：支持环境变量 `PI_ANTHROPIC_API_VERSION=2026-10-21`；引入 `requiresThinkingPresence` 兼容标志；Claude Opus 5.5 / Sonnet 5.5 降级 fallback 允许兑现 fallback credit 而非按全量 cache 写入计费（PR #17034）；Factory Droid Claude 模型增加 1h prompt caching 与 cache warming（PR #16296）；
+  - **Codex 额度报告与容量 429 修复**：ChatGPT Business/Enterprise 席位正确报告 Spend cap credits，防止用尽额度账号被选出（PR #16973）；修复 Codex `turn_rate_limit_exceeded` 429 错误读取 plan 窗口重置时间导致过长等待的问题，改按 Retry-After 规避（PR #17087）；修复 Codex WebSocket 并发请求与 `unsupported_native_inflight_message` 冲突（PR #16812, #17065）；
+  - **工具 Schema 规范化与结构化输出**：优化工具 schema 生成的 CPU 开销；修复工具 schema 规范化就地修改导致 const 注入 enum 数组的问题（PR #16780）；修复 Claude 大结构化输出 schema 超过可选参数限制（PR #16887）；修复 Codex `array schema must define items` 错误（PR #16886）；修复 Anthropic 根对象 `anyOf`/`oneOf`/`allOf` 变体属性折叠（PR #16630）。
+- **任务规划、工具审批与子代理控制**：
+  - **受限目录全局审批机制 `tools.restrictedFolders`**：新增 `tools.restrictedFolders` 配置项，命中目录及其子路径下的所有操作均强制弹出 Approve/Deny 确认，即使在 `yolo` 模式、已记住授权或 ACP "Always allow" 模式下也必须显式确认（PR #16049）；
+  - **子代理状态感知与 `/pause` 实时排空透视**：引入 `Agent.isPaused`，使宿主能区分安全挂起的 agent 与仍处于排空阶段的 turns；`/pause` 界面可直观查看主 agent 下所有子代理树正在排空的 turns 与运行中 jobs（PR #17073）；
+  - **子代理渲染与通讯批处理优化**：优化后台子代理进度重绘频率，批量合并子代理徽标刷新；子代理返回父级结果上限扩充至 11,500 字符；修复子代理唤醒后丢失扩展首个 prompt 注册工具（如 `ida-mcp`）的问题（PR #16597, #16599, #16642, #17131）；
+  - **Ask 交互与批注选项归属**：`ask` 对话框支持对特定选项记录笔记（`noteOption`），并在回答中保留并在 TUI/Tern 中明确定位（PR #17126）；
+  - **Compaction 远端缓存键与短摘要容错**：引入 `SummaryOptions.remotePromptCacheKey`，远端压缩携带实际发送请求的 cache key 与 session headers（PR #16988）；短摘要失败不再导致整个 compaction 失败丢弃（PR #16942）。
+- **工具链、LSP 与系统性能优化**：
+  - **LSP 内存释放与实时外部编辑同步**：LSP 自动关闭 5 分钟未使用的打开文档，防止长期占用内存（PR #15418）；修复项目级 LSP 重命名与导入诊断在外部文件编辑后未及时同步磁盘内容导致的代码覆盖（PR #16649, #16836）；
+  - **原生 Rust/C++ 性能飞跃与内存重排**：优化原生 grep 在压缩/长行上的搜索性能、长文本 ANSI 折行速度、内存重排序（reranking）算法、大型文件结构化代码总结以及 fuzzy line matching 算法（PR #16921, #16922, #16926, #16927, #16993, #17016）；
+  - **安全修复与底层运行时升级**：编译二进制升级至 Bun 1.4.4，修复 eMudhra 中间 CA 证书信任漏洞 (CVE-2026-91403) 与 Brotli 解码器越界写入 (CVE-2026-111497)（PR #16865）；
+  - **Grep 排除语法与单文件截断提示**：`grep` 工具 `path` 参数支持 `!` 前缀排除模式（如 `src;!*.test.ts`），避免无谓遍历；单文件或多文件匹配上限截断时明确给出未展示文件列表与提示（PR #16594, #16920）；
+  - **Hashline 邻近行重复保护与 PUT 容错**：修复 hashline `PUT` 在替换体重复边界邻近行且行数较短时误删其他行或重复写邻近行的问题；18.13.1 进一步放宽合法插入相邻相同语句的场景（PR #17028）；
+  - **CLI 成本警报与后台作业挂起等待**：新增 `--warn-cost` 与 `--max-cost` 控制会话支出（PR #16803）；`omp -p --wait-async`（`async.printWake`）支持退出前等待后台任务完成并唤醒会话（PR #16690）；`/local`（`Alt+G`）支持直接选择并编辑 `local://` 共享文件（PR #16873）。
+- **TUI 终端与排版显示**：
+  - **子代理状态栏防重绘与 ANSI/TSP `/pause` 视图**：`StatusLineComponent` 增加状态变更报告，彻底消除无变化的冗余重绘；ANSI 与 TSP 下的 `/pause` 屏幕精准展示未决 turns/jobs，短终端自动保持计数与恢复控制（PR #17073, #17131）；
+  - **输出面板渲染性能优化**：终端中的 command 与 eval 输出面板不再逐帧重新计算样式与拼接文本，大幅降低长命令输出在历史记录中滚动与常驻时的 CPU 占用（PR #16779）；
+  - **Vim 模式增强与快捷键支持**：Vim 模式新增 `.` 重复最后修改指令（含插入/替换模式文本）及 `u` 一步撤销（PR #16872）；
+  - **SIXEL 叠加与换行链接修复**：修复流式输出中 SIXEL 渲染覆盖表格底边栏的问题（Issue #16870）；修复长 URL 在折行后仅首行可点击的问题，完整传递 OSC 8 超链接（PR #16740）；
+  - **Agent Hub 稳定性与 BTW 历史附件图支持**：Agent Hub 在异步加载已存子代理时锁定行排序，避免列表在心跳时乱跳（PR #16952）；`/btw` 与 BTW 历史跟进问题完整支持粘贴和携带附件图片（PR #16805）。
+
+逐字节未变（两版本比较中核心契约路径继续一致）：
+`packages/ai/src/auth/` 核心契约文件（`auth-storage.ts`、`affinity.ts`、`rotation.ts`、`blocks.ts`、`store.ts`、`resets.ts`、`usage.ts`、`sqlite-credential-store.ts`）、
+`packages/ai/src/provider-session-state.ts`、
+`packages/coding-agent/src/utils/token-rate.ts`、
+`packages/coding-agent/src/extensibility/shared-events.ts`、
+`packages/coding-agent/src/session/{session-paths.ts}`、
+`commands/launch.ts`、`cli/args.ts`。
+认证模块中 `selectApiKey`（API-key 路径）依旧不读 session affinity；`rotation.ts` 逐字节未变，`CredentialRotation` 的 `{ switched }` 契约不变；`TokenRateMeter` 算法与事件定义未受任何影响，本地 session 粘性路由补丁继续完全适用。
+
+bundle 接口出现次数 18.12.6 → 18.13.1（`grep -ao` 对两份二进制分别计数）：
+`getWithCredential` 10 → 10、`markReached` 6 → 6、`onGeneration` 8 → 8、`appendResetBoundary` 3 → 3、
+`appendEntry` 19 → 19、`session_shutdown` 9 → 9、`session_start` 10 → 10、`message_update` 38 → 40 (+2)、
+`message_end` 65 → 66 (+1)、`TokenRateMeter` 2 → 2、`willContinue` 39 → 39、`awaitingAsyncWork` 12 → 12。
+核心接缝符号总体高度稳定（`message_update` +2 因 aside provider 消息边界控制与 statusline 优化，`message_end` +1 因 compaction 摘要与模型生命周期增强），核心认证与 TPS 接缝符号 100% 保持一致。
+
+实机验证与增量补丁升级（`omp-linux-x64` SHA256
+`ee2961c7da02e514a2475ee958c2fd85dbabf4d0907949ba5022edb2951f84b5`，体积 275,986,608 bytes / 263.2 MB，与 release 构建一致，
+`--version` → `omp/18.13.1`）：
+
+- 本次升级命中 Stencil 增量二进制补丁机制：`.runtime/omp update` 检查到版本差异后，自动下载针对 `18.12.6` 的增量补丁 `omp-linux-x64.patch`（79.5 MB，相比完整二进制约 263.2 MB 节省约 69.8% 带宽）；通过原生 `applyBinaryPatch`（HDiffPatch + zstd）就地应用并校验生成目标二进制 sha256 `ee2961c7da02e514a2475ee958c2fd85dbabf4d0907949ba5022edb2951f84b5` 后原子替换。
+- 经 `omp-with-tps.mjs --version` 加载 wrapper，正确解析到 18.13.1 runtime（输出 `18.13.1`）。
+- `node --test integrations/herdr-tps/test/*.test.mjs`：155 passed（含本机 18.13.1 的七组契约检查）；
+  `cargo test --offline --locked`：ai-monitor 195 + 0、herdr-usage 116 + 23 + 3 passed；
+  `npm run herdr:tps:install -- --dry-run`：config、shell、links 均已就绪；
+  `share-omp-daemons.mjs --dry-run` → `status: already-shared`。
+
+### 18.12.6
+
+upstream [`v18.12.5...v18.12.6`](https://github.com/can1357/oh-my-pi/compare/v18.12.5...v18.12.6)
+官方 release 日期 2026-10-21（Tag 与 Release 发布于 2026-10-21 21:02 UTC）。包含 95 个 commit（基于 release tree `45c35e4`）。主要涵盖 OpenAI Codex 声明 `isPromptCachePersistent` 并禁用 idle compaction、Yolo-Auto 目录同步至当前模型（`qwen3.8-27b` 默认并剔除已退役模型）、ACP 协议引入 `_session/steering` 支持运行中回合控制与权限弹窗取消/followUp 队列、`/mcp reauth <name>` 支持 ACP/RPC 及 print 模式、ACP `session/cancel` 增强取消入队与分发中 prompt、MCP 连接失败不阻断 ACP 会话启动、显式清空 fallback 链的子代理不再穿透默认链、`/usage` 修正 Devin 等无 identity 的 OAuth 账号显示为 missing usage、浏览器关闭等待 Chromium 销毁确认、Advisor prompt 明确 concern 升级为 blocker 的策略、Tern 窄窗居中 sheet 占满终端与 sidebar 挤压修复、扩展延迟至 composer 接受输入后异步加载：
+
+- **模型适配、推理网关与结构化输出**：
+  - **OpenAI Codex 持久化 Prompt 缓存与 Idle Compaction 优化**：`@oh-my-pi/pi-catalog` 新增 `prompt-cache-persistent` 目录维度（`isPromptCachePersistent`），针对端点本身永不过期的 provider 进行标记；已登录的 OpenAI Codex 声明该属性；`@oh-my-pi/pi-coding-agent` 相应取消了在 OpenAI Codex 账号上的 idle compaction（闲置自动压缩），避免在空闲时丢弃原本常驻的温热 prompt cache；
+  - **Yolo-Auto 目录模型同步与退役清理**：更新内置 Yolo-Auto 目录至最新模型集，将 `qwen3.8-27b` 设为默认模型，保留 `yolo`、`yolo-small` 与 `yolo-128k`，并移除已退役的 `deepseek-flash-v4` 和 `qwen3.8-flash`；补充了当前 seed 下的 Qwen chat-template thinking wire 断言测试。
+- **任务规划、工具审批与子代理控制**：
+  - **ACP `_session/steering` 运行中控制与权限弹窗取消**：`@oh-my-pi/pi-coding-agent` 新增 `_session/steering` ACP 扩展（声明 `_meta.steering.supported`），允许 agent-shell 等客户端在回合运行中进行 steering 纠偏；在权限确认弹窗开启时发送 steer 会直接取消该弹窗，并支持通过 `_meta.steering.queue: "followUp"` 排队后续指令（PR #15885）；
+  - **子代理显式空 fallback 链保护**：修复当子代理 role 配置了显式空 fallback 链（`fallback: []`）时，若默认 role 使用同一模型，子代理在重试降级、prewalk 或上下文提升后意外回退至默认 chain 的问题，确保显式清空的降级链严格为空（Issue #16548, PR #16548）；
+  - **Advisor Prompt Blocker 升级机制明确**：修复 advisor prompt 完全禁止重复提出建议的缺陷，允许 advisor 在新证据出现并导致前序关切上升为 blocker 时重新将该建议作为 blocker 上报（Issue #13887, PR #16484）；
+  - **ACP `session/cancel` 取消范围完善**：ACP `session/cancel` 现在除了取消正在流式传输的客户端 turn 外，还可取消排队中或正在分发中的 prompt，并可靠终止 autonomous runs（PR #15885）。
+- **工具链、LSP 与系统性能优化**：
+  - **启动安全扩展延迟加载性能优化**：交互式启动不再同步等待仅注册 tools、commands、flags、renderers 或 event hooks 的扩展（例如 MCP bridge 插件），改为在 composer 接受用户输入后异步加载，用户首条消息按需等待；仅当首次启动确认无 providers/shortcuts/composer 介入后生效；恢复会话或显式传参时保持同步加载全量扩展（PR #16684）；
+  - **多模式 `/mcp reauth` 支持与健壮性**：`/mcp reauth <name>` 原生支持 ACP、RPC 以及 print 模式（`omp -p '/mcp reauth <name>'`），自动打开浏览器并打印授权 URL，在运行会话中重连服务，并在授权失败时让 print 模式 exit 1；项目级配置与用户配置冲突时优先采用项目级配置，支持 `mcp.enableProjectConfig: false` 跳过；重新绑定 OAuth 时自动清理陈旧的 `Authorization` header（PR #16046）；
+  - **MCP 失败容错会话启动**：客户端声明的 MCP 服务器连接失败时不再导致 ACP 会话直接启动失败，而是在会话内报告失败，并允许后续通过 `/mcp reauth` 进行 HTTP/SSE 修复（PR #16046）；
+  - **CLI 操作指令真实 exit code 执行**：`omp -p` 传入 `/compact`、`/handoff` 和 `/retry` 等参数时直接以命令执行而非发给模型，且命令失败时返回 exit 1；stdin 与 `@file` 的斜杠文本继续交由模型处理（PR #16387）；
+  - **浏览器 Tab 销毁等待**：修复释放或回收浏览器 tab 时在 Chromium 仍列出该页面时提前返回的问题，现严格等待 Chromium 确认 tab 销毁（PR #16680）；
+  - **底层 RPC 与权限信号扩展**：`@oh-my-pi/pi-utils` 新增 `RpcConnection.requestCancellable()` 与 `Client.requestPermission(params, { signal })`，支持对端发送 `$/cancel_request` 时的响应与取消信号处理（PR #15885）；
+  - **OAuth 账号用量统计修正**：修复 `/usage` 与 `omp usage --json` 将 Devin 等无 identity 的 OAuth 账号在正常报告旁错误列为 missing usage 的问题（PR #16549）。
+- **TUI 终端与排版显示**：
+  - **Tern 窄窗居中 Sheet 适配**：在 Tern 中，居中 sheet（`/context`、报告、快捷键帮助、BTW 历史、session info、暂停界面等）在宽度小于 100 列时自动填满窗格，避免窄窗下边距导致的排版挤压（PR #16676）；
+  - **Tern 枢纽页面 Sidebar 防挤压**：修复 Tern 的 `/agents` 与 `/models` hub 中，长文本行（如流式输出的草稿）导致左侧 sidebar 被挤压塌陷的排版缺陷；
+  - **MCP 连续认证 Esc 中断修复**：修复在第二个 MCP OAuth 登录替换未完成的首个登录后，TUI 中按 Esc 无法中断的交互缺陷（PR #16046）。
+
+逐字节未变（两版本比较中核心契约路径继续一致）：
+`packages/ai/src/auth/` 核心契约文件（`auth-storage.ts`、`affinity.ts`、`rotation.ts`、`blocks.ts`、`store.ts`、`resets.ts`、`usage.ts`、`sqlite-credential-store.ts`）、
+`packages/ai/src/provider-session-state.ts`、
+`packages/coding-agent/src/utils/token-rate.ts`、
+`packages/coding-agent/src/extensibility/shared-events.ts`、
+`packages/coding-agent/src/session/{session-paths.ts}`、
+`commands/launch.ts`、`cli/args.ts`。
+认证模块中 `selectApiKey`（API-key 路径）依旧不读 session affinity；`rotation.ts` 逐字节未变，`CredentialRotation` 的 `{ switched }` 契约不变；`TokenRateMeter` 算法与事件定义未受任何影响，本地 session 粘性路由补丁继续完全适用。
+
+bundle 接口出现次数 18.12.5 → 18.12.6（`grep -ao` 对两份二进制分别计数）：
+`getWithCredential` 10 → 10、`markReached` 6 → 6、`onGeneration` 8 → 8、`appendResetBoundary` 3 → 3、
+`appendEntry` 19 → 19、`session_shutdown` 9 → 9、`session_start` 9 → 10、`message_update` 39 → 38、
+`message_end` 65 → 65、`TokenRateMeter` 2 → 2、`willContinue` 39 → 39、`awaitingAsyncWork` 12 → 12。
+核心接缝符号总体保持稳定（`session_start` +1 因 ACP session 生命周期增强，`message_update` -1 因 steering 控制路径重构），核心认证与 TPS 接缝符号 100% 保持一致。
+
+实机验证与增量补丁升级（`omp-linux-x64` SHA256
+`85d9daf3a05fc76e8cd425ae1904eb576af8d21cc85fcf4690742626e07ccfa4`，体积 256,702,432 bytes，与 release 构建一致，
+`--version` → `omp/18.12.6`）：
+
+- 本次升级命中 Stencil 增量二进制补丁机制：`.runtime/omp update` 检查到版本差异后，自动下载针对 `18.12.5` 的增量补丁 `omp-linux-x64.patch`（6.6 MB，相比完整二进制约 244.8 MiB / 256.7 MB 节省约 97.3% 带宽）；通过原生 `applyBinaryPatch`（HDiffPatch + zstd）就地应用并校验生成目标二进制 sha256 `85d9daf3a05fc76e8cd425ae1904eb576af8d21cc85fcf4690742626e07ccfa4` 后原子替换。
+- 经 `omp-with-tps.mjs --version` 加载 wrapper，正确解析到 18.12.6 runtime（输出 `18.12.6`）。
+- `node --test integrations/herdr-tps/test/*.test.mjs`：155 passed（含本机 18.12.6 的七组契约检查）；
+  `cargo test --offline --locked`：ai-monitor 195 + 0、herdr-usage 116 + 23 + 3 passed；
+  `npm run herdr:tps:install -- --dry-run`：config、shell、links 均已就绪；
+  `share-omp-daemons.mjs --dry-run` → `status: already-shared`。
 
 ### 18.12.5
 

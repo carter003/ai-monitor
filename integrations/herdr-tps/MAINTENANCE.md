@@ -217,7 +217,7 @@ v10（状态 current），
 | `agent_end` | pause |
 | `session_shutdown` | 清除显示刷新 timer、observer 状态并等待 reporter.close |
 
-上表已消费事件的投递路径与字段形状在 18.12.5 上不变；18.4.7 至 18.12.5 都没有新增核心监控事件
+上表已消费事件的投递路径与字段形状在 18.14.1 上不变；18.4.7 至 18.14.1 都没有新增核心监控事件
 （18.10.4 仅扩展体系新增 `plan_review_requested` 与 `plan_review_resolved` 事件及配套的 `ctx.resolvePlanReview` / `ctx.openPlanReview` 交互动作；18.11.0 的 `agent_end` 在等待后台作业时附加 `awaitingAsyncWork: true` 并行携带 `willContinue`，TPS/Model 已消费事件清单未变；`docs/extensions.md` 补充
 `deliverAs: "aside"` 结束 interruptible wait 的措辞、v18.8.9 的 `ctx.ui.openTerminal` 说明
 与 v18.9.0 的 `ctx.annotations`，核心监控事件未变）。
@@ -255,7 +255,7 @@ Codex wrapper 启用 `streamingOnly`：以首个可见 delta 作为片段起点�
 | 非零 TPS TTL | 2500ms | `max(stale, heartbeat) + 2 × sampleInterval` |
 
 生产环境（Codex 与 OMP wrapper）采用 OMP 18.2.5 移植的 `TokenRateMeter` 算法（upstream
-`utils/token-rate.ts` 到 18.12.5 未再改动，仍只有 18.4.2 那次 pending 计数的 memo）：
+`utils/token-rate.ts` 到 18.14.1 未再改动，仍只有 18.4.2 那次 pending 计数的 memo）：
 
 1. **多尺度指数衰减**：在 5s、20s、80s 三个半衰期桶内同时维护 tokens 与 time；使用解析积分 `(halfLife / ln2) * (1 - 2^(-t / halfLife))` 计算流式增长与时间权值。
 2. **词边界分块分词**：流式 delta 按 250ms 周期分块，并在最后空格/换行符处分割（保留末尾最多 32 字符至下一块），消除跨 delta 分词边界误差与突发抖动。
@@ -512,17 +512,16 @@ cost = (input_total − cache_read) × prompt
 窗口外 53 个，不设窗口会让废弃模型长期占据提醒首位。三处出口：ai-monitor token 页覆盖率标注、
 `unresolved_model` 表（按 `hit_count` 降序）、`import_prices` 收尾打印。
 
-### codex 双事件类型（有意只采一种）
+### codex 双事件类型与 OMP 完整事件口径
 
-codex 有两种 token 事件：`event_msg` / `token_count`（高频增量流）与顶层
-`token_usage_record`（带 `response_id`）。两者字段集完全相同，且实测同时出现的文件中
-`SUM(last_token_usage)` **逐字段相等**（36 vs 36 条记录，`input_tokens=876564` 一致），
-即后者是前者的子集/汇总。
+codex 有两种 token 事件：顶层 `token_usage_record`（带 `response_id`）与 `event_msg` / `token_count`（客户端状态广播流）。
 
-**决策：只采 `token_count`。** 两个都采会重复计入，且 `token_usage_record` 的 payload
-不含 `turn_context`，采了会因 model 缺失变成 `cost = NULL` 并拉低覆盖率。
-这里明确记录取舍，便于后续有人发现「有个 `token_usage_record` 没采」时能查到这是有意为之。
+- **`token_usage_record` 是每次推理的唯一真实账单凭据**：每次 API 响应产生一条，具备唯一的 `response_id`。特别地，在会话进行**上下文压缩（Context Compaction）**时，产生数十万 token 的实际压缩推理仅在 `token_usage_record` 中记录；随后的 `token_count` 中的 `last_token_usage` 则全为 0。
+- **`token_count` 会因状态更新而重复发送**：在限额刷新、item 完成等非推理事件时，Codex 会重复推送上一次推理的 `last_token_usage`，若直接按行偏移采集会导致严重的重复虚增统计。
 
+**采集策略**：优先采集 `token_usage_record`。一旦发现文件包含 `token_usage_record`，同文件的 `token_count` 自动忽略以杜绝重复统计；仅在无 `token_usage_record` 的旧环境或测试夹具中回退采集 `token_count`。
+
+**OMP model_usage 事件**：OMP 除主干对话的 `type = "message"` 外，由内置工具（如 `find` 结构化检索、任务探针等）触发的辅助推理会记录为 `type = "model_usage"`。采集器需同时采集此类事件，避免遗漏辅助推理用量。
 ### 修改与验证
 
 ```sh

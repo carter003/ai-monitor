@@ -700,3 +700,187 @@ pub fn backfill_omp_api_key_timeline(
     }
     state.reconcile_api_key_accounts(connection, &catalogs, true)
 }
+
+/// Backfill previously skipped `type = "model_usage"` events from OMP session files.
+pub fn backfill_omp_model_usage(
+    connection: &mut Connection,
+    roots: &[PathBuf],
+) -> rusqlite::Result<usize> {
+    use std::io::{BufRead, BufReader};
+
+    let prices = PriceTable::load(connection)?;
+    let catalogs: Vec<_> = roots
+        .iter()
+        .map(|root| {
+            (
+                root.clone(),
+                omp::AccountCatalog::load(&root.parent().unwrap_or(root).join("agent.db")),
+            )
+        })
+        .collect();
+    let mut state = omp::OmpState::new();
+    let mut total_inserted = 0;
+    let mut batch = Vec::new();
+    let now = now_ms();
+
+    for (root, accounts) in &catalogs {
+        for file in omp::session_files(root) {
+            let Ok(handle) = std::fs::File::open(&file) else {
+                continue;
+            };
+            state.seed_file(&file, accounts);
+            let mut reader = BufReader::new(handle);
+            let mut buffer = Vec::new();
+            let mut offset = 0u64;
+            loop {
+                buffer.clear();
+                let bytes_read = match reader.read_until(b'\n', &mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                if buffer.windows(13).any(|part| part == b"\"model_usage\"") {
+                    let tail = tail::TailLine {
+                        start: offset,
+                        bytes: buffer.clone(),
+                    };
+                    for event in state.parse_line_with_accounts(&file, &tail, accounts) {
+                        let priced = price(&prices, &event);
+                        batch.push((event, priced));
+                    }
+                    if batch.len() >= 1000 {
+                        total_inserted += db::insert_events(connection, "omp", &batch, now)?;
+                        batch.clear();
+                    }
+                }
+                offset += bytes_read as u64;
+            }
+        }
+    }
+    if !batch.is_empty() {
+        total_inserted += db::insert_events(connection, "omp", &batch, now)?;
+    }
+    Ok(total_inserted)
+}
+
+/// Reconcile Codex historical events:
+/// 1. Backfill context compactions that were omitted (because token_count emitted 0 tokens).
+/// 2. Remove duplicate token_count events (emitted when rate limits/status updated without an inference).
+pub fn backfill_codex_records(
+    connection: &mut Connection,
+    codex_dir: &Path,
+) -> rusqlite::Result<(usize, usize)> {
+    use std::io::{BufRead, BufReader};
+
+    let prices = PriceTable::load(connection)?;
+    let files = tail::collect_files(codex_dir, |path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
+    });
+    let now = now_ms();
+    let mut compactions_to_insert = Vec::new();
+    let mut zero_rows_to_delete = Vec::new();
+    let mut duplicate_rows_to_delete = Vec::new();
+
+    let mut state = codex::CodexState::new();
+
+    for file in &files {
+        let Ok(handle) = std::fs::File::open(file) else {
+            continue;
+        };
+        let mut reader = BufReader::new(handle);
+        let mut lines = Vec::new();
+        let mut line_bytes = Vec::new();
+        let mut offset = 0u64;
+
+        loop {
+            line_bytes.clear();
+            let n = match reader.read_until(b'\n', &mut line_bytes) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            lines.push((offset, line_bytes.clone()));
+            offset += n as u64;
+        }
+
+        let mut last_total: Option<(i64, i64)> = None;
+
+        for (i, (start, bytes)) in lines.iter().enumerate() {
+            if bytes.windows(11).any(|p| p == b"\"compacted\"") {
+                let min_j = i.saturating_sub(4);
+                for j in (min_j..i).rev() {
+                    let (ur_start, ur_bytes) = &lines[j];
+                    if ur_bytes.windows(20).any(|p| p == b"\"token_usage_record\"") {
+                        let tail = tail::TailLine {
+                            start: *ur_start,
+                            bytes: ur_bytes.clone(),
+                        };
+                        for event in state.parse_line(file, &tail) {
+                            if event.usage.input_total > 0 || event.usage.output_total > 0 {
+                                let priced = price(&prices, &event);
+                                compactions_to_insert.push((event, priced));
+                            }
+                        }
+                        let max_k = (i + 8).min(lines.len());
+                        for k in (i + 1)..max_k {
+                            let (tc_start, tc_bytes) = &lines[k];
+                            if tc_bytes.windows(13).any(|p| p == b"\"token_count\"") {
+                                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(tc_bytes) {
+                                    let lu = val.pointer("/payload/info/last_token_usage");
+                                    if let Some(usage) = lu {
+                                        let inp = usage.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                                        let out = usage.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                                        if inp == 0 && out == 0 {
+                                            zero_rows_to_delete.push(format!("{}:{}", file.display(), tc_start));
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+            } else if bytes.windows(13).any(|p| p == b"\"token_count\"") {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(bytes) {
+                    if val.pointer("/payload/type").and_then(|v| v.as_str()) == Some("token_count") {
+                        if let Some(info) = val.pointer("/payload/info") {
+                            let tot_in = info.pointer("/total_token_usage/input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                            let tot_out = info.pointer("/total_token_usage/output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                            let last_in = info.pointer("/last_token_usage/input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                            let last_out = info.pointer("/last_token_usage/output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                            if last_in > 0 || last_out > 0 {
+                                let tot = (tot_in, tot_out);
+                                if last_total == Some(tot) {
+                                    duplicate_rows_to_delete.push(format!("{}:{}", file.display(), start));
+                                } else {
+                                    last_total = Some(tot);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let tx = connection.transaction()?;
+    let mut deleted_duplicates = 0;
+    {
+        let mut del = tx.prepare("DELETE FROM usage_event WHERE source='codex' AND event_id = ?1")?;
+        for eid in &zero_rows_to_delete {
+            del.execute([eid])?;
+        }
+        for eid in &duplicate_rows_to_delete {
+            deleted_duplicates += del.execute([eid])?;
+        }
+    }
+    tx.commit()?;
+
+    let mut inserted_compactions = 0;
+    if !compactions_to_insert.is_empty() {
+        inserted_compactions = db::insert_events(connection, "codex", &compactions_to_insert, now)?;
+    }
+
+    Ok((inserted_compactions, deleted_duplicates))
+}

@@ -1052,3 +1052,67 @@ fn a_model_absent_from_the_price_table_stays_unresolved() {
     );
     assert_eq!(table.resolve("brand-new-model", &usage), Priced::Unresolved);
 }
+
+#[test]
+fn omp_model_usage_is_collected() {
+    let fixture = Fixture::new("omp-model-usage");
+    let omp_file = fixture.paths.omp.join("session.jsonl");
+    fs::write(&omp_file, "").unwrap();
+
+    let mut connection = fixture.connection();
+    let mut collector = sources::Collector::new(fixture.paths.clone());
+    collector.run_round(&mut connection, 1_000).unwrap();
+
+    let model_usage_line = r#"{"type":"model_usage","id":"mu-001","timestamp":"2026-10-30T10:00:00.000Z","purpose":"find","role":"typesafe","api":"typesafe","provider":"typesafe","model":"jev-latest","usage":{"input":1000,"output":200,"cacheRead":0,"cacheWrite":0,"totalTokens":1200,"reasoningTokens":50}}"#;
+    fixture.append(&omp_file, &format!("{model_usage_line}\n"));
+
+    let report = collector.run_round(&mut connection, 2_000).unwrap();
+    assert_eq!(report.inserted, 1);
+    assert_eq!(count(&connection, "omp"), 1);
+
+    let (model, provider, input, output): (String, String, i64, i64) = connection
+        .query_row(
+            "SELECT model, provider, input_total, output_total FROM usage_event WHERE event_id = 'mu-001'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(model, "jev-latest");
+    assert_eq!(provider, "typesafe");
+    assert_eq!(input, 1000);
+    assert_eq!(output, 200);
+}
+
+#[test]
+fn codex_token_usage_record_is_collected_and_ignores_duplicate_token_count() {
+    let fixture = Fixture::new("codex-tur");
+    let codex_file = fixture.paths.codex.join("rollout-tur.jsonl");
+    fs::write(&codex_file, "").unwrap();
+
+    let mut connection = fixture.connection();
+    let mut collector = sources::Collector::new(fixture.paths.clone());
+    collector.run_round(&mut connection, 1_000).unwrap();
+
+    let turn = r#"{"timestamp":"2026-10-30T10:00:00.000Z","type":"turn_context","payload":{"turn_id":"t1","model":"gpt-6.1-sol"}}"#;
+    let ur = r#"{"timestamp":"2026-10-30T10:00:05.000Z","type":"token_usage_record","payload":{"response_id":"resp-123","usage":{"input_tokens":5000,"cached_input_tokens":1000,"cache_write_input_tokens":0,"output_tokens":300,"reasoning_output_tokens":50,"total_tokens":5300}}}"#;
+    let tc_dup1 = r#"{"timestamp":"2026-10-30T10:00:06.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":5000,"cached_input_tokens":1000,"output_tokens":300,"total_tokens":5300},"last_token_usage":{"input_tokens":5000,"cached_input_tokens":1000,"output_tokens":300,"total_tokens":5300}}}}"#;
+    let tc_dup2 = r#"{"timestamp":"2026-10-30T10:00:10.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":5000,"cached_input_tokens":1000,"output_tokens":300,"total_tokens":5300},"last_token_usage":{"input_tokens":5000,"cached_input_tokens":1000,"output_tokens":300,"total_tokens":5300}}}}"#;
+
+    fixture.append(&codex_file, &format!("{turn}\n{ur}\n{tc_dup1}\n{tc_dup2}\n"));
+
+    let report = collector.run_round(&mut connection, 2_000).unwrap();
+    // Exactly 1 event inserted (the token_usage_record), both duplicate token_counts ignored!
+    assert_eq!(report.inserted, 1);
+    assert_eq!(count(&connection, "codex"), 1);
+
+    let (model, input, output): (String, i64, i64) = connection
+        .query_row(
+            "SELECT model, input_total, output_total FROM usage_event WHERE source = 'codex'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(model, "gpt-6.1-sol");
+    assert_eq!(input, 5000);
+    assert_eq!(output, 300);
+}

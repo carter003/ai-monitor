@@ -55,6 +55,9 @@ pub struct CodexState {
     sessions: HashMap<PathBuf, String>,
     /// A successful head scan need not be repeated when metadata is absent.
     scanned_heads: HashSet<PathBuf>,
+    /// Files that have emitted at least one `token_usage_record`.
+    /// When present, `token_count` events are ignored to prevent double counting.
+    seen_usage_records: HashSet<PathBuf>,
 }
 
 impl CodexState {
@@ -71,6 +74,7 @@ impl CodexState {
         self.models.remove(path);
         self.sessions.remove(path);
         self.scanned_heads.remove(path);
+        self.seen_usage_records.remove(path);
     }
 
     /// Rebuild the tracked model after a restart by replaying the file prefix.
@@ -98,6 +102,9 @@ impl CodexState {
         if let Some(session) = extract_session_id(&head_bytes) {
             self.sessions.insert(path.to_path_buf(), session);
         }
+        if head_bytes.windows(18).any(|part| part == b"token_usage_record") {
+            self.seen_usage_records.insert(path.to_path_buf());
+        }
     }
     /// Parse one fresh line.
     ///
@@ -118,13 +125,14 @@ impl CodexState {
                 self.record_model(path, &value);
                 Vec::new()
             }
-            // Duplicate of `token_count`, ignored so the inference is counted
-            // once (see the module doc).
-            Some("token_usage_record") => {
-                self.record_session(path, &value);
-                Vec::new()
+            Some("token_usage_record") => self.parse_token_usage_record(path, line, &value),
+            Some("event_msg") => {
+                if self.seen_usage_records.contains(path) {
+                    Vec::new()
+                } else {
+                    self.parse_event_msg(path, line, &value)
+                }
             }
-            Some("event_msg") => self.parse_event_msg(path, line, &value),
             _ => Vec::new(),
         }
     }
@@ -214,6 +222,64 @@ impl CodexState {
             model_source,
             // The rollout is written by the Codex client and its model traffic
             // uses the OpenAI Codex channel even though token_count omits it.
+            provider: Some("openai-codex".to_owned()),
+            session_id: self.sessions.get(path).cloned(),
+            started_at: Some(occurred_at),
+            completed_at: None,
+            duration_ms: None,
+            account_key: None,
+            account_label: None,
+            account_source: None,
+            account_route_reason: None,
+            occurred_at,
+        }]
+    }
+
+    fn parse_token_usage_record(
+        &mut self,
+        path: &Path,
+        line: &TailLine,
+        value: &serde_json::Value,
+    ) -> Vec<ParsedEvent> {
+        self.seen_usage_records.insert(path.to_path_buf());
+        self.record_session(path, value);
+        let Some(usage) = value.pointer("/payload/usage") else {
+            return Vec::new();
+        };
+        if usage.is_null() {
+            return Vec::new();
+        }
+        let occurred_at = match value
+            .get("timestamp")
+            .and_then(serde_json::Value::as_str)
+            .and_then(parse_rfc3339_millis)
+        {
+            Some(millis) => millis,
+            None => return Vec::new(),
+        };
+
+        let last = CodexLastUsage {
+            input_tokens: int_at(usage, "input_tokens"),
+            cached_input_tokens: int_at(usage, "cached_input_tokens"),
+            cache_write_input_tokens: int_at(usage, "cache_write_input_tokens"),
+            output_tokens: int_at(usage, "output_tokens"),
+            reasoning_output_tokens: int_at(usage, "reasoning_output_tokens"),
+        };
+
+        if (!self.models.contains_key(path) || !self.sessions.contains_key(path))
+            && !self.scanned_heads.contains(path)
+        {
+            self.recover_metadata_from_head(path, line.start);
+        }
+        let (model, model_source) = match self.model_for(path) {
+            Some(model) => (Some(model.to_string()), Some(ModelSource::Context)),
+            None => (None, None),
+        };
+        vec![ParsedEvent {
+            event_id: format!("{}:{}", path.display(), line.start),
+            usage: normalize_codex(&last),
+            model,
+            model_source,
             provider: Some("openai-codex".to_owned()),
             session_id: self.sessions.get(path).cloned(),
             started_at: Some(occurred_at),
@@ -429,26 +495,23 @@ mod tests {
     }
 
     #[test]
-    fn token_usage_record_is_ignored_because_it_duplicates_token_count() {
-        // Measured: across all 2026-09 rollouts, 31657 of 31661
-        // `token_usage_record` usage objects reappear verbatim as a later
-        // `token_count` `last_token_usage`; this fixture is one of them
-        // (rollout-2026-09-04T10-06-59-*.jsonl line 20 -> the token_count for
-        // the same counters follows within the same second). Emitting both
-        // envelopes would put the same inference in the database twice, and
-        // the 4 counterexamples are each followed by a zero-token
-        // `token_count` carrying no usage at all.
+    fn token_usage_record_is_preferred_and_token_count_is_ignored() {
         let mut state = CodexState::new();
         state.parse_line(&file(), &line(TURN_CONTEXT, 0));
         let events = state.parse_line(&file(), &line(TOKEN_USAGE_RECORD, 1024));
-        assert!(events.is_empty());
-        assert_eq!(state.model_for(&file()), Some("gpt-5.5"));
-        let request = state.parse_line(&file(), &line(TOKEN_COUNT, 2048));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].usage.input_total, 17936);
+        assert_eq!(events[0].usage.output_total, 552);
+        assert_eq!(events[0].model.as_deref(), Some("gpt-5.5"));
         assert_eq!(
-            request[0].session_id.as_deref(),
+            events[0].session_id.as_deref(),
             Some("01a06a2b-53cc-7c00-adda-d4651a81eeca")
         );
-        assert_eq!(request[0].provider.as_deref(), Some("openai-codex"));
+        assert_eq!(events[0].provider.as_deref(), Some("openai-codex"));
+
+        // Subsequent token_count in the same file is ignored to avoid double-counting.
+        let subsequent = state.parse_line(&file(), &line(TOKEN_COUNT, 2048));
+        assert!(subsequent.is_empty());
     }
 
     #[test]

@@ -611,6 +611,81 @@ impl OmpState {
                 );
                 return out;
             }
+            Some("model_usage") => {
+                let mut out = self
+                    .finalize_pending(path, accounts)
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                let Some(usage) = record.get("usage") else {
+                    return out;
+                };
+                if usage.is_null() {
+                    return out;
+                }
+                let Some(event_id) = record.get("id").and_then(Value::as_str) else {
+                    return out;
+                };
+                let Some(occurred_at) = record
+                    .get("timestamp")
+                    .and_then(timestamp_ms)
+                else {
+                    return out;
+                };
+
+                let parsed = OmpUsage {
+                    input: int(usage, "input"),
+                    output: int(usage, "output"),
+                    cache_read: int(usage, "cacheRead"),
+                    cache_write: int(usage, "cacheWrite"),
+                    reasoning_tokens: usage.get("reasoningTokens").and_then(Value::as_i64),
+                };
+                let model = record
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_owned);
+                let provider = record
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_owned);
+                let usage = normalize_omp(&parsed);
+                let session_id = self.sessions.get(path).cloned();
+                let duration_ms = record
+                    .get("duration")
+                    .and_then(Value::as_f64)
+                    .map(|value| value.max(0.0).round() as i64);
+                let completed_at = record
+                    .get("completedAt")
+                    .and_then(timestamp_ms)
+                    .or_else(|| duration_ms.map(|duration| occurred_at.saturating_add(duration)));
+
+                let (account, account_route_reason) = self.request_identity(
+                    path,
+                    provider.as_deref(),
+                    session_id.as_deref(),
+                    completed_at.unwrap_or(occurred_at),
+                    accounts,
+                );
+
+                out.push(ParsedEvent {
+                    event_id: event_id.to_owned(),
+                    usage,
+                    model_source: model.as_ref().map(|_| ModelSource::Event),
+                    model,
+                    provider,
+                    session_id,
+                    started_at: Some(occurred_at),
+                    completed_at,
+                    duration_ms,
+                    account_key: account.as_ref().map(|account| account.key.clone()),
+                    account_label: account.as_ref().map(|account| account.label.clone()),
+                    account_source: account.map(|account| account.source.to_owned()),
+                    account_route_reason,
+                    occurred_at,
+                });
+                return out;
+            }
             _ => {}
         }
         let Some(message) = record.get("message") else {
@@ -773,11 +848,23 @@ fn int(value: &Value, key: &str) -> i64 {
 pub fn record_provider(line: &[u8]) -> Option<(String, String)> {
     let record: Value = serde_json::from_slice(line).ok()?;
     let id = record.get("id").and_then(Value::as_str)?;
-    let provider = record
+    if let Some(provider) = record
         .pointer("/message/provider")
         .and_then(Value::as_str)
-        .filter(|provider| !provider.is_empty())?;
-    Some((id.to_owned(), provider.to_owned()))
+        .filter(|provider| !provider.is_empty())
+    {
+        return Some((id.to_owned(), provider.to_owned()));
+    }
+    if record.get("type").and_then(Value::as_str) == Some("model_usage") {
+        if let Some(provider) = record
+            .get("provider")
+            .and_then(Value::as_str)
+            .filter(|provider| !provider.is_empty())
+        {
+            return Some((id.to_owned(), provider.to_owned()));
+        }
+    }
+    None
 }
 
 /// Parse an RFC3339 timestamp into UTC epoch milliseconds.
@@ -832,6 +919,22 @@ mod tests {
         // envelope id is used instead of silently regressing to a NULL key.
         let value: Value = serde_json::from_str(ASSISTANT).expect("fixture parses");
         assert!(value["message"].get("id").is_none());
+    }
+
+    const MODEL_USAGE: &str = r#"{"type":"model_usage","id":"50a602fe","parentId":"35b3906f","timestamp":"2026-10-18T08:04:16.005Z","purpose":"find","role":"typesafe","api":"typesafe","provider":"typesafe","model":"jev-latest","usage":{"input":1498,"output":232,"cacheRead":0,"cacheWrite":0,"totalTokens":1730,"reasoningTokens":10,"cost":{"input":0.0001,"output":0,"cacheRead":0,"cacheWrite":0,"total":0.0001}}}"#;
+
+    #[test]
+    fn model_usage_records_are_parsed_and_collected() {
+        let mut state = OmpState::new();
+        let events = state.parse_line(Path::new("/a.jsonl"), &line(0, MODEL_USAGE));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_id, "50a602fe");
+        assert_eq!(events[0].usage.input_total, 1498);
+        assert_eq!(events[0].usage.output_total, 232);
+        assert_eq!(events[0].usage.reasoning, 10);
+        assert_eq!(events[0].model.as_deref(), Some("jev-latest"));
+        assert_eq!(events[0].provider.as_deref(), Some("typesafe"));
+        assert_eq!(events[0].model_source, Some(ModelSource::Event));
     }
 
     #[test]
