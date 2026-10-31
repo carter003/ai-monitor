@@ -19,6 +19,15 @@ function sessionFile(context) {
   }
 }
 
+function sessionId(context) {
+  try {
+    const id = context?.sessionManager?.getSessionId?.();
+    return typeof id === 'string' && id.length > 0 ? id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function ompDisplayAgent(context, argv = process.argv) {
   const configured = process.env.HERDR_TPS_OMP_DISPLAY_AGENT;
   if (configured) {
@@ -191,6 +200,10 @@ export function registerOmpTpsHandlers(pi, reporterOrFactory, { requireUi = fals
   let reporter = requireUi ? undefined : reporterFactory();
   let observer = reporter ? new OmpTpsObserver(reporter) : undefined;
   let rootSession = !requireUi;
+  let rootSessionManager;
+  let rootSessionId;
+  let rootSessionFile;
+  let rootContextRef;
   let displayRefreshTimer;
 
   // OMP can attach the TUI after its first session event. Check eligibility
@@ -199,6 +212,34 @@ export function registerOmpTpsHandlers(pi, reporterOrFactory, { requireUi = fals
   const acceptsContext = (context) =>
     context?.agent?.kind !== 'sub' && (!requireUi || context?.hasUI === true);
 
+  const isRootContext = (context) => {
+    if (!rootSession) {
+      return false;
+    }
+    if (context === undefined) {
+      return !requireUi;
+    }
+    if (context?.agent?.kind === 'sub') {
+      return false;
+    }
+    const currentId = sessionId(context);
+    const currentFile = sessionFile(context);
+    const currentManager = context?.sessionManager;
+
+    if (rootSessionId && currentId) {
+      return rootSessionId === currentId;
+    }
+    if (rootSessionFile && currentFile) {
+      return rootSessionFile === currentFile;
+    }
+    if (rootSessionManager && currentManager) {
+      return rootSessionManager === currentManager;
+    }
+    if (rootContextRef && context === rootContextRef) {
+      return true;
+    }
+    return !requireUi || context?.hasUI === true;
+  };
   const updateDisplayAgent = (context) => {
     reporter.setDisplayAgent?.(ompDisplayAgent(context));
     if (displayRefreshTimer) {
@@ -256,6 +297,10 @@ export function registerOmpTpsHandlers(pi, reporterOrFactory, { requireUi = fals
       return true;
     }
     rootSession = true;
+    rootSessionManager = context?.sessionManager;
+    rootSessionId = sessionId(context);
+    rootSessionFile = sessionFile(context);
+    rootContextRef = context;
     reporter = reporterFactory();
     observer = new OmpTpsObserver(reporter);
     return true;
@@ -265,6 +310,10 @@ export function registerOmpTpsHandlers(pi, reporterOrFactory, { requireUi = fals
     if (!ensureRootSession(context)) {
       return;
     }
+    rootSessionManager = context?.sessionManager;
+    rootSessionId = sessionId(context);
+    rootSessionFile = sessionFile(context);
+    rootContextRef = context;
     observer.reset();
     if (reset) {
       reporter.resetSession?.();
@@ -307,14 +356,14 @@ export function registerOmpTpsHandlers(pi, reporterOrFactory, { requireUi = fals
   });
 
   pi.on('agent_end', (_event, context) => {
-    if (!rootSession || (context !== undefined && !acceptsContext(context))) {
+    if (!isRootContext(context)) {
       return;
     }
     reporter.pause();
   });
 
   pi.on('session_shutdown', (_event, context) => {
-    if (!rootSession || (context !== undefined && !acceptsContext(context))) {
+    if (!isRootContext(context)) {
       return;
     }
     if (displayRefreshTimer) {
@@ -322,6 +371,10 @@ export function registerOmpTpsHandlers(pi, reporterOrFactory, { requireUi = fals
       displayRefreshTimer = undefined;
     }
     rootSession = false;
+    rootSessionManager = undefined;
+    rootSessionId = undefined;
+    rootSessionFile = undefined;
+    rootContextRef = undefined;
     observer.reset();
     return reporter.close();
   });

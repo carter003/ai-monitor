@@ -294,6 +294,79 @@ test('ignores subagent and headless events after the root UI has activated', () 
   ]);
 });
 
+test('ignores child sessions and context-less session_shutdown while retaining root reporter', () => {
+  const handlers = new Map();
+  const calls = [];
+  const reporter = {
+    configureTokenModel() {},
+    setModel: (model) => calls.push(['model', model]),
+    setDisplayAgent: (agent) => calls.push(['display-agent', agent]),
+    start: (...args) => calls.push(['start', ...args]),
+    append: () => {},
+    pause: () => calls.push(['pause']),
+    close: () => calls.push(['close']),
+  };
+  registerOmpTpsHandlers({ on: (event, handler) => handlers.set(event, handler) }, reporter, {
+    requireUi: true,
+  });
+
+  const root = {
+    hasUI: true,
+    agent: { kind: 'main', id: 'Main' },
+    sessionManager: {
+      getSessionId: () => 'root-session-id',
+      getSessionFile: () => '/home/user/.omp/agent/sessions/root.jsonl',
+    },
+    model: { id: 'root-model' },
+  };
+
+  handlers.get('session_start')({}, root);
+  assert.deepEqual(calls, [
+    ['model', 'root-model'],
+    ['display-agent', 'omp'],
+  ]);
+  calls.length = 0;
+
+  // 1. Context-less session_shutdown from untracked internal dispose must be ignored
+  handlers.get('session_shutdown')({ type: 'session_shutdown' }, undefined);
+  assert.deepEqual(calls, [], 'context-less shutdown must not close root reporter');
+
+  // 2. Child session with different sessionId must be ignored
+  const childSession = {
+    hasUI: false,
+    agent: { kind: 'main', id: 'Child' },
+    sessionManager: {
+      getSessionId: () => 'child-eval-session-id',
+      getSessionFile: () => '/home/user/.omp/agent/sessions/child.jsonl',
+    },
+  };
+  handlers.get('session_shutdown')({ type: 'session_shutdown' }, childSession);
+  assert.deepEqual(calls, [], 'child session shutdown must not close root reporter');
+
+  // 3. Subagent session must be ignored
+  const subagentSession = {
+    hasUI: true,
+    agent: { kind: 'sub', id: 'Sub' },
+    sessionManager: {
+      getSessionId: () => 'subagent-session-id',
+    },
+  };
+  handlers.get('session_shutdown')({ type: 'session_shutdown' }, subagentSession);
+  assert.deepEqual(calls, [], 'subagent shutdown must not close root reporter');
+
+  // 4. Real root session shutdown (even when TUI has detached, hasUI: false) closes reporter
+  const rootShutdown = {
+    hasUI: false,
+    agent: { kind: 'main', id: 'Main' },
+    sessionManager: {
+      getSessionId: () => 'root-session-id',
+      getSessionFile: () => '/home/user/.omp/agent/sessions/root.jsonl',
+    },
+  };
+  handlers.get('session_shutdown')({ type: 'session_shutdown' }, rootShutdown);
+  assert.deepEqual(calls, [['close']], 'matching root session shutdown must close reporter');
+});
+
 test('resets completed-message and snapshot state when navigating the session tree', () => {
   const handlers = new Map();
   const calls = [];
