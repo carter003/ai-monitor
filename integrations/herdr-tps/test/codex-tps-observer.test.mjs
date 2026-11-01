@@ -758,3 +758,59 @@ test('a delayed read cannot reactivate an older root after the active root close
   assert.equal(observer.rootThreadId, undefined);
   assert.equal(observer.model, undefined);
 });
+
+test('thread/started activates root and sets model immediately when idle', () => {
+  const { observer, server } = observerFixture();
+  server('thread/started', {
+    thread: { id: 'idle-root', parentThreadId: null, model: 'gpt-6.1-sol' },
+  });
+  assert.equal(observer.rootThreadId, 'idle-root');
+  assert.equal(observer.model, 'gpt-6.1-sol');
+});
+
+test('session transition with thread/closed preceding thread/start response activates new root', () => {
+  const { observer, client, server } = observerFixture();
+  server('thread/started', {
+    thread: { id: 'old-root', parentThreadId: null, model: 'gpt-5.6-pro' },
+  });
+  server('turn/started', { threadId: 'old-root', turn: { id: 'turn-1' } });
+  server('turn/completed', { threadId: 'old-root', turn: { id: 'turn-1' } });
+  assert.equal(observer.rootThreadId, 'old-root');
+
+  client({ id: 10, method: 'thread/start', params: { model: 'gpt-6.1-sol' } });
+
+  server('thread/closed', { threadId: 'old-root' });
+  assert.equal(observer.rootThreadId, undefined);
+  assert.equal(observer.model, undefined);
+
+  observer.observeServerEvent({
+    id: 10,
+    result: {
+      thread: { id: 'new-root', parentThreadId: null, model: 'gpt-6.1-sol' },
+      model: 'gpt-6.1-sol',
+    },
+  });
+  assert.equal(observer.rootThreadId, 'new-root');
+  assert.equal(observer.model, 'gpt-6.1-sol');
+});
+
+test('thread/settings/updated sets model on new root after previous session closed', () => {
+  const { observer, server } = observerFixture();
+  server('thread/started', {
+    thread: { id: 'initial', parentThreadId: null, model: 'gpt-5.6-pro' },
+  });
+  server('thread/closed', { threadId: 'initial' });
+  assert.equal(observer.rootThreadId, undefined);
+
+  server('thread/started', {
+    thread: { id: 'resumed', parentThreadId: null, model: 'gpt-5.6-pro' },
+  });
+  assert.equal(observer.rootThreadId, 'resumed');
+  assert.equal(observer.model, 'gpt-5.6-pro');
+
+  server('thread/settings/updated', {
+    threadId: 'resumed',
+    threadSettings: { model: 'gpt-6.1-sol' },
+  });
+  assert.equal(observer.model, 'gpt-6.1-sol');
+});

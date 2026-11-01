@@ -1,6 +1,6 @@
 # OMP 原生认证与 opencode-go session 粘性
 
-OMP 18.14.1 的认证、额度报告、reserve、block、rotation 和 429 恢复继续使用原生 AuthStorage。
+OMP 18.14.2 的认证、额度报告、reserve、block、rotation 和 429 恢复继续使用原生 AuthStorage。
 扩展只补齐 opencode-go API Key 的 session 粘性，不固定 Antigravity credential、不执行跨
 provider fallback，也不覆盖原生 `health.model`。
 
@@ -25,7 +25,7 @@ credential ID 作为 `herdr-api-key-sticky-v1` custom entry 写入所属 session
 选择写入器，不能复用最后激活的扩展 API。`session_branch` 会重新绑定新 session 的写入器，
 只恢复该 ID 自己的记录，不复制父 session 的 pin。恢复同一子 session 会替换写入器，旧实例退出不会移除新实例。
 
-OMP 18.14.1 的 `/reset` 与 `/fresh` 会生成不同于日志 session ID 的内部 provider routing ID。
+OMP 18.14.2 的 `/reset` 与 `/fresh` 会生成不同于日志 session ID 的内部 provider routing ID。
 公开 ExtensionContext 和请求事件没有提供这一映射，因此这些请求仍可在进程内保持粘性，
 但对应 pin 无法可靠写入所属日志，也不能承诺跨进程恢复或 collector 的精确账户归因。
 不从请求 payload 的 `prompt_cache_key` 猜测映射；修复需要上游公开有效 routing ID 或认证 hook。
@@ -35,7 +35,7 @@ OMP 18.14.1 的 `/reset` 与 `/fresh` 会生成不同于日志 session ID 的内
 `store-replaced` release、清理旧存储的选择缓存。新存储即使复用相同 credential ID，也会
 重新记录 pin；旧存储尚未完成的异步调用不会覆盖新存储的观察状态。
 
-OMP 18.14.1 仍然只写 API key 的 session affinity，API-key 选择路径（`CredentialSelector.selectApiKey`）
+OMP 18.14.2 仍然只写 API key 的 session affinity，API-key 选择路径（`CredentialSelector.selectApiKey`）
 不读这份 affinity；只有 OAuth 路径（`resolveOAuth`）读。因此本地路由补丁依旧必要，继续位于公开的
 `keys.getWithCredential`、`sessions.release` 和 reset boundary 接口，不修改 Bun runtime。
 普通 request 不再因额度样本刷新或排序分数变化而换号。
@@ -74,7 +74,7 @@ credential ID 捕获（peer 重排行不再错位）。本扩展的粘性 pin �
 generator 管理。
 
 ## OMP 升级
-路由器不依赖 bundle 字节偏移或 minified 私有方法名，只依赖 OMP 18.14.1 的：
+路由器不依赖 bundle 字节偏移或 minified 私有方法名，只依赖 OMP 18.14.2 的：
 
 
 - `keys.getWithCredential`、`keys.source`、`sessions.release`、`sessions.isRestricted`、`sessions.permits`、`limits.markReached`、`limits.rotate`；
@@ -92,7 +92,7 @@ Antigravity 账号选择完全由 OMP 原生实现，本扩展不再改写 syste
 为真才表示真的换了账号。观察器因此只在 `rotated.switched` 时记录 `rotation` release。
 没有可用 sibling 时 rotate 最多等待 5s（`SIBLING_UNBLOCK_WAIT_MAX_MS`）等短暂 block 的
 sibling 恢复，随后返回 `switched: false`——此时账号没变，按旧的真值判断会被误记成 rotation。
-`packages/ai/src/auth/rotation.ts` 在 18.8.1 至 18.14.1 核心契约与返回结构相同；18.8.1 起新增 `sessionId` 参数并用
+`packages/ai/src/auth/rotation.ts` 在 18.8.1 至 18.14.2 核心契约与返回结构相同；18.8.1 起新增 `sessionId` 参数并用
 `affinity.allows()` 过滤 sibling，但 `CredentialRotation` 的 `{ switched }` 契约没有再变。
 
 升级后必须验证这些公开接口与 reset boundary 行为：
@@ -138,7 +138,7 @@ node --test integrations/herdr-tps/test/omp-runtime-contract.test.mjs
 该测试调用原生 AuthStorage、SessionManager、上下文重建 helper 和宿主 Tokenizer，事件由 fixture 投递，
 不等同于实际 TUI 命令、在线账户恢复或侧栏现场验证。
 
-本轮验证：`npm run herdr:tps:test` 155/155 通过（含本机 18.14.1 的七组契约检查）；
+本轮验证：`npm run herdr:tps:test` 156/156 通过（含本机 18.14.2 的七组契约检查）；
 `cargo test --offline --locked`：ai-monitor 198 passed（193+1+4，2 ignored）、herdr-usage 145 passed（117+25+3）；安装 dry-run 的 config/shell/links
 均已就绪，daemon 共享 dry-run 为 `already-shared`，`git diff --check` 通过。
 交互进程仍需在任务结束后重启，再观察真实会话切换与侧栏显示。
@@ -212,6 +212,68 @@ bundle 接口出现次数 18.8.4 → 18.8.6（`grep -ao` 对两份二进制分�
   `npm run herdr:tps:install -- --dry-run`：config、shell、links 均已就绪；
   `share-omp-daemons.mjs --dry-run` → `already-shared`（pro2 daemons 仍共享）。
   本地 sticky pin、TPS reporter 及 herdr-usage 采集链路全部通过，扩展与采集代码无需修改。
+
+### 18.14.2
+
+upstream [`v18.14.1...v18.14.2`](https://github.com/can1357/oh-my-pi/compare/v18.14.1...v18.14.2)
+官方 release 日期 2026-10-31（Tag 与 Release 发布于 2026-10-31 17:56 UTC，基于 release commit `7efd772` / `7efd77219374ca4e8767979809835e4aa90666ba`）。包含 34 个 PR / 提交。主要涵盖思考死循环检测轴向重构与 Claude 循环误判修复、Factory Droid 服务端拒绝回退链禁用（`disableServerSideFallback`）、Anthropic 空增量流超时防御与思考签名传递、AuthStorage 在途 OAuth 刷新排空与关闭保护、Cursor 用量百分比展示、Auth Gateway Responses 允许 null 参数与 Gemini 工具调用思考签名保留、子代理/Eval 显式模型限定与参数约束（`task.perCallModel` / `task.maxEffort`）、`Settings.reloadFromDisk` 保留 overlay 配置、软转向信号源（`toolCall.steeringSignal.reason`）追踪、排队消息干预挂起 Ask 对话框、不完整会话摘要截断校验、原生判断 3s 超时快速熔断 fallback、`bash` 注入 `PI_TOOL_CALL_ID` 环境变量、目录读取显示构建与依赖子目录、整页超长首行 URL 读取截断、JS eval `output()` 参数支持、MCP 自动重连与连接生命周期防泄露、LSP CRLF 源码换行符与结构化高亮定义展示、跨行搜索与读取结果连贯代码块滚动（`TspCodeProps.nums`）、TSP 真实交互按钮（`TspButtonProps`）与分段控制卡片、低对比度主题会话树轮次可读性增强、工具活动隐藏模式下 IRC 卡片隐藏、`omp stats` 面板就地嵌入与 `/stats` 侧边栏：
+
+- **模型适配、推理网关与结构化输出**：
+  - **思考死循环检测轴向重构与 Claude 误判修复**：`loopGuardLevel` 替换原 `isLoopGuardedModel`（返回 `"off"`, `"exact"`, `"semantic"`），`thinkingLoopGuard` 从 compat records 移除并泛化为全局 catalog axis（Gemini、DeepSeek、Grok 为 `"semantic"`，Claude 为 `"off"`）；彻底修复 Claude turns 因重复状态行（如 "Still writing the parser..."）误触 "Thinking loop detected" 导致轮次失败的缺陷；其它模型整行重复约 1KB 才判定为循环；Amazon Bedrock 上的 DeepSeek 和 Grok 获得与其他 host 一致的近似重复推理检查（PR #12229 等）；
+  - **Factory Droid 拒绝回退链禁用**：新增 `disableServerSideFallback`（`FactoryDroidOptions` 与 `SimpleStreamOptions`），请求跳过服务端 refusal fallback chain，如果其他模型响应则在内容流式传输前快速失败（PR #12229）；
+  - **Anthropic 空增量流超时防御与思考签名传递**：修复停滞的 Anthropic 流持续发送空 content deltas 导致流超时计时器不断刷新而永不超时的缺陷（PR #17484）；修复 Anthropic 兼容 endpoint 在 content_block_start 传递的 thinking signature 丢失的问题，保证重放推理保留签名块（PR #17483）；
+  - **AuthStorage 在途 OAuth 刷新排空保护**：修复 `AuthStorage.close()` 和 `replaceStore()` 在 OAuth 刷新进行中（in-flight）时关闭导致轮换后的 refresh token 丢失的问题；底层持久存储保持开启直至 token 成功落盘，且关闭期间拒绝新的刷新（Issue #17518, PR #17519）；
+  - **OpenAI 兼容 Header 大小写覆盖**：修复每请求 OpenAI 兼容 headers 与模型级不同大小写 headers 混合而非覆盖的问题（PR #17513）；
+  - **Cursor /usage 修复与 Gateway 强化**：Cursor "Other Models" 计量表修复显示虚高美元金额的问题，改按 Cursor 实际报告的百分比展示（PR #17462）；`omp auth-gateway` Responses 端点允许 temperature、top_p、output limits、reasoning 等为 null（PR #17466）；chat-completions 端点保留 Gemini tool calls 的 thought signature 在 `extra_content` 中并在后续轮次重放（PR #17509）；修复抛出错误已带响应体时重复打印 HTTP 响应体（PR #17503）。
+- **任务规划、工具审批与子代理控制**：
+  - **子代理与 Eval 动态指定模型限定（`task.perCallModel`）**：新增 `task.perCallModel`（`off` 默认、`eval`、`on`），允许任务项或 eval `agent()`/`workpool()` 运行在操作员显式命名的精确模型上（chat role、agent 专属模型、父会话模型）；支持 `task.perCallModelAllow` 白名单与 `task.maxEffort` 上限；项目配置只能收紧不能放宽；所有 task schema 显式声明 `model` 字段（PR #12229）；
+  - **动态配置重载**：新增 `Settings.reloadFromDisk({ includeParents: true })`，重新加载磁盘持久配置同时保留 overlay 自身的覆盖项（PR #12229）；
+  - **软转向信号源追踪（`toolCall.steeringSignal.reason`）**：工具软转向信号携带排队消息的来源（如 `"user"`, `"irc"` 等）作为 `reason`，工具可选择性向特定信号源 yield（Issue #17537）；
+  - **排队消息干预挂起 Ask 对话框**：当 agent 等待 `ask` 工具时，排队的用户消息自动关闭对话框而不取消当前轮次；IRC 消息和后台完成则保持对话框开启（Issue #17537, PR #17541）；
+  - **会话摘要截断校验**：拒绝以 `stopReason: "length"` 结尾的不完整局部 compaction、turn-prefix、handoff 和分支摘要，防止以截断文本作为完整上下文；仅展示用的短摘要被省略而不丢弃完整的长摘要（PR #17499）；
+  - **原生判断快速熔断 fallback**：带 fallback 的原生判断在 3 秒超时（`judgment.attemptTimeoutMs` 可配）后快速切换至 fallback 并临时跳过超时路由（PR #17465）。
+- **工具链、LSP 与系统性能优化**：
+  - **环境变量注入与工具调用溯源**：`bash` 工具命令自动注入 `PI_TOOL_CALL_ID` 环境变量，脚本可直接在会话历史中追溯到对应 tool call（PR #17489）；
+  - **目录与超长首行 URL 读取修复**：`read` 工具目录列表不再隐藏 `dist`, `build`, `node_modules`, `.git` 等构建/依赖子目录（原生层 `listWorkspace` 新增 `pruneExcludedDirs: false` 选项）（Issue #17539, PR #17543）；整页 URL 读取且首行超过 50KB 时（如压缩 minified 文件），显示该行的前 50KB 而非空白无内容（PR #17500）；
+  - **JS Eval `output()` 参数支持**：修复 JS eval `output()` 忽略 `offset`, `limit`, `query`, `format: "json"` 的问题（Issue #17455, PR #17460）；
+  - **MCP 稳定性增强**：修复 MCP 工具调用在 DNS 或 socket 连接失败时不重连的问题（PR #17461）；修复超时或取消时 stdio 服务仍被拉起的问题（PR #17512）；
+  - **LSP 换行符与定义展示优化**：修复 Windows CRLF 文件下 LSP definition, type definition, implementation, reference 源码上下文行尾附带多余 `\r` 的问题（PR #17549）；修复以空格开头的路径被丢弃的问题；定义结果从原始文本转为结构化计数与源码标注（PR #17549）；
+  - **记忆与产物写入修复**：修复 Mnemopi 启发式记忆抓取单字片段或截断多词对象的问题（Issue #17511, PR #17516）；修复 artifact 写入在暂存文件清理失败时吞掉原始错误的问题（PR #17485）；
+  - **会话与 Advisor 配额保护**：会话查找在个别项目目录不可读时不再丢失其他项目会话（PR #17467）；修复 ACP 协议 handle 在 reset 后切换的问题（PR #17517）；修复 Advisor 在配额超限账号上无限循环重试的问题（同 provider 每个账号最多重试一次）（Issue #17472, PR #17476）。
+- **TUI 终端与排版显示**：
+  - **搜索与 LSP 语法高亮**：TUI 中的 Grep、AST Grep、Find 结果源码行及 LSP 符号名称根据文件语言进行语法高亮，多行字符串和注释保持连续高亮（PR #17550）；
+  - **间断代码块连贯渲染**：TUI / TSP `TspCodeProps` 新增 `nums` 行号数组，跨行 Grep/Read 结果合并为单一代码块水平滚动，中间行号间隙对齐展示 `…`（PR #17550）；
+  - **交互按钮与分段控制卡片**：新增 TSP `button` 类型（`TspButtonProps`，支持 default/primary/quiet/danger 样式与 disabled reason 提示）及 `tabs` `variant: "segmented"`；Tern 渲染真实按钮光标与无障碍状态；
+  - **会话树可读性优化**：在 `dark-terminal`, `dark-poimandres`, `light-poimandres` 等强调色与成功色接近的主题下，会话树用户轮次加粗展示，`assistant:` 标签换为路径颜色，custom 和 advisor 消息弱化显示（Issue #17520）；
+  - **工具活动隐藏模式支持**：IRC 协作卡片（包括接收、自动回复、中继、workpool）在 Hide Tool Activity 开启时自动隐藏（PR #17498）；
+  - **Tern 终端统计面板集成**：`omp stats` 在当前面板就地嵌入可交互 Dashboard（带 Close 按钮，Esc/Ctrl+C 退出），`/stats` 在旁边分屏打开内置浏览器；`omp-stats` 排除未执行的工具调用（PR #17463）；
+  - **表格比率图表与文本嵌套颜色修复**：修复表格图表中 ratio/speedup 列与时间列被一同绘制导致的缩放异常问题；修复嵌套样式结束后外层颜色丢失回退到默认前景色（如 `/mcp` 和 `/ssh` 提示）的问题（PR #17521）。
+
+逐字节未变（两版本比较中核心契约路径继续一致）：
+`packages/ai/src/auth/` 核心契约文件（`auth-storage.ts`、`affinity.ts`、`rotation.ts`、`blocks.ts`、`store.ts`、`resets.ts`、`usage.ts`、`sqlite-credential-store.ts`）、
+`packages/ai/src/provider-session-state.ts`、
+`packages/coding-agent/src/utils/token-rate.ts`、
+`packages/coding-agent/src/extensibility/shared-events.ts`、
+`packages/coding-agent/src/session/session-paths.ts`、
+`commands/launch.ts`、`cli/args.ts`。
+认证模块中 `selectApiKey`（API-key 路径）依旧不读 session affinity；`rotation.ts` 契约不变；`TokenRateMeter` 算法与事件定义未受任何影响，本地 session 粘性路由补丁继续完全适用。上游破坏性变更（`loopGuardLevel` 替换 `isLoopGuardedModel`、compat records 移除 `thinkingLoopGuard`）位于 catalog/loop guard 层，不涉及本仓库扩展。
+
+bundle 接口出现次数 18.14.1 → 18.14.2（`grep -ao` 对两份二进制分别计数）：
+`getWithCredential` 8 → 8、`markReached` 6 → 6、`onGeneration` 8 → 8、`appendResetBoundary` 3 → 3、
+`appendEntry` 19 → 19、`session_shutdown` 9 → 9、`session_start` 11 → 11、`message_update` 39 → 39、
+`message_end` 64 → 64、`TokenRateMeter` 2 → 2、`willContinue` 39 → 39、`awaitingAsyncWork` 12 → 12。
+全部 12 个核心接缝符号计数 100% 保持一致（差值为 0），核心认证与 TPS 接缝符号全部健康。
+
+实机验证与增量补丁升级（`omp-linux-x64` SHA256
+`cde0bc4ac8ec333c4880039a5242ff33dbfc6544747d67aeb99bb077874aeec1`，体积 276,646,064 bytes / 263.83 MB，与 release 构建一致，
+`--version` → `omp/18.14.2`）：
+
+- 本次升级命中 Stencil 增量二进制补丁机制：`.runtime/omp update` 检查到版本差异后，自动下载针对 `18.14.1` 的增量补丁 `omp-linux-x64.patch`（62.8 MB，相比完整二进制约 263.83 MB 节省约 76.19% 带宽）；通过原生 `applyBinaryPatch`（HDiffPatch + zstd）就地应用并校验生成目标二进制 sha256 `cde0bc4ac8ec333c4880039a5242ff33dbfc6544747d67aeb99bb077874aeec1` 后原子替换。
+- 经 `omp-with-tps.mjs --version` 加载 wrapper，正确解析到 18.14.2 runtime（输出 `18.14.2`）。
+- `node --test integrations/herdr-tps/test/*.test.mjs`：156 passed（含本机 18.14.2 的七组契约检查）；
+  `cargo test --offline --locked`：ai-monitor 198 passed（193+1+4，2 ignored）、herdr-usage 145 passed（117+25+3）；
+  `npm run herdr:tps:install -- --dry-run`：config、shell、links 均已就绪；
+  `share-omp-daemons.mjs --dry-run` → `status: already-shared`。
 
 ### 18.14.1
 

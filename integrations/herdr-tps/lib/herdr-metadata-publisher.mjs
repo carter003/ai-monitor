@@ -154,7 +154,9 @@ export class HerdrMetadataPublisher {
       return Promise.resolve();
     }
 
-    const sequence = (this.sequences.get(source) ?? Date.now() * 1_000) + 1;
+    const nowMicros = Date.now() * 1_000;
+    const lastSeq = this.sequences.get(source) ?? 0;
+    const sequence = Math.max(lastSeq + 1, nowMicros);
     this.sequences.set(source, sequence);
     const request = {
       id: requestId(source),

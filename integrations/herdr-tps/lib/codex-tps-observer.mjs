@@ -66,7 +66,7 @@ export class CodexTpsObserver {
   observeServerEvent(message, sequence = ++this.eventSequence) {
     if (this.closed || !message) return;
     if (message.id !== undefined) {
-      this.observeResponse(message);
+      this.observeResponse(message, sequence);
       return;
     }
 
@@ -86,6 +86,9 @@ export class CodexTpsObserver {
     }
     if (message.method === 'thread/settings/updated') {
       this.rememberModel(params?.threadId, effectiveModel(params?.threadSettings), sequence);
+      if (this.rootThreadId === undefined && params?.threadId) {
+        this.activateThread(params.threadId, message.emittedAtMs, sequence);
+      }
     }
     if (
       TRACKED_NOTIFICATIONS.has(message.method) &&
@@ -126,6 +129,9 @@ export class CodexTpsObserver {
     }
     if (message.method === 'thread/started') {
       this.rememberThread(params?.thread);
+      if (this.rootThreadId === undefined && params?.thread?.id) {
+        this.activateThread(params.thread.id, message.emittedAtMs, sequence);
+      }
       return;
     }
     if (message.method === 'turn/started') {
@@ -197,7 +203,7 @@ export class CodexTpsObserver {
     this.reporter.append(String(generationKey), streamKey, delta, this.model, now);
   }
 
-  observeResponse(message) {
+  observeResponse(message, sequence = ++this.eventSequence) {
     const pendingParams = this.pendingRequests.get(requestKey(message.id));
     if (!pendingParams) {
       return;
@@ -221,11 +227,15 @@ export class CodexTpsObserver {
       model:
         effectiveModel(message.result) ??
         effectiveModel(pendingParams) ??
-        message.result.thread.model,
+        message.result.thread?.model,
     });
     // A late placeholder response must not steal an already active turn.
     if (!this.currentTurnId) {
-      this.activateThread(threadId, undefined, pendingParams.sequence);
+      const activationSequence =
+        this.rootThreadId === undefined
+          ? Math.max(sequence, pendingParams.sequence)
+          : pendingParams.sequence;
+      this.activateThread(threadId, undefined, activationSequence);
     }
   }
 
@@ -283,7 +293,7 @@ export class CodexTpsObserver {
     ) {
       return false;
     }
-    this.activeSequence = sequence;
+    this.activeSequence = Math.max(this.activeSequence, sequence);
     if (threadId !== this.rootThreadId) {
       const switching = this.rootThreadId !== undefined;
       this.currentTurnId = undefined;

@@ -457,3 +457,44 @@ test('deletes the model token after queued snapshots without clearing display na
     else process.env.HERDR_ENV = previous;
   }
 });
+
+test('advances sequence with wall-clock time over long intervals while remaining strictly monotonic', async () => {
+  const previous = process.env.HERDR_ENV;
+  process.env.HERDR_ENV = '1';
+  try {
+    const sent = [];
+    const publisher = new HerdrMetadataPublisher({ paneId: 'pane', socketPath: '/unused' });
+    publisher.send = async (request) => {
+      sent.push(request);
+      return true;
+    };
+
+    // First publication at t0
+    await publisher.publishRate(10, 5_000);
+    assert.equal(sent.length, 1);
+    const seq0 = sent[0].params.seq;
+    assert.ok(seq0 >= Date.now() * 1_000 - 100_000);
+
+    // Immediate second publication in same millisecond: must increment by at least 1
+    await publisher.publishRate(20, 5_000);
+    assert.equal(sent.length, 2);
+    const seq1 = sent[1].params.seq;
+    assert.ok(seq1 > seq0);
+
+    // Simulate clock advancing forward by 5 hours (as in a long-running process)
+    const originalDateNow = Date.now;
+    try {
+      Date.now = () => originalDateNow() + 5 * 3600 * 1000;
+      await publisher.publishRate(30, 5_000);
+      assert.equal(sent.length, 3);
+      const seq2 = sent[2].params.seq;
+      assert.ok(seq2 > seq1);
+      assert.ok(seq2 >= Date.now() * 1_000);
+    } finally {
+      Date.now = originalDateNow;
+    }
+  } finally {
+    if (previous === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = previous;
+  }
+});
