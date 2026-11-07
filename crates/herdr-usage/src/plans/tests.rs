@@ -44,12 +44,12 @@ fn event(
 }
 
 fn sample(account: &str, recorded_at_ms: i64, used_percent: f64, resets_at_ms: i64) -> Sample {
-    // 与账本读取一致：有 email 用 email（antigravity），否则用 `secret:` 之后的哈希。
+    // 与账本读取一致：有 email 用 email，否则用 `secret:` 之后的哈希。
     let email = account
         .split_once("email:")
         .and_then(|(_, rest)| rest.split('|').next())
         .map(str::to_owned);
-    let label = email.clone().unwrap_or_else(|| {
+    let label = email.unwrap_or_else(|| {
         account
             .rsplit_once(':')
             .map(|(_, tail)| tail)
@@ -59,7 +59,6 @@ fn sample(account: &str, recorded_at_ms: i64, used_percent: f64, resets_at_ms: i
     Sample {
         account_key: account.to_owned(),
         label,
-        email,
         recorded_at_ms,
         used_percent,
         resets_at_ms,
@@ -67,22 +66,17 @@ fn sample(account: &str, recorded_at_ms: i64, used_percent: f64, resets_at_ms: i
     }
 }
 
-fn samples_of(pairs: Vec<(&'static str, Vec<Sample>)>) -> BTreeMap<&'static str, Vec<Sample>> {
-    pairs.into_iter().collect()
-}
-
-/// Antigravity 账本里的账户标识。
+/// 账本里的账户标识。
 fn oauth(email: &str) -> String {
     format!("oauth|email:{email}|project:proj")
 }
 
-/// 默认选项：两个 Antigravity home 都指向不存在的路径，因此单元测试绝不读
-/// 真实 HOME，也不会意外识别出 AGY 账户。
+fn samples_of(pairs: Vec<(&'static str, Vec<Sample>)>) -> BTreeMap<&'static str, Vec<Sample>> {
+    pairs.into_iter().collect()
+}
+
 fn options() -> PlanOptions {
-    PlanOptions {
-        agy_home: PathBuf::from("/nonexistent/agy"),
-        agy2_home: PathBuf::from("/nonexistent/agy2"),
-    }
+    PlanOptions
 }
 
 fn plan<'a>(report: &'a PlanReport, id: &str) -> &'a PlanEntry {
@@ -112,10 +106,34 @@ fn a_single_account_period_derives_the_cap_from_usage_over_the_used_fraction() {
     let end = at(2026, 10, 8, 0);
     let start = end - WINDOW_DAYS * DAY_MS;
     let now = at(2026, 10, 5, 0);
-    event(&connection, "1", "codex", None, start + 3_600_000, Some(6.0), 600);
-    event(&connection, "2", "codex", None, start + 2 * DAY_MS, Some(4.0), 400);
+    event(
+        &connection,
+        "1",
+        "codex",
+        None,
+        start + 3_600_000,
+        Some(6.0),
+        600,
+    );
+    event(
+        &connection,
+        "2",
+        "codex",
+        None,
+        start + 2 * DAY_MS,
+        Some(4.0),
+        400,
+    );
     // 别的 provider 的行绝不能计入 Codex 组。
-    event(&connection, "3", "omp", Some("codebuddy"), start + 4 * DAY_MS, Some(1000.0), 100_000);
+    event(
+        &connection,
+        "3",
+        "omp",
+        Some("codebuddy"),
+        start + 4 * DAY_MS,
+        Some(1000.0),
+        100_000,
+    );
 
     let samples = samples_of(vec![(
         "codex",
@@ -152,102 +170,32 @@ fn the_codex_group_counts_provider_labelled_rows_and_skips_other_providers() {
     let end = at(2026, 10, 8, 0);
     let start = end - WINDOW_DAYS * DAY_MS;
     let now = at(2026, 10, 5, 0);
-    event(&connection, "1", "omp", Some("openai-codex"), start + 3_600_000, Some(8.0), 800);
-    event(&connection, "2", "omp", Some("google-antigravity"), start + 7_200_000, Some(90.0), 9000);
-    let samples = samples_of(vec![("codex", vec![sample("acct", end - DAY_MS, 40.0, end)])]);
+    event(
+        &connection,
+        "1",
+        "omp",
+        Some("openai-codex"),
+        start + 3_600_000,
+        Some(8.0),
+        800,
+    );
+    event(
+        &connection,
+        "2",
+        "omp",
+        Some("opencode-go"),
+        start + 7_200_000,
+        Some(90.0),
+        9000,
+    );
+    let samples = samples_of(vec![(
+        "codex",
+        vec![sample("acct", end - DAY_MS, 40.0, end)],
+    )]);
     let report = build_now(&connection, &samples, &options(), now);
     let codex = plan(&report, "codex");
     assert_eq!(codex.max_cost_usd, Some(20.0), "只统计 openai-codex 的 $8");
     assert_eq!(codex.max_tokens, Some(2000));
-}
-
-#[test]
-fn a_two_account_group_splits_the_cap_by_each_accounts_fraction() {
-    let connection = usage_db();
-    let end = at(2026, 10, 8, 0);
-    let start = end - WINDOW_DAYS * DAY_MS;
-    let now = at(2026, 10, 5, 0);
-    event(&connection, "1", "omp", Some("google-antigravity"), start + 3_600_000, Some(12.0), 1200);
-    let samples = samples_of(vec![(
-        "antigravity",
-        vec![
-            sample(&oauth("bluefishcarter@gmail.com"), end - DAY_MS, 20.0, end),
-            sample(&oauth("carter.gogo@gmail.com"), end - DAY_MS, 10.0, end),
-        ],
-    )]);
-    // AGY = id_token 邮箱（bluefishcarter），AGY2 = 另一个 Antigravity 账户。
-    let dir = tempfile::tempdir().expect("tempdir");
-    let agy_home = dir.path().join(".gemini");
-    fs::create_dir_all(agy_home.join("antigravity-cli")).expect("token dir");
-    let payload = base64url(br#"{"email":"bluefishcarter@gmail.com"}"#);
-    fs::write(
-        agy_home.join("antigravity-cli/antigravity-oauth-token"),
-        format!(r#"{{"id_token":"h.{payload}.s"}}"#),
-    )
-    .expect("write token");
-    let options = PlanOptions {
-        agy_home,
-        agy2_home: dir.path().join(".gemini2"),
-    };
-    let report = build(&connection, &samples, &options, now, Vec::new()).expect("report");
-    let notes = &report.notes;
-
-    let agy = plan(&report, "agy");
-    let agy2 = plan(&report, "agy2");
-    assert!(agy.account_resolved);
-    assert_eq!(agy.account.as_deref(), Some("bluefishcarter@gmail.com"));
-    assert_eq!(agy2.account.as_deref(), Some("carter.gogo@gmail.com"));
-    // Σf = 0.30，U = $12 / 1200 token → 上限 $40 / 4000 token（两份订阅共享）。
-    assert_eq!(agy.max_cost_usd, Some(40.0));
-    assert_eq!(agy2.max_cost_usd, agy.max_cost_usd);
-    assert_eq!(agy.max_tokens, Some(4000));
-    assert_eq!(agy2.max_tokens, agy.max_tokens);
-    assert_eq!(agy.used_percent, Some(20.0));
-    assert_eq!(agy.used_cost_usd, Some(8.0));
-    assert_eq!(agy.used_tokens, Some(800));
-    assert_eq!(agy2.used_percent, Some(10.0));
-    assert_eq!(agy2.used_cost_usd, Some(4.0));
-    assert_eq!(agy2.used_tokens, Some(400));
-    assert_eq!(agy.group_percent, Some(30.0));
-    assert!(
-        !notes.iter().any(|note| note.contains("账户归属未解析")),
-        "识别出账户时不应有降级提示：{notes:?}"
-    );
-}
-
-#[test]
-fn without_a_resolvable_account_the_group_cap_survives_but_no_plan_claims_usage() {
-    let connection = usage_db();
-    let end = at(2026, 10, 8, 0);
-    let start = end - WINDOW_DAYS * DAY_MS;
-    let now = at(2026, 10, 5, 0);
-    event(&connection, "1", "omp", Some("google-antigravity"), start + 3_600_000, Some(12.0), 1200);
-    let samples = samples_of(vec![(
-        "antigravity",
-        vec![
-            sample(&oauth("bluefishcarter@gmail.com"), end - DAY_MS, 9.0, end),
-            sample(&oauth("carter.gogo@gmail.com"), end - DAY_MS, 5.0, end),
-        ],
-    )]);
-    // 没有 id_token：两个账户都认不出来。
-    let report = build(&connection, &samples, &options(), now, Vec::new()).expect("report");
-    let notes = &report.notes;
-    let agy = plan(&report, "agy");
-    // 组上限仍然可推算（用量 ÷ Σf），但没有任何套餐能认领自己的那一份。
-    assert_eq!(agy.group_percent, Some(14.0));
-    assert_eq!(agy.max_cost_usd, Some(12.0 / 0.14));
-    assert_eq!(agy.used_percent, None);
-    assert_eq!(agy.used_cost_usd, None);
-    assert_eq!(agy.used_tokens, None);
-    assert!(!agy.account_resolved);
-    assert_eq!(agy.account, None);
-    let note = notes
-        .iter()
-        .find(|note| note.contains("账户归属未解析"))
-        .expect("降级提示");
-    assert!(note.contains("bluefishcarter@gmail.com"), "{note}");
-    assert!(note.contains("carter.gogo@gmail.com"), "{note}");
-    assert!(note.contains("agy/agy2 未定"), "{note}");
 }
 
 // ---------------------------------------------------------------------------
@@ -260,8 +208,24 @@ fn a_period_superseded_by_the_next_one_stops_counting_where_the_next_begins() {
     let end_a = at(2026, 10, 8, 0); // 起点 10-01
     let end_b = at(2026, 10, 10, 0); // 起点 10-03，与 A 重叠
     let now = at(2026, 10, 5, 0);
-    event(&connection, "a", "codex", None, at(2026, 10, 1, 1), Some(4.0), 400);
-    event(&connection, "b", "codex", None, at(2026, 10, 4, 12), Some(1.0), 100);
+    event(
+        &connection,
+        "a",
+        "codex",
+        None,
+        at(2026, 10, 1, 1),
+        Some(4.0),
+        400,
+    );
+    event(
+        &connection,
+        "b",
+        "codex",
+        None,
+        at(2026, 10, 4, 12),
+        Some(1.0),
+        100,
+    );
     let samples = samples_of(vec![(
         "codex",
         vec![
@@ -293,7 +257,7 @@ fn a_period_superseded_by_the_next_one_stops_counting_where_the_next_begins() {
     // 「当前周期」取起点最晚者。
     assert_eq!(codex.period.as_ref().expect("period").resets_at_ms, end_b);
     assert_eq!(codex.used_percent, Some(10.0));
-    assert_eq!(codex.sample_at.is_some(), true);
+    assert!(codex.sample_at.is_some());
 }
 
 #[test]
@@ -302,7 +266,15 @@ fn a_fraction_drop_inside_one_period_counts_as_extra_granted_quota() {
     let end = at(2026, 10, 8, 0);
     let start = end - WINDOW_DAYS * DAY_MS;
     let now = at(2026, 10, 5, 0);
-    event(&connection, "1", "codex", None, start + 3_600_000, Some(130.0), 13_000);
+    event(
+        &connection,
+        "1",
+        "codex",
+        None,
+        start + 3_600_000,
+        Some(130.0),
+        13_000,
+    );
     let samples = samples_of(vec![(
         "codex",
         vec![
@@ -330,7 +302,12 @@ fn millisecond_jitter_keeps_one_period_and_a_real_change_starts_a_new_one() {
     let samples = vec![
         sample("acct", at(2026, 10, 1, 1), 10.0, end),
         sample("acct", at(2026, 10, 1, 2), 12.0, end + 30_000),
-        sample("acct", at(2026, 10, 1, 3), 20.0, end + 2 * CYCLE_TOLERANCE_MS),
+        sample(
+            "acct",
+            at(2026, 10, 1, 3),
+            20.0,
+            end + 2 * CYCLE_TOLERANCE_MS,
+        ),
     ];
     let cycles = account_cycles(&samples, now);
     let cycles = &cycles["acct"];
@@ -346,8 +323,24 @@ fn millisecond_jitter_keeps_one_period_and_a_real_change_starts_a_new_one() {
 fn a_period_whose_start_predates_the_usage_database_is_dropped_but_the_open_one_is_kept() {
     let connection = usage_db();
     // 用量库从 10-02 12:00 才开始。
-    event(&connection, "1", "codex", None, at(2026, 10, 2, 12), Some(1.0), 100);
-    event(&connection, "2", "codex", None, at(2026, 10, 4, 12), Some(2.0), 200);
+    event(
+        &connection,
+        "1",
+        "codex",
+        None,
+        at(2026, 10, 2, 12),
+        Some(1.0),
+        100,
+    );
+    event(
+        &connection,
+        "2",
+        "codex",
+        None,
+        at(2026, 10, 4, 12),
+        Some(2.0),
+        200,
+    );
     let now = at(2026, 10, 5, 0);
     let samples = samples_of(vec![(
         "codex",
@@ -367,7 +360,10 @@ fn a_period_whose_start_predates_the_usage_database_is_dropped_but_the_open_one_
     assert!(point.open);
     assert_eq!(point.max_cost_usd, Some(10.0));
     assert_eq!(point.max_tokens, Some(1000));
-    assert!(notes.iter().any(|note| note.contains("1 个历史周期")), "{notes:?}");
+    assert!(
+        notes.iter().any(|note| note.contains("1 个历史周期")),
+        "{notes:?}"
+    );
 }
 
 #[test]
@@ -377,9 +373,19 @@ fn two_accounts_align_into_one_shared_period_and_the_first_new_period_truncates_
     let samples = vec![
         sample(&oauth("a@example.com"), at(2026, 10, 2, 0), 30.0, end),
         // 5 分钟后开新周期：两份订阅仍然算同一个组周期。
-        sample(&oauth("b@example.com"), at(2026, 10, 2, 0), 50.0, end + 300_000),
+        sample(
+            &oauth("b@example.com"),
+            at(2026, 10, 2, 0),
+            50.0,
+            end + 300_000,
+        ),
         // A 提前开新周期，组周期必须在这里截断。
-        sample(&oauth("a@example.com"), at(2026, 10, 4, 0), 10.0, at(2026, 10, 10, 0)),
+        sample(
+            &oauth("a@example.com"),
+            at(2026, 10, 4, 0),
+            10.0,
+            at(2026, 10, 10, 0),
+        ),
     ];
     let groups = group_cycles(&samples, now);
     assert_eq!(groups.len(), 2);
@@ -390,7 +396,10 @@ fn two_accounts_align_into_one_shared_period_and_the_first_new_period_truncates_
     assert_eq!(groups[1].members.len(), 1);
     // 旧周期在 A 的新周期起点截断。
     assert_eq!(
-        groups[0].members[0].1.effective_end_ms.min(groups[1].start_ms),
+        groups[0].members[0]
+            .1
+            .effective_end_ms
+            .min(groups[1].start_ms),
         groups[1].start_ms
     );
 }
@@ -412,57 +421,22 @@ fn one_account_never_merges_two_of_its_own_periods_into_one_group_period() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_gemini_id_token_yields_the_agy_account_email() {
-    let payload = base64url(br#"{"email":"bluefishcarter@gmail.com","exp":1}"#);
-    let token = format!("header.{payload}.signature");
-    assert_eq!(
-        jwt_email(&token).as_deref(),
-        Some("bluefishcarter@gmail.com")
-    );
-    assert_eq!(jwt_email("not-a-jwt"), None);
-    assert_eq!(jwt_email("a.%%%.c"), None);
-    assert_eq!(jwt_email("a..c"), None);
-    assert_eq!(jwt_email("a.aGVhZGVy.c"), None, "payload 里没有 email 声明");
-
-    // 同一个解码路径也用于真实文件布局。
-    let dir = tempfile::tempdir().expect("tempdir");
-    let home = dir.path().join(".gemini");
-    fs::create_dir_all(home.join("antigravity-cli")).expect("token dir");
-    fs::write(
-        home.join("antigravity-cli/antigravity-oauth-token"),
-        format!(r#"{{"token":"x","id_token":"header.{payload}.signature"}}"#),
-    )
-    .expect("write token");
-    assert_eq!(
-        token_email(&home).as_deref(),
-        Some("bluefishcarter@gmail.com")
-    );
-    // 缺文件与缺 id_token 都只是「解不出」，不是错误。
-    assert_eq!(token_email(&dir.path().join(".gemini2")), None);
-}
-
-#[test]
 fn the_ledger_infos_and_mappings_decide_every_account() {
     let dir = tempfile::tempdir().expect("tempdir");
     let ledger = dir.path().join("agent.db");
     let end = at(2026, 10, 8, 0);
     write_ledger(
         &ledger,
-        &[
-            ("google-antigravity", "google-antigravity:google:default:gemini-weekly", "oauth|email:bluefishcarter@gmail.com|project:p", Some("bluefishcarter@gmail.com"), 0.3289207, end, end - 60_000),
-            ("google-antigravity", "google-antigravity:google:default:gemini-weekly", "oauth|email:carter.gogo@gmail.com|project:p", Some("carter.gogo@gmail.com"), 0.52467754, end + 299_000, end - 60_000),
-            ("openai-codex", "openai-codex:primary", "oauth|account:1|email:carter.gogo@gmail.com|org:1", Some("carter.gogo@gmail.com"), 0.39, end, end - 60_000),
-        ],
+        &[(
+            "openai-codex",
+            "openai-codex:primary",
+            "oauth|account:1|email:carter.gogo@gmail.com|org:1",
+            Some("carter.gogo@gmail.com"),
+            0.39,
+            end,
+            end - 60_000,
+        )],
     );
-    // `~/.gemini` 的令牌里只有邮箱，没有用户名：AGY 由此确定。
-    let agy_home = dir.path().join(".gemini");
-    fs::create_dir_all(agy_home.join("antigravity-cli")).expect("token dir");
-    let payload = base64url(br#"{"email":"bluefishcarter@gmail.com"}"#);
-    fs::write(
-        agy_home.join("antigravity-cli/antigravity-oauth-token"),
-        format!(r#"{{"id_token":"h.{payload}.s"}}"#),
-    )
-    .expect("write token");
 
     let paths = LedgerPaths {
         omp_dbs: vec![ledger],
@@ -470,36 +444,18 @@ fn the_ledger_infos_and_mappings_decide_every_account() {
     };
     let (samples, ledger_found, _) = read_samples(&paths);
     assert!(ledger_found);
-    assert_eq!(samples["antigravity"].len(), 2);
     assert_eq!(samples["codex"].len(), 1);
     // 归一化：比例 → 百分比，周期长度固定 7 天。
-    assert!((samples["antigravity"][0].used_percent - 32.89207).abs() < 1e-9);
-    assert_eq!(samples["antigravity"][0].window_days, WINDOW_DAYS);
+    assert!((samples["codex"][0].used_percent - 39.0).abs() < 1e-9);
+    assert_eq!(samples["codex"][0].window_days, WINDOW_DAYS);
 
-    let infos = account_infos(&samples["antigravity"]);
-    let options = PlanOptions {
-        agy_home,
-        agy2_home: dir.path().join(".gemini2"),
-    };
-    let assigned = resolve("antigravity", &infos, &options);
+    // 单账户组 resolve 直接认领该账户。
+    let infos = account_infos(&samples["codex"]);
+    let assigned = resolve("codex", &infos);
     assert_eq!(
-        assigned["agy"].as_deref(),
-        Some("oauth|email:bluefishcarter@gmail.com|project:p")
+        assigned["codex"].as_deref(),
+        Some("oauth|account:1|email:carter.gogo@gmail.com|org:1")
     );
-    assert_eq!(
-        assigned["agy2"].as_deref(),
-        Some("oauth|email:carter.gogo@gmail.com|project:p")
-    );
-    // 第二个 home 里没有 id_token 时宁可不猜：AGY2 不会被随手填上一个账户。
-    let blind = resolve(
-        "antigravity",
-        &infos,
-        &PlanOptions {
-            agy_home: dir.path().join(".gemini2"),
-            agy2_home: dir.path().join(".gemini2"),
-        },
-    );
-    assert!(blind.values().all(Option::is_none));
 }
 
 // ---------------------------------------------------------------------------
@@ -540,7 +496,10 @@ fn the_grok_log_supplies_the_fraction_and_the_period_bounds() {
     };
     let (samples, ledger_found, notes) = read_samples(&paths);
     assert!(ledger_found, "Grok 日志本身就是一处比例来源");
-    assert!(notes.iter().any(|note| note.contains("未找到额度账本")), "{notes:?}");
+    assert!(
+        notes.iter().any(|note| note.contains("未找到额度账本")),
+        "{notes:?}"
+    );
     assert!(samples["codex"].is_empty());
 
     let grok = &samples["grok"];
@@ -569,7 +528,15 @@ fn the_grok_plan_derives_its_cap_from_the_logged_period() {
     };
     let connection = usage_db();
     // 本周期实测 $9.22（与 verification 里的手算一致）。
-    event(&connection, "1", "grok", None, at(2026, 9, 14, 1), Some(9.22), 0);
+    event(
+        &connection,
+        "1",
+        "grok",
+        None,
+        at(2026, 9, 14, 1),
+        Some(9.22),
+        0,
+    );
     let now = parse_rfc3339_ms("2026-09-15T05:00:00Z").expect("now");
     let report = assemble(&connection, &options(), &paths, now).expect("report");
     let grok = plan(&report, "grok");
@@ -615,8 +582,14 @@ fn missing_ledgers_degrade_to_empty_samples_without_panicking() {
 
     // 完全没有样本时报告仍然完整：字段为空、备注解释原因。
     let connection = usage_db();
-    let report = build(&connection, &samples, &options(), at(2026, 10, 5, 0), Vec::new())
-        .expect("report");
+    let report = build(
+        &connection,
+        &samples,
+        &options(),
+        at(2026, 10, 5, 0),
+        Vec::new(),
+    )
+    .expect("report");
     let notes = &report.notes;
     let codex = plan(&report, "codex");
     assert_eq!(codex.used_percent, None);
@@ -624,7 +597,10 @@ fn missing_ledgers_degrade_to_empty_samples_without_panicking() {
     assert!(codex.period.is_none());
     assert!(codex.weekly.is_empty());
     assert!(!report.ledger_found);
-    assert!(notes.iter().any(|note| note.contains("没有额度比例样本")), "{notes:?}");
+    assert!(
+        notes.iter().any(|note| note.contains("没有额度比例样本")),
+        "{notes:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -670,22 +646,4 @@ fn write_ledger(path: &Path, rows: &[(&str, &str, &str, Option<&str>, f64, i64, 
             )
             .expect("insert ledger row");
     }
-}
-
-fn base64url(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
-        let value = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
-        out.push(ALPHABET[(value >> 18) as usize & 63] as char);
-        out.push(ALPHABET[(value >> 12) as usize & 63] as char);
-        if chunk.len() > 1 {
-            out.push(ALPHABET[(value >> 6) as usize & 63] as char);
-        }
-        if chunk.len() > 2 {
-            out.push(ALPHABET[value as usize & 63] as char);
-        }
-    }
-    out
 }

@@ -1,5 +1,3 @@
-mod agy;
-mod agy_cloud;
 mod grok;
 mod parse;
 
@@ -24,7 +22,6 @@ pub struct Prepared {
     account: Option<String>,
     profile: Option<PathBuf>,
     expires: Option<i64>,
-    agy_credentials: Option<agy_cloud::Credentials>,
 }
 
 pub fn prepare(source: Source, config: &Config) -> Result<Prepared, FetchError> {
@@ -34,7 +31,6 @@ pub fn prepare(source: Source, config: &Config) -> Result<Prepared, FetchError> 
         account: None,
         profile: None,
         expires: None,
-        agy_credentials: None,
     };
     match source {
         Source::Codex => {
@@ -51,24 +47,6 @@ pub fn prepare(source: Source, config: &Config) -> Result<Prepared, FetchError> 
             if input.token.is_empty() {
                 return Err(FetchError::auth("请先登录 Codex 订阅账户"));
             }
-        }
-        Source::Agy | Source::Agy2 => {
-            let root = if source == Source::Agy {
-                &config.agy
-            } else {
-                &config.agy2
-            };
-            if !root.is_dir() {
-                return Err(FetchError::auth("未找到此 AGY 账户"));
-            }
-            input.agy_credentials = agy_cloud::Credentials::load(root)?;
-            input.token = input
-                .agy_credentials
-                .as_ref()
-                .map(agy_cloud::Credentials::identity)
-                .unwrap_or_default();
-            input.profile = Some(root.clone());
-            input.account = Some(root.to_string_lossy().into_owned());
         }
         Source::Go => {
             input.token = opencode_go_key(&config.omp, &config.opencode)?;
@@ -133,8 +111,7 @@ pub fn prepare(source: Source, config: &Config) -> Result<Prepared, FetchError> 
             }
         }
     }
-    // Account ID when available, credential fingerprint otherwise. Include profile
-    // roots so the two AGY accounts never share a state slot.
+    // Account ID when available, credential fingerprint otherwise.
     input.identity = fingerprint(input.account.as_deref().unwrap_or(&input.token));
     if input.profile.is_some() {
         input.identity.push_str(&fingerprint(&input.token));
@@ -143,16 +120,14 @@ pub fn prepare(source: Source, config: &Config) -> Result<Prepared, FetchError> 
 }
 
 #[derive(Default)]
-pub struct Session {
-    agy: agy_cloud::Session,
-}
+pub struct Session;
 
 pub fn fetch(
     source: Source,
     input: &Prepared,
     http: &Http,
-    config: &Config,
-    session: &mut Session,
+    _config: &Config,
+    _session: &mut Session,
 ) -> Result<Vec<Card>, FetchError> {
     match source {
         Source::Codex => parse::codex(&http.get(
@@ -170,37 +145,6 @@ pub fn fetch(
             None,
         )?),
         Source::Grok => grok::parse(&http.grok(&input.token)?),
-        Source::Agy | Source::Agy2 => {
-            let profile = input.profile.as_deref().ok_or_else(FetchError::format)?;
-            let cloud = session
-                .agy
-                .query(source, input.agy_credentials.as_ref(), http);
-            let result = match cloud {
-                Ok(cards) => Ok(cards),
-                Err(error) if agy_cloud::allow_local_fallback(&error) => {
-                    agy::fetch(source, profile, &config.home, http)
-                        .map(|mut cards| {
-                            for card in &mut cards {
-                                card.note = Some("本地服务备用".into());
-                            }
-                            cards
-                        })
-                        .map_err(|_| error)
-                }
-                Err(error) => Err(error),
-            };
-            // A profile may be switched or logged out while a request is in flight.
-            let current = agy_cloud::Credentials::load(profile)?;
-            if current.as_ref().map(agy_cloud::Credentials::identity)
-                != input
-                    .agy_credentials
-                    .as_ref()
-                    .map(agy_cloud::Credentials::identity)
-            {
-                return Err(FetchError::auth("AGY 账户已变化 · 请刷新"));
-            }
-            result
-        }
     }
 }
 

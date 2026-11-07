@@ -156,7 +156,10 @@ fn handle(
         "/query" => Some(("text/html; charset=utf-8", include_bytes!("query.html"))),
         "/plans" => Some(("text/html; charset=utf-8", include_bytes!("plans.html"))),
         "/requests" => Some(("text/html; charset=utf-8", include_bytes!("requests.html"))),
-        "/cloudflare" => Some(("text/html; charset=utf-8", include_bytes!("cloudflare.html"))),
+        "/cloudflare" => Some((
+            "text/html; charset=utf-8",
+            include_bytes!("cloudflare.html"),
+        )),
         "/app.js" => Some(("text/javascript; charset=utf-8", include_bytes!("app.js"))),
         "/style.css" => Some(("text/css; charset=utf-8", include_bytes!("style.css"))),
         _ => None,
@@ -209,7 +212,9 @@ fn handle(
                 body.to_string().as_bytes(),
             );
         }
-        let force = query.split('&').any(|pair| pair == "refresh=1" || pair == "refresh=true");
+        let force = query
+            .split('&')
+            .any(|pair| pair == "refresh=1" || pair == "refresh=true");
         return match crate::cloudflare::report(database, cloudflare, force) {
             Ok(report) => respond(
                 &mut stream,
@@ -285,7 +290,13 @@ mod tests {
 
     #[test]
     fn dropping_server_cancels_partial_requests_and_releases_listener() {
-        let server = Server::start(PathBuf::from("/unused.db"), 0, PlanOptions::default(), CloudflareConfig::default()).unwrap();
+        let server = Server::start(
+            PathBuf::from("/unused.db"),
+            0,
+            PlanOptions,
+            CloudflareConfig::default(),
+        )
+        .unwrap();
         let address = server.address();
         let mut clients: Vec<_> = (0..4)
             .map(|_| {
@@ -317,7 +328,7 @@ mod tests {
         let error = Server::start(
             PathBuf::from("/unused.db"),
             address.port(),
-            PlanOptions::default(),
+            PlanOptions,
             CloudflareConfig::default(),
         )
         .err()

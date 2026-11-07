@@ -13,7 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub const ROUTES: [(&str, &str); 4] = [
+pub const ROUTES: [(&str, &str); 3] = [
     ("Codex", "https://chatgpt.com/backend-api/codex/responses"),
     (
         "OpenCode Go",
@@ -22,10 +22,6 @@ pub const ROUTES: [(&str, &str); 4] = [
     (
         "SuperGrok",
         "https://cli-chat-proxy.grok.com/v1/chat/completions",
-    ),
-    (
-        "Antigravity",
-        "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent",
     ),
 ];
 const WINDOW: Duration = Duration::from_secs(300);
@@ -86,7 +82,7 @@ impl RouteState {
 pub struct NetworkState {
     pub enabled: bool,
     pub interval: Duration,
-    pub routes: [RouteState; 4],
+    pub routes: [RouteState; 3],
 }
 impl NetworkState {
     pub fn new(enabled: bool, interval: Duration) -> Self {

@@ -87,15 +87,11 @@ fn isolated_config(dir: &Path) -> PathBuf {
             "network_enabled = false\n\
              web_port = {port}\n\
              codex_home = \"{}\"\n\
-             agy_home = \"{}\"\n\
-             agy2_home = \"{}\"\n\
              opencode_home = \"{}\"\n\
              grok_home = \"{}\"\n\
              openrouter_key_file = \"{}\"\n\
              usage_db = \"{}\"\n",
             dir.join("codex").display(),
-            dir.join("gemini").display(),
-            dir.join("gemini2").display(),
             dir.join("opencode").display(),
             dir.join("grok").display(),
             dir.join("openrouter.key").display(),
@@ -354,7 +350,7 @@ fn unfinished_network_children_end_with_ui() {
             .lines()
             .map(|s| s.parse().unwrap())
             .collect();
-        assert_eq!(pids.len(), 4, "exactly one in-flight probe per route");
+        assert_eq!(pids.len(), 3, "exactly one in-flight probe per route");
         match action {
             "q" => {
                 tmux(&socket, &["send-keys", "-t", "ui", "q"]);

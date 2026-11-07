@@ -80,7 +80,7 @@ cargo run --offline -p ai-monitor
 ```
 
 - **总览 `/`**：全部模型的今日、本周（周一开始）、本月、累计 Token 与金额，近 30 天趋势和全部历史模型排行。
-- **套餐额度 `/plans`**：四个订阅套餐（Codex、AGY、AGY2、SuperGrok）当前周期的已用量、周期起止与推算出的每周上限，以及两张每周期一个点的折线图（实际使用量 / 最大额度）。
+- **套餐额度 `/plans`**：两个订阅套餐（Codex、SuperGrok）当前周期的已用量、周期起止与推算出的每周上限，以及两张每周期一个点的折线图（实际使用量 / 最大额度）。
 - **Request 追踪 `/requests`**：统计 OMP、Codex、Grok、OpenCode 四个客户端，按每次 request 展示开始时间、客户端、通道、模型、可获得的端到端耗时、session、具体账户和选择原因；最近窗口为 3000 条，可按会话 ID、客户端、通道、模型和账户组合筛选。跨账户区按请求时间展示完整路径（包括 `A → B → A`）、每段请求数、切换次数和原因。只存元数据，不存对话上下文；上游没有可靠耗时或账户证据时明确显示“未记录/未解析”。
 - **独立查询页 `/query`**：日期范围、全部模型或单模型筛选；可切换「每天合计」「每天按模型」，每天合计补齐无记录日期。明细每页 50 行。
 - Token 数量达到 10 亿使用 B，其余使用 M（1 B = 10 亿，1 M = 100 万），较小数值保留必要小数。
@@ -96,17 +96,16 @@ JSON 接口：`GET /api/usage?start=2026-09-01&end=2026-09-12&model=vendor%2Fmod
 
 JSON 接口：`GET /api/plans`，返回 `ledger_found`、`accounts`、`plans`（每个套餐含当前周期 `period`、已用量 `used_*`、推算上限 `max_*` 与历史 `weekly` 点）和 `notes`。
 
-JSON 接口：`GET /api/requests`，返回账户解析覆盖率、平均耗时、跨账户 session 和最近 3000 条 request；`client` 来自 SQLite 的 `usage_event.source`。AGY 使用 OMP `credential_pin` 指纹与 OAuth 账户匹配。OpenCode Go 只用 `herdr-api-key-sticky-v1` pin/release 的逻辑 `sessionId` 和时间线归因；请求开始早于取 Key 时，以响应完成时间确定本次选择。恢复子任务时会被覆盖的 `agent.db` sticky 值以及当前 credential 数量都不能证明历史请求账号。
+JSON 接口：`GET /api/requests`，返回账户解析覆盖率、平均耗时、跨账户 session 和最近 3000 条 request；`client` 来自 SQLite 的 `usage_event.source`。OpenCode Go 只用 `herdr-api-key-sticky-v1` pin/release 的逻辑 `sessionId` 和时间线归因；请求开始早于取 Key 时，以响应完成时间确定本次选择。恢复子任务时会被覆盖的 `agent.db` sticky 值以及当前 credential 数量都不能证明历史请求账号。
 
 collector 在读取 request 前收集所有 session 文件的 pin，能恢复旧版观察器写进兄弟日志的记录；迟到的 pin 会修正已采集行。启动时的 `omp-api-key-attribution-backfill-v3` 会重新匹配有 pin 证据的旧记录，并清除缺少证据的 `sticky_cache` / `single_credential` 账号归因，保留未知。修正只涉及账号字段，不改 token、金额、模型和时间。跨账户区统计全库历史，不等同于最近 3000 条 request；父、子 session 独立统计，不因同一 pane 使用不同 Key 判为同一 session 换 Key。
 
 ### 套餐额度的口径
 
-- 额度周期由**套餐自己的重置时间**决定，不一定是自然周；同组的两份订阅（AGY/AGY2）额度相同，上限共享。两份的比例各自相对**自己的**额度，因此 Σf 是两份比例之和（最多 200%，不是单池占用率），与两份用量之和相除才得到每份额度："本组用量合计 ÷ 两份比例之和" ≡ "(本组用量合计 ÷ 平均比例) ÷ 2"。
+- 额度周期由**套餐自己的重置时间**决定，不一定是自然周；每个套餐单份额度独立推算。
 - 上限推算：`本组周期内的实际用量 ÷ 该周期已用比例`。比例回落视为同周期额外赠送额度，按上升段峰值累加；被下一周期接替的旧周期只统计到接替时刻（Codex 的周期起点可以重叠）。
 - 周期起点早于用量库首条记录、缺口超过 10% 的历史周期不参与推算。
 - 比例来源：omp 自带额度账本 `~/.omp/agent/agent.db` 与各 profile 的 `agent.db`（`usage_history`）；**SuperGrok 不在 omp 账本里**，比例取自 Grok CLI 自己的账单日志 `~/.grok/logs/unified.jsonl`，因此**不运行 Grok CLI 就没有新样本**，页面用「最近样本」时间标注新鲜度。
-- AGY/AGY2 由 `~/.gemini` 的 id_token 邮箱与账本里的另一个 Antigravity 账户自动识别；解不出邮箱时两个套餐不显示各自的已用量（只显示组汇总比例与候选账户），不猜。
 - OpenCode（Go / GO-2）订阅不在套餐额度页统计：账本里只有 `api_key|secret:<哈希>`，无法可靠归属到具体 Key。其用量仍计入总览与每日查询页。
 - omp2（`~/.omp/profiles/pro2`）的会话目录已在采集范围内，但既有历史文件按「不回填历史」规则只记基线，其用量从本次改动之后开始进入统计。
 

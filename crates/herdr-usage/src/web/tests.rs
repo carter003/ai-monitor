@@ -159,7 +159,10 @@ fn test_hourly_report_loads_and_reconciles() {
     let db_path = dir.path().join("usage.db");
     let mut db = crate::db::open(&db_path).unwrap();
 
-    let dt = Local.with_ymd_and_hms(2026, 9, 12, 14, 30, 0).earliest().unwrap();
+    let dt = Local
+        .with_ymd_and_hms(2026, 9, 12, 14, 30, 0)
+        .earliest()
+        .unwrap();
     let at = dt.timestamp_millis();
 
     db.execute(
@@ -182,7 +185,11 @@ fn test_hourly_report_loads_and_reconciles() {
     assert_eq!(report.summary.peak_hour, 14);
     assert_eq!(report.summary.peak_tokens, 1500);
 
-    let day_row = report.days.iter().find(|d| d.day == "2026-09-12").expect("day row");
+    let day_row = report
+        .days
+        .iter()
+        .find(|d| d.day == "2026-09-12")
+        .expect("day row");
     assert_eq!(day_row.weekday, "周六");
     assert_eq!(day_row.total_tokens, 1500);
     assert_eq!(day_row.total_cost, Some(0.05));
@@ -216,7 +223,7 @@ fn test_cloudflare_routes_and_navigation() {
     let server = server::Server::start(
         db_path.clone(),
         0,
-        PlanOptions::default(),
+        PlanOptions,
         crate::cloudflare::CloudflareConfig::default(),
     )
     .unwrap();
@@ -244,7 +251,14 @@ fn test_cloudflare_routes_and_navigation() {
     assert!(resp.contains(r#""configured":false"#));
 
     // 3. Navigation links in all HTML files
-    for path in ["/", "/hourly", "/plans", "/requests", "/query", "/cloudflare"] {
+    for path in [
+        "/",
+        "/hourly",
+        "/plans",
+        "/requests",
+        "/query",
+        "/cloudflare",
+    ] {
         let mut stream = TcpStream::connect(addr).unwrap();
         write!(stream, "GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
         let mut resp = String::new();
@@ -328,12 +342,7 @@ fn test_cloudflare_api_with_cached_data() {
         plan: "paid".into(),
         billing_day: Some(8),
     };
-    let server = server::Server::start(
-        db_path,
-        0,
-        PlanOptions::default(),
-        cf_config,
-    ).unwrap();
+    let server = server::Server::start(db_path, 0, PlanOptions, cf_config).unwrap();
     let addr = server.address();
 
     let mut stream = TcpStream::connect(addr).unwrap();

@@ -188,12 +188,12 @@ fn low_monthly_balance_and_reset_wait_are_visible() {
 
 #[test]
 fn exhausted_weekly_source_shows_wait_instead_of_stale() {
-    let mut state = SourceState::new(Source::Agy, Duration::from_secs(60));
+    let mut state = SourceState::new(Source::Go, Duration::from_secs(60));
     state.begin("a".into());
     state.finish(
         Ok(vec![Card {
             meters: vec![Meter::from_used("周", 100., Some(100 + 2 * 86400), 1).unwrap()],
-            ..Card::empty("Agy")
+            ..Card::empty("Go")
         }]),
         100,
         Instant::now(),
@@ -205,7 +205,7 @@ fn exhausted_weekly_source_shows_wait_instead_of_stale() {
 
 #[test]
 fn failed_manual_refresh_marks_held_data_stale() {
-    let mut state = SourceState::new(Source::Agy, Duration::from_secs(60));
+    let mut state = SourceState::new(Source::Go, Duration::from_secs(60));
     state.begin("a".into());
     state.finish(
         Ok(vec![Card {

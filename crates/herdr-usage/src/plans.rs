@@ -1,7 +1,7 @@
 //! 套餐额度：把「已用比例」样本换算成每个订阅套餐的每周额度上限。
 //!
 //! 四个订阅套餐分属三个「组」，同组的两份订阅额度相同、上限共享：
-//! `codex`、`antigravity`（AGY + AGY2）、`grok`。组内上限由
+//! `codex`、`grok`。组内上限由
 //! 「本组在某个周期内的实际用量 ÷ 该周期的实际已用比例」推算，
 //! 因此不需要知道套餐的标称额度，也不需要任何套餐特判。
 //!
@@ -67,30 +67,14 @@ pub struct PlanDef {
     pub ledger: Ledger,
 }
 
-/// 四个套餐。标题与 TUI 的 `Source::title()` 保持一致。
-pub const PLANS: [PlanDef; 4] = [
+/// 两个套餐。标题与 TUI 的 `Source::title()` 保持一致。
+pub const PLANS: [PlanDef; 2] = [
     PlanDef {
         id: "codex",
         title: "Codex · GPT",
         group: "codex",
         provider: "openai-codex",
         limit_id: "openai-codex:primary",
-        ledger: Ledger::Omp,
-    },
-    PlanDef {
-        id: "agy",
-        title: "AGY",
-        group: "antigravity",
-        provider: "google-antigravity",
-        limit_id: "google-antigravity:google:default:gemini-weekly",
-        ledger: Ledger::Omp,
-    },
-    PlanDef {
-        id: "agy2",
-        title: "AGY2",
-        group: "antigravity",
-        provider: "google-antigravity",
-        limit_id: "google-antigravity:google:default:gemini-weekly",
         ledger: Ledger::Omp,
     },
     PlanDef {
@@ -110,7 +94,6 @@ pub const PLANS: [PlanDef; 4] = [
 fn group_filter(group: &str) -> &'static str {
     match group {
         "codex" => "(provider = 'openai-codex' OR (source = 'codex' AND provider IS NULL))",
-        "antigravity" => "provider = 'google-antigravity'",
         "grok" => "source = 'grok'",
         // 组名只来自 PLANS，未知组匹配不到任何行。
         _ => "0",
@@ -148,27 +131,13 @@ fn ledger_of(group: &str) -> (Ledger, &'static str, &'static str) {
 fn group_title(group: &str) -> &'static str {
     match group {
         "codex" => "Codex",
-        "antigravity" => "AGY / AGY2（Antigravity）",
         _ => "SuperGrok",
     }
 }
 
-/// 网页需要的全部外部输入：两个 Antigravity home（用来识别 AGY 账户）。
-#[derive(Clone, Debug)]
-pub struct PlanOptions {
-    pub agy_home: PathBuf,
-    pub agy2_home: PathBuf,
-}
-
-impl Default for PlanOptions {
-    fn default() -> Self {
-        let home = crate::home_dir();
-        Self {
-            agy_home: home.join(".gemini"),
-            agy2_home: home.join(".gemini2"),
-        }
-    }
-}
+/// 网页需要的外部输入（当前无外部依赖）。
+#[derive(Clone, Debug, Default)]
+pub struct PlanOptions;
 
 /// 比例样本文件的位置。测试用临时目录构造，生产从 `$HOME` 推导。
 #[derive(Clone, Debug)]
@@ -201,7 +170,6 @@ impl LedgerPaths {
 struct Sample {
     account_key: String,
     label: String,
-    email: Option<String>,
     recorded_at_ms: i64,
     /// 已用百分比（0..100+）。
     used_percent: f64,
@@ -293,7 +261,9 @@ pub fn report(usage_db: &Path, options: &PlanOptions) -> Result<PlanReport, Stri
         usage_db,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
-    .map_err(|_| "无法读取统计数据库，请确认 collector 已运行且 HERDR_USAGE_DB 路径正确".to_string())?;
+    .map_err(|_| {
+        "无法读取统计数据库，请确认 collector 已运行且 HERDR_USAGE_DB 路径正确".to_string()
+    })?;
     connection
         .busy_timeout(Duration::from_secs(3))
         .map_err(|error| error.to_string())?;
@@ -307,12 +277,12 @@ pub fn report(usage_db: &Path, options: &PlanOptions) -> Result<PlanReport, Stri
 
 fn assemble(
     connection: &Connection,
-    options: &PlanOptions,
+    _options: &PlanOptions,
     paths: &LedgerPaths,
     now_ms: i64,
 ) -> Result<PlanReport, String> {
     let (samples, ledger_found, notes) = read_samples(paths);
-    let mut report = build(connection, &samples, options, now_ms, notes)?;
+    let mut report = build(connection, &samples, _options, now_ms, notes)?;
     report.ledger_found = ledger_found;
     Ok(report)
 }
@@ -320,7 +290,7 @@ fn assemble(
 fn build(
     connection: &Connection,
     samples: &BTreeMap<&'static str, Vec<Sample>>,
-    options: &PlanOptions,
+    _options: &PlanOptions,
     now_ms: i64,
     seed: Vec<String>,
 ) -> Result<PlanReport, String> {
@@ -333,7 +303,7 @@ fn build(
     for group in groups() {
         let group_samples: &[Sample] = samples.get(group).map(Vec::as_slice).unwrap_or(&[]);
         let infos = account_infos(group_samples);
-        let assigned = resolve(group, &infos, options);
+        let assigned = resolve(group, &infos);
         if !group_samples.is_empty() && assigned.values().any(Option::is_none) {
             let missing: Vec<&'static str> = assigned
                 .iter()
@@ -460,9 +430,7 @@ fn build(
 // 比例样本
 // ---------------------------------------------------------------------------
 
-fn read_samples(
-    paths: &LedgerPaths,
-) -> (BTreeMap<&'static str, Vec<Sample>>, bool, Vec<String>) {
+fn read_samples(paths: &LedgerPaths) -> (BTreeMap<&'static str, Vec<Sample>>, bool, Vec<String>) {
     let mut ledger_found = false;
     let mut notes = Vec::new();
     let mut out: BTreeMap<&'static str, Vec<Sample>> = BTreeMap::new();
@@ -539,7 +507,6 @@ fn read_omp_ledger(
             samples.push(Sample {
                 label: account_label(&account_key, email.as_deref()),
                 account_key,
-                email,
                 recorded_at_ms: recorded_at,
                 used_percent: used_fraction * 100.0,
                 resets_at_ms: resets_at,
@@ -603,7 +570,6 @@ fn read_grok_log(path: &Path, ledger_found: &mut bool) -> Vec<Sample> {
         samples.push(Sample {
             account_key: "grok".to_owned(),
             label,
-            email: None,
             recorded_at_ms,
             used_percent,
             resets_at_ms: end_ms,
@@ -638,7 +604,6 @@ fn parse_rfc3339_ms(text: &str) -> Option<i64> {
 struct AccountInfo {
     key: String,
     label: String,
-    email: Option<String>,
     /// 该账户最新一条样本的已用百分比。
     last_percent: f64,
     last_resets_at_ms: i64,
@@ -661,7 +626,6 @@ fn account_infos(samples: &[Sample]) -> Vec<AccountInfo> {
                     AccountInfo {
                         key: sample.account_key.clone(),
                         label: sample.label.clone(),
-                        email: sample.email.clone(),
                         last_percent: sample.used_percent,
                         last_resets_at_ms: sample.resets_at_ms,
                         last_recorded_ms: sample.recorded_at_ms,
@@ -676,11 +640,7 @@ fn account_infos(samples: &[Sample]) -> Vec<AccountInfo> {
 /// 套餐 id → 该套餐对应的账户标识（`None` = 未解析）。
 ///
 /// 只做自动识别；识别不出来时宁可留空，也不猜。
-fn resolve(
-    group: &str,
-    infos: &[AccountInfo],
-    options: &PlanOptions,
-) -> BTreeMap<&'static str, Option<String>> {
+fn resolve(group: &str, infos: &[AccountInfo]) -> BTreeMap<&'static str, Option<String>> {
     let plan_ids = plans_of(group);
     let mut assigned: BTreeMap<&'static str, Option<String>> =
         plan_ids.iter().map(|id| (*id, None)).collect();
@@ -699,43 +659,9 @@ fn resolve(
         "grok" => {
             assigned.insert("grok", infos.first().map(|info| info.key.clone()));
         }
-        "antigravity" => {
-            // `~/.gemini` 的 oauth 令牌里带 id_token，解出邮箱即 AGY 账户。
-            if assigned["agy"].is_none() {
-                if let Some(email) = token_email(&options.agy_home) {
-                    if let Some(key) = match_email(infos, &email) {
-                        assigned.insert("agy", Some(key));
-                    }
-                }
-            }
-            // 账本里恰好两个 Antigravity 账户时，另一个就是 AGY2。
-            if infos.len() == 2 {
-                let known = assigned["agy"].clone().or_else(|| assigned["agy2"].clone());
-                if let Some(known) = known {
-                    if let Some(other) = infos.iter().find(|info| info.key != known) {
-                        if assigned["agy"].is_none() {
-                            assigned.insert("agy", Some(other.key.clone()));
-                        } else if assigned["agy2"].is_none() {
-                            assigned.insert("agy2", Some(other.key.clone()));
-                        }
-                    }
-                }
-            }
-        }
         _ => {}
     }
     assigned
-}
-
-fn match_email(infos: &[AccountInfo], value: &str) -> Option<String> {
-    infos
-        .iter()
-        .find(|info| {
-            info.email
-                .as_deref()
-                .is_some_and(|email| email.eq_ignore_ascii_case(value.trim()))
-        })
-        .map(|info| info.key.clone())
 }
 
 /// 降级提示：解不出账户归属时，列出本组当前的候选账户，而不是猜一个。
@@ -752,10 +678,7 @@ fn unresolved_note(group: &str, infos: &[AccountInfo], missing: &[&'static str])
         .map(|info| format!("{}（当前周 {:.1}%）", info.label, info.last_percent))
         .collect::<Vec<_>>()
         .join("、");
-    let reason = match group {
-        "antigravity" => "解不出 ~/.gemini 的 id_token 邮箱",
-        _ => "无法自动识别",
-    };
+    let reason = "无法自动识别";
     format!(
         "{} 的账户归属未解析（{reason}）：{} 未定；候选账户 {}",
         group_title(group),
@@ -766,52 +689,6 @@ fn unresolved_note(group: &str, infos: &[AccountInfo], missing: &[&'static str])
             list
         },
     )
-}
-
-/// 取 `~/.gemini/antigravity-cli/antigravity-oauth-token` 里 `id_token` 的
-/// `email` 声明。不校验签名，只把它当作「这台机器上 AGY 用哪个账户」的线索。
-fn token_email(home: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(home.join("antigravity-cli/antigravity-oauth-token")).ok()?;
-    let value: Value = serde_json::from_str(&text).ok()?;
-    let token = value.get("id_token").and_then(Value::as_str)?;
-    jwt_email(token)
-}
-
-/// JWT 的 payload 段（base64url）里的 `email` 声明。
-fn jwt_email(token: &str) -> Option<String> {
-    let payload = token.split('.').nth(1)?;
-    let bytes = base64url_decode(payload)?;
-    let value: Value = serde_json::from_slice(&bytes).ok()?;
-    value
-        .get("email")
-        .and_then(Value::as_str)
-        .filter(|email| !email.is_empty())
-        .map(str::to_owned)
-}
-
-/// 手写 base64url 解码，避免为一行代码新增依赖。
-fn base64url_decode(text: &str) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(text.len() / 4 * 3 + 3);
-    let mut buffer: u32 = 0;
-    let mut bits: u32 = 0;
-    for byte in text.bytes() {
-        let value = match byte {
-            b'A'..=b'Z' => byte - b'A',
-            b'a'..=b'z' => byte - b'a' + 26,
-            b'0'..=b'9' => byte - b'0' + 52,
-            b'-' | b'+' => 62,
-            b'_' | b'/' => 63,
-            b'=' => break,
-            _ => return None,
-        } as u32;
-        buffer = (buffer << 6) | value;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((buffer >> bits) as u8);
-        }
-    }
-    Some(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -1067,7 +944,10 @@ fn week_point(cycle: &GroupCycle, account: Option<&str>) -> WeekPoint {
             .max_tokens
             .zip(percent)
             .map(|(max, percent)| (max as f64 * percent / 100.0).round() as i64),
-        used_cost_usd: cycle.max_cost_usd.zip(percent).map(|(max, percent)| max * percent / 100.0),
+        used_cost_usd: cycle
+            .max_cost_usd
+            .zip(percent)
+            .map(|(max, percent)| max * percent / 100.0),
         max_tokens: cycle.max_tokens,
         max_cost_usd: cycle.max_cost_usd,
         sample_at: local_stamp(cycle.sample_ms),

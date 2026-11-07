@@ -102,7 +102,10 @@ impl CodexState {
         if let Some(session) = extract_session_id(&head_bytes) {
             self.sessions.insert(path.to_path_buf(), session);
         }
-        if head_bytes.windows(18).any(|part| part == b"token_usage_record") {
+        if head_bytes
+            .windows(18)
+            .any(|part| part == b"token_usage_record")
+        {
             self.seen_usage_records.insert(path.to_path_buf());
         }
     }

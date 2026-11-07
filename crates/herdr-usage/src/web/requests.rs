@@ -163,7 +163,7 @@ fn report(connection: &Connection) -> Result<RequestReport, String> {
                     {route_reason} AS route_reason,
                     COALESCE(started_at, occurred_at) AS at
              FROM usage_event
-             WHERE provider IN ('google-antigravity', 'opencode-go')
+             WHERE provider = 'opencode-go'
                AND session_id IS NOT NULL AND session_id <> ''
                AND account_key IS NOT NULL AND account_key <> ''
          ),

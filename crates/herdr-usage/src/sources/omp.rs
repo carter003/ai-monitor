@@ -91,7 +91,7 @@ impl AccountCatalog {
         };
         let mut by_provider = HashMap::<String, Vec<AccountIdentity>>::new();
         let Ok(mut statement) = connection.prepare(
-            "SELECT id, provider, credential_type, data FROM auth_credentials WHERE provider IN ('google-antigravity', 'opencode-go') ORDER BY id"
+            "SELECT id, provider, credential_type, data FROM auth_credentials WHERE provider = 'opencode-go' ORDER BY id"
         ) else { return catalog };
         let Ok(rows) = statement.query_map([], |row| {
             Ok((
@@ -123,7 +123,7 @@ impl AccountCatalog {
                 let identity = AccountIdentity {
                     key: format!("oauth:{pin}"),
                     label: if email.is_empty() {
-                        format!("Antigravity 账户 {}", &pin[..8])
+                        format!("OAuth 账户 {}", &pin[..8])
                     } else {
                         email.to_owned()
                     },
@@ -162,9 +162,9 @@ impl AccountCatalog {
             }
         }
         drop(statement);
-        let Ok(mut statement) = connection.prepare(
-            "SELECT key, value FROM cache WHERE key LIKE 'session:sticky:google-antigravity:%'",
-        ) else {
+        let Ok(mut statement) = connection
+            .prepare("SELECT key, value FROM cache WHERE key LIKE 'session:sticky:opencode-go:%'")
+        else {
             return catalog;
         };
         let Ok(rows) = statement.query_map([], |row| {
@@ -362,8 +362,6 @@ impl OmpState {
             self.api_key_pins
                 .get(&key)
                 .and_then(|id| accounts.resolve_credential_id(provider, id))
-        } else if provider == "opencode-go" {
-            None
         } else {
             accounts.resolve(provider, session, self.pins.get(&key).map(String::as_str))
         };
@@ -625,10 +623,7 @@ impl OmpState {
                 let Some(event_id) = record.get("id").and_then(Value::as_str) else {
                     return out;
                 };
-                let Some(occurred_at) = record
-                    .get("timestamp")
-                    .and_then(timestamp_ms)
-                else {
+                let Some(occurred_at) = record.get("timestamp").and_then(timestamp_ms) else {
                     return out;
                 };
 
@@ -743,19 +738,7 @@ impl OmpState {
             .and_then(timestamp_ms)
             .or_else(|| duration_ms.map(|duration| occurred_at.saturating_add(duration)));
 
-        let has_pin = provider
-            .as_ref()
-            .is_some_and(|p| self.pins.contains_key(&(path.to_owned(), p.clone())));
-        let is_reset = self
-            .just_reset
-            .remove(&(path.to_owned(), "all".to_string()))
-            || provider
-                .as_ref()
-                .is_some_and(|p| self.just_reset.remove(&(path.to_owned(), p.clone())));
-        let needs_pin_wait =
-            provider.as_deref() == Some("google-antigravity") && (!has_pin || is_reset);
-
-        if !needs_pin_wait {
+        if true {
             let (account, account_route_reason) = self.request_identity(
                 path,
                 provider.as_deref(),
@@ -1034,11 +1017,11 @@ mod tests {
         let mut state = OmpState::new();
         let mut accounts = AccountCatalog::default();
         for (hash, label) in [
-            ("pin-a", "agy-a@example.com"),
-            ("pin-b", "agy-b@example.com"),
+            ("pin-a", "account-a@example.com"),
+            ("pin-b", "account-b@example.com"),
         ] {
             accounts.by_pin.insert(
-                ("google-antigravity".into(), hash.into()),
+                ("openai-codex".into(), hash.into()),
                 AccountIdentity {
                     key: format!("oauth:{hash}"),
                     label: label.into(),
@@ -1047,11 +1030,11 @@ mod tests {
             );
         }
         let session = r#"{"type":"session","id":"session-1"}"#;
-        let pin_a = r#"{"type":"credential_pin","provider":"google-antigravity","hash":"pin-a"}"#;
-        let pin_b = r#"{"type":"credential_pin","provider":"google-antigravity","hash":"pin-b"}"#;
+        let pin_a = r#"{"type":"credential_pin","provider":"openai-codex","hash":"pin-a"}"#;
+        let pin_b = r#"{"type":"credential_pin","provider":"openai-codex","hash":"pin-b"}"#;
         let request = |id: &str, at: i64| {
             format!(
-                r#"{{"id":"{id}","type":"message","message":{{"role":"assistant","provider":"google-antigravity","model":"gemini","timestamp":{at},"duration":1250.4,"usage":{{"input":1,"output":2}}}}}}"#
+                r#"{{"id":"{id}","type":"message","message":{{"role":"assistant","provider":"openai-codex","model":"gemini","timestamp":{at},"duration":1250.4,"usage":{{"input":1,"output":2}}}}}}"#
             )
         };
         assert!(state
@@ -1071,8 +1054,14 @@ mod tests {
             .remove(0);
 
         assert_eq!(first.session_id.as_deref(), Some("session-1"));
-        assert_eq!(first.account_label.as_deref(), Some("agy-a@example.com"));
-        assert_eq!(second.account_label.as_deref(), Some("agy-b@example.com"));
+        assert_eq!(
+            first.account_label.as_deref(),
+            Some("account-a@example.com")
+        );
+        assert_eq!(
+            second.account_label.as_deref(),
+            Some("account-b@example.com")
+        );
         assert_eq!(second.started_at, Some(3000));
         assert_eq!(second.completed_at, Some(4250));
         assert_eq!(second.duration_ms, Some(1250));
@@ -1135,7 +1124,7 @@ mod tests {
         let mut state = OmpState::new();
         let mut accounts = AccountCatalog::default();
         accounts.by_pin.insert(
-            ("google-antigravity".into(), "pin-real".into()),
+            ("openai-codex".into(), "pin-real".into()),
             AccountIdentity {
                 key: "oauth:pin-real".into(),
                 label: "real@example.com".into(),
@@ -1144,7 +1133,7 @@ mod tests {
         );
         // Suppose sticky_cache has an old or pre-pinned account
         accounts.sticky.insert(
-            ("google-antigravity".into(), "session-1".into()),
+            ("openai-codex".into(), "session-1".into()),
             AccountIdentity {
                 key: "oauth:pin-fake".into(),
                 label: "fake@example.com".into(),
@@ -1157,23 +1146,24 @@ mod tests {
         };
 
         let session = r#"{"type":"session","id":"session-1"}"#;
-        let request = r#"{"id":"req-1","type":"message","message":{"role":"assistant","provider":"google-antigravity","model":"gemini-3.8-flash","timestamp":1000,"duration":500,"usage":{"input":10,"output":20}}}"#;
+        let request = r#"{"id":"req-1","type":"message","message":{"role":"assistant","provider":"openai-codex","model":"gemini-3.8-flash","timestamp":1000,"duration":500,"usage":{"input":10,"output":20}}}"#;
         let tool_start =
             r#"{"type":"custom","customType":"tool_execution_start","data":{"toolName":"bash"}}"#;
-        let pin = r#"{"type":"credential_pin","provider":"google-antigravity","hash":"pin-real"}"#;
+        let pin = r#"{"type":"credential_pin","provider":"openai-codex","hash":"pin-real"}"#;
 
         assert!(parse(&mut state, 0, session).is_empty());
-        // Message arrives first; it should wait for credential_pin rather than immediately resolving to sticky_cache
-        assert!(parse(&mut state, 1, request).is_empty());
-        // tool_execution_start sits between message and pin
+        // Message resolves immediately (sticky_cache); late pin does not re-resolve.
+        let first = parse(&mut state, 1, request);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].event_id, "req-1");
+        assert_eq!(first[0].account_label.as_deref(), Some("fake@example.com"));
+        assert_eq!(first[0].account_source.as_deref(), Some("sticky_cache"));
+        // Late pin does not re-resolve an already-emitted request.
         assert!(parse(&mut state, 2, tool_start).is_empty());
-        // When credential_pin arrives, the buffered message is resolved with the new pin
-        let events = parse(&mut state, 3, pin);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_id, "req-1");
-        assert_eq!(events[0].account_label.as_deref(), Some("real@example.com"));
-        assert_eq!(events[0].account_source.as_deref(), Some("credential_pin"));
-        assert_eq!(events[0].session_id.as_deref(), Some("session-1"));
+        assert!(
+            parse(&mut state, 3, pin).is_empty(),
+            "late pin must not re-emit"
+        );
     }
 
     #[test]
@@ -1182,7 +1172,7 @@ mod tests {
         let mut state = OmpState::new();
         let mut accounts = AccountCatalog::default();
         accounts.by_pin.insert(
-            ("google-antigravity".into(), "pin-a".into()),
+            ("openai-codex".into(), "pin-a".into()),
             AccountIdentity {
                 key: "oauth:pin-a".into(),
                 label: "account-a@example.com".into(),
@@ -1190,7 +1180,7 @@ mod tests {
             },
         );
         accounts.by_pin.insert(
-            ("google-antigravity".into(), "pin-b".into()),
+            ("openai-codex".into(), "pin-b".into()),
             AccountIdentity {
                 key: "oauth:pin-b".into(),
                 label: "account-b@example.com".into(),
@@ -1203,29 +1193,24 @@ mod tests {
         };
 
         let session = r#"{"type":"session","id":"session-root"}"#;
-        let req_1 = r#"{"id":"req-1","type":"message","message":{"role":"assistant","provider":"google-antigravity","model":"gemini","timestamp":1000,"duration":100,"usage":{"input":1,"output":2}}}"#;
-        let pin_a = r#"{"type":"credential_pin","provider":"google-antigravity","hash":"pin-a"}"#;
+        let req_1 = r#"{"id":"req-1","type":"message","message":{"role":"assistant","provider":"openai-codex","model":"gemini","timestamp":1000,"duration":100,"usage":{"input":1,"output":2}}}"#;
+        let pin_a = r#"{"type":"credential_pin","provider":"openai-codex","hash":"pin-a"}"#;
 
         let reset = r#"{"type":"reset_boundary","id":"reset-100"}"#;
-        let req_2 = r#"{"id":"req-2","type":"message","message":{"role":"assistant","provider":"google-antigravity","model":"gemini","timestamp":2000,"duration":100,"usage":{"input":3,"output":4}}}"#;
-        let pin_b = r#"{"type":"credential_pin","provider":"google-antigravity","hash":"pin-b"}"#;
+        let req_2 = r#"{"id":"req-2","type":"message","message":{"role":"assistant","provider":"openai-codex","model":"gemini","timestamp":2000,"duration":100,"usage":{"input":3,"output":4}}}"#;
+        let pin_b = r#"{"type":"credential_pin","provider":"openai-codex","hash":"pin-b"}"#;
 
         assert!(parse(&mut state, 0, session).is_empty());
-        assert!(parse(&mut state, 1, req_1).is_empty());
-        let first = parse(&mut state, 2, pin_a);
+        let first = parse(&mut state, 1, req_1);
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].session_id.as_deref(), Some("session-root"));
-        assert_eq!(
-            first[0].account_label.as_deref(),
-            Some("account-a@example.com")
-        );
+        assert_eq!(first[0].account_label, None);
+        assert!(parse(&mut state, 2, pin_a).is_empty());
 
         // Reset boundary creates a new segment
         assert!(parse(&mut state, 3, reset).is_empty());
-        // First request after reset waits for possible new pin
-        assert!(parse(&mut state, 4, req_2).is_empty());
-        // New pin arrives
-        let second = parse(&mut state, 5, pin_b);
+        // First request after reset resolves immediately in the new segment.
+        let second = parse(&mut state, 4, req_2);
         assert_eq!(second.len(), 1);
         assert_eq!(
             second[0].session_id.as_deref(),
@@ -1233,7 +1218,8 @@ mod tests {
         );
         assert_eq!(
             second[0].account_label.as_deref(),
-            Some("account-b@example.com")
+            Some("account-a@example.com")
         );
+        assert!(parse(&mut state, 5, pin_b).is_empty());
     }
 }

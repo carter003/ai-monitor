@@ -578,7 +578,7 @@ pub fn backfill_omp_request_metadata(
         let mut statement = connection.prepare(
             "SELECT event_id FROM usage_event
              WHERE source='omp' AND session_id IS NULL
-               AND provider IN ('google-antigravity','opencode-go')",
+               AND provider = 'opencode-go'",
         )?;
         let rows = statement
             .query_map([], |row| row.get::<_, String>(0))?
@@ -592,7 +592,7 @@ pub fn backfill_omp_request_metadata(
     let floor_ms: i64 = connection.query_row(
         "SELECT MIN(occurred_at) FROM usage_event
          WHERE source='omp' AND session_id IS NULL
-           AND provider IN ('google-antigravity','opencode-go')",
+           AND provider = 'opencode-go'",
         [],
         |row| row.get(0),
     )?;
@@ -825,13 +825,25 @@ pub fn backfill_codex_records(
                         for k in (i + 1)..max_k {
                             let (tc_start, tc_bytes) = &lines[k];
                             if tc_bytes.windows(13).any(|p| p == b"\"token_count\"") {
-                                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(tc_bytes) {
+                                if let Ok(val) =
+                                    serde_json::from_slice::<serde_json::Value>(tc_bytes)
+                                {
                                     let lu = val.pointer("/payload/info/last_token_usage");
                                     if let Some(usage) = lu {
-                                        let inp = usage.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                                        let out = usage.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                                        let inp = usage
+                                            .get("input_tokens")
+                                            .and_then(|v| v.as_i64())
+                                            .unwrap_or(0);
+                                        let out = usage
+                                            .get("output_tokens")
+                                            .and_then(|v| v.as_i64())
+                                            .unwrap_or(0);
                                         if inp == 0 && out == 0 {
-                                            zero_rows_to_delete.push(format!("{}:{}", file.display(), tc_start));
+                                            zero_rows_to_delete.push(format!(
+                                                "{}:{}",
+                                                file.display(),
+                                                tc_start
+                                            ));
                                             break;
                                         }
                                     }
@@ -843,16 +855,33 @@ pub fn backfill_codex_records(
                 }
             } else if bytes.windows(13).any(|p| p == b"\"token_count\"") {
                 if let Ok(val) = serde_json::from_slice::<serde_json::Value>(bytes) {
-                    if val.pointer("/payload/type").and_then(|v| v.as_str()) == Some("token_count") {
+                    if val.pointer("/payload/type").and_then(|v| v.as_str()) == Some("token_count")
+                    {
                         if let Some(info) = val.pointer("/payload/info") {
-                            let tot_in = info.pointer("/total_token_usage/input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                            let tot_out = info.pointer("/total_token_usage/output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                            let last_in = info.pointer("/last_token_usage/input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                            let last_out = info.pointer("/last_token_usage/output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                            let tot_in = info
+                                .pointer("/total_token_usage/input_tokens")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(0);
+                            let tot_out = info
+                                .pointer("/total_token_usage/output_tokens")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(0);
+                            let last_in = info
+                                .pointer("/last_token_usage/input_tokens")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(0);
+                            let last_out = info
+                                .pointer("/last_token_usage/output_tokens")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(0);
                             if last_in > 0 || last_out > 0 {
                                 let tot = (tot_in, tot_out);
                                 if last_total == Some(tot) {
-                                    duplicate_rows_to_delete.push(format!("{}:{}", file.display(), start));
+                                    duplicate_rows_to_delete.push(format!(
+                                        "{}:{}",
+                                        file.display(),
+                                        start
+                                    ));
                                 } else {
                                     last_total = Some(tot);
                                 }
@@ -867,7 +896,8 @@ pub fn backfill_codex_records(
     let tx = connection.transaction()?;
     let mut deleted_duplicates = 0;
     {
-        let mut del = tx.prepare("DELETE FROM usage_event WHERE source='codex' AND event_id = ?1")?;
+        let mut del =
+            tx.prepare("DELETE FROM usage_event WHERE source='codex' AND event_id = ?1")?;
         for eid in &zero_rows_to_delete {
             del.execute([eid])?;
         }

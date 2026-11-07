@@ -3,8 +3,6 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
     Codex,
-    Agy,
-    Agy2,
     Go,
     Go2,
     Grok,
@@ -12,10 +10,8 @@ pub enum Source {
 }
 
 impl Source {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 5] = [
         Self::Codex,
-        Self::Agy,
-        Self::Agy2,
         Self::Go,
         Self::Go2,
         Self::Grok,
@@ -25,8 +21,6 @@ impl Source {
     pub fn title(self) -> &'static str {
         match self {
             Self::Codex => "Codex · GPT",
-            Self::Agy => "AGY",
-            Self::Agy2 => "AGY2",
             Self::Go => "OpenCode Go",
             Self::Go2 => "OpenCode GO-2",
             Self::Grok => "SuperGrok",
@@ -344,7 +338,7 @@ mod tests {
 
     #[test]
     fn account_switch_cannot_reuse_quota() {
-        let mut state = SourceState::new(Source::Agy, std::time::Duration::from_secs(60));
+        let mut state = SourceState::new(Source::Go, std::time::Duration::from_secs(60));
         state.begin("account-a".into());
         state.finish(
             Ok(vec![Card {
@@ -395,7 +389,7 @@ mod tests {
 
     #[test]
     fn exhausted_weekly_quota_records_hold_until_reset() {
-        let mut state = SourceState::new(Source::Agy, std::time::Duration::from_secs(60));
+        let mut state = SourceState::new(Source::Go, std::time::Duration::from_secs(60));
         state.begin("a".into());
         let exhausted = || {
             Ok(vec![Card {
@@ -482,7 +476,7 @@ mod regression_tests {
     use super::*;
     #[test]
     fn account_switch_clears_previous_hold() {
-        let mut state = SourceState::new(Source::Agy, std::time::Duration::from_secs(60));
+        let mut state = SourceState::new(Source::Go, std::time::Duration::from_secs(60));
         state.begin("account-a".into());
         state.finish(
             Ok(vec![Card {

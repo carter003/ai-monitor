@@ -39,26 +39,6 @@ fn fixtures() -> Vec<SourceState> {
             )],
         ),
         state(
-            Source::Agy,
-            vec![card(
-                "AGY (Bluefish Carter)",
-                vec![
-                    meter("5H", 96.32, 3 * 3600 + 23 * 60, 2),
-                    meter("周", 94.95, 5 * 86400 + 18 * 3600, 2),
-                ],
-            )],
-        ),
-        state(
-            Source::Agy2,
-            vec![card(
-                "AGY2 (陈悦麒)",
-                vec![
-                    meter("5H", 100., 4 * 3600 + 59 * 60, 0),
-                    meter("周", 98.91, 5 * 86400 + 19 * 3600, 2),
-                ],
-            )],
-        ),
-        state(
             Source::Go,
             vec![card(
                 "OpenCode Go",
@@ -136,12 +116,12 @@ fn buffer_text(buffer: &Buffer) -> String {
 #[test]
 fn every_line_is_bounded_including_unicode_errors_and_notes() {
     let mut states = fixtures();
-    states[2].cards[0].title = "AGY2 (陈悦麒-e\u{301}-很长的账号名称\n不能覆盖下一行)".into();
+    states[2].cards[0].title = "OpenCode GO-2 (很长的账号名称\n不能覆盖下一行)".into();
     states[2].cards[0].note =
         Some("很长的说明\twith a newline\nthat must not break the grid".into());
     states[3].error =
         Some("网络错误：upstream timeout with an unusually long error message".into());
-    states[6].cards[0].balance = Some(f64::MAX);
+    states[4].cards[0].balance = Some(f64::MAX);
     for width in 0..=96 {
         for row in lines(&states, width, NOW) {
             assert!(row.width() <= width as usize, "width {width}: {row:?}");
@@ -161,7 +141,7 @@ fn all_meters_share_percentage_bar_and_reset_columns() {
         .iter()
         .filter(|r| r.to_string().contains('%'))
         .collect();
-    assert_eq!(meters.len(), 12);
+    assert_eq!(meters.len(), 8);
     for row in meters {
         let value = row.to_string();
         let percent_at = value.find('%').unwrap();
@@ -207,9 +187,9 @@ fn a_narrow_pane_hides_bars_without_dropping_data_or_adding_rows() {
 #[test]
 fn tiny_panes_stack_complete_values_and_reset_times() {
     let states = vec![state(
-        Source::Agy,
+        Source::Go,
         vec![card(
-            "AGY",
+            "OpenCode Go",
             vec![
                 meter("5H", 96.32, 5 * 86400 + 18 * 3600, 2),
                 meter("周", 100., 86400, 2),
@@ -233,19 +213,19 @@ fn tiny_panes_stack_complete_values_and_reset_times() {
 #[test]
 fn account_names_are_muted_and_truncated_before_status() {
     let mut state = state(
-        Source::Agy2,
-        vec![card("AGY2 (很长的名字 Bluefish Carter e\u{301})", vec![])],
+        Source::Go2,
+        vec![card("OpenCode GO-2 (很长的名字 e\u{301})", vec![])],
     );
     state.refreshing = true;
     let rows = lines(&[state], 30, NOW);
     let row = &rows[0];
-    assert!(row.to_string().contains("AGY2 · "));
+    assert!(row.to_string().contains("OpenCode GO-2 · "));
     assert!(row.to_string().contains('…'));
     assert!(row.to_string().trim_end().ends_with("刷新中"));
     let name = row
         .spans
         .iter()
-        .find(|s| s.content.contains("AGY2"))
+        .find(|s| s.content.contains("OpenCode"))
         .unwrap();
     let detail = row
         .spans
@@ -366,7 +346,7 @@ fn unknown_available_quota_is_not_rendered_as_full() {
 
 #[test]
 fn errors_and_loading_notes_remain_visible() {
-    let mut state = SourceState::new(Source::Agy, Duration::from_secs(60));
+    let mut state = SourceState::new(Source::Go, Duration::from_secs(60));
     assert!(text(&lines(std::slice::from_ref(&state), 46, NOW)).contains("正在读取额度"));
     state.finish(Err(FetchError::new("连接超时")), NOW, Instant::now());
     let output = text(&lines(std::slice::from_ref(&state), 46, NOW));
@@ -375,7 +355,7 @@ fn errors_and_loading_notes_remain_visible() {
     state.finish(
         Ok(vec![Card {
             note: Some("未订阅".into()),
-            ..Card::empty("AGY")
+            ..Card::empty("Go")
         }]),
         NOW,
         Instant::now(),
@@ -389,7 +369,7 @@ fn group_backgrounds_replace_empty_separator_rows_at_any_height() {
     let short = quota_panel_lines(&states, Rect::new(0, 0, 46, 8), NOW);
     let tall = quota_panel_lines(&states, Rect::new(0, 0, 46, 80), NOW);
     assert_eq!(short, tall);
-    assert_eq!(short.len(), 20); // Seven headings, twelve meters, one balance.
+    assert_eq!(short.len(), 14); // Five headings, eight meters, one balance.
     assert!(short.iter().all(|row| !row.to_string().trim().is_empty()));
 }
 
@@ -416,7 +396,7 @@ fn real_buffer_has_the_approved_group_background_and_card_count() {
             .lines()
             .next()
             .unwrap()
-            .contains("7 项")
+            .contains("5 项")
     );
     assert_eq!(buffer[(2, 2)].bg, GROUP_BG);
     assert_eq!(buffer[(2, 2)].fg, INK);

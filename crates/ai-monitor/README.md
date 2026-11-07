@@ -12,7 +12,7 @@ ai-monitor
 
 一页两栏，同时展示系统资源和本机 token 消耗：
 
-- **左栏**：上半是系统资源，下半是 Codex 常规 GPT、AGY、AGY2、
+- **左栏**：上半是系统资源，下半是 Codex 常规 GPT、
   OpenCode Go、OpenCode GO-2、SuperGrok 和 OpenRouter 的**云端剩余配额**。额度列表在系统数字下方独立滚动，
   不会把系统指标顶出画面。
 - **右栏**：本机实际烧掉的 token —— 上半左侧（占宽 70%）是按模型排行的一行一模型表格
@@ -172,7 +172,7 @@ token 与金额在同一次 GROUP BY 里取回。
 
 切换账号和刷新失败会清除等待状态，失败时保留的数据标为旧；正常数据超过配置刷新周期的两倍才标旧。系统网速和磁盘速率按设备分别计算差值，设备集合变化或计数器回退时重新采样；网络和磁盘读取失败互不影响。
 
-各采集线程共享两套 HTTP 客户端的连接池与后台运行线程，账号凭据及 AGY 续期会话仍各自独立。
+各采集线程共享两套 HTTP 客户端的连接池与后台运行线程，账号凭据各自独立。
 
 ## 0.1.7 更新
 
@@ -188,13 +188,11 @@ OpenCode Go 固定最少显示 1 位小数（`98.0%`／`99.0%`／`100.0%`，0.1.
 
 ## 0.1.5 更新
 
-额度按官方自带精度显示小数：官方给 1 位小数就显示 1 位，例如 OpenCode Go 的 `100.0%`、`68.8%`；官方给整数的来源保持原样。AGY 的 0~1 小数按乘 100 后的有效位数显示。
+额度按官方自带精度显示小数：官方给 1 位小数就显示 1 位，例如 OpenCode Go 的 `100.0%`、`68.8%`；官方给整数的来源保持原样。
 
 周额度用尽的来源停止轮询，直到官方重置时间再问一次（手动按 `r` 仍可立即刷新）。启动后第一次本来就会问一次，不断线重连也能刷新。
 
 ## 0.1.4 更新
-
-AGY / AGY2 标题后显示各自 Google 账号名称，名称缺失时使用邮箱。资料来自 Google userinfo，按登录会话缓存在内存中；获取失败不影响额度显示，本地服务备用路径使用已验证账号的邮箱。
 
 网络和磁盘吞吐固定为三位整数与固定宽度单位，例如 `072K/s`、`999K/s`、`001M/s`。超过 999K/s 后切换到 M/s，后续按相同规则切换到 G/s、T/s；首次采样占位符为 `---K/s`，因此刷新时字段位置不会跳动。
 
@@ -209,8 +207,6 @@ AGY / AGY2 标题后显示各自 Google 账号名称，名称缺失时使用邮�
 逻辑 CPU 从横向字符条改为趋势图左侧的纵向轴，每行显示 CPU 编号、当前占用率和强度符号。系统区会按逻辑 CPU 数量动态增高，同时为额度区保留可滚动空间。
 
 ## 0.1.1 更新
-
-AGY／AGY2 改为云端查询并支持令牌自动续期，关闭客户端也能持续监控。更新后退出旧的监控台，再运行 `ai-monitor` 即可。
 
 ## 操作
 
@@ -237,7 +233,6 @@ AGY／AGY2 改为云端查询并支持令牌自动续期，关闭客户端也能
 ## 账户与数据来源
 
 - **Codex**：读取 `~/.codex/auth.json` 中的现有 ChatGPT 登录凭据，查询账户 usage。常规额度按返回的窗口显示，账户返回的其他独立额度池一并列出；已停用的 GPT-5.3-Codex-Spark 不再统计。此接口属于 Codex 客户端内部接口，可能随服务更新而变化。不会启动 Codex 模型推理或刷新／改写其登录文件。
-- **AGY / AGY2**：分别读取 `~/.gemini/antigravity-cli/antigravity-oauth-token` 和 `~/.gemini2/antigravity-cli/antigravity-oauth-token`，按原生 CLI 的请求方式查询 `https://daily-cloudcode-pa.googleapis.com/v1internal:`：先通过 `loadCodeAssist` 获取当前账户的项目，再携带项目查询 `retrieveUserQuotaSummary`。请求使用 CLI 1.4.0 的完整 `User-Agent`（含构建号与 consumer 身份），与 WSL 中 CLI 的 `/usage` 口径一致；无版本标识的请求会缺少 Gemini 组，改用 production 端点会读到不同额度，不能用它补齐。**两个客户端都可以关闭，不需要后台 AGY 服务**。显示 Gemini 共享池的 5H／周额度，Pro 和 Flash 不重复列为两份额度。访问令牌接近到期时自动续期；服务端提前返回 401 时最多续期重试一次。新令牌仅保存在各自监控线程内存中，不改写 AGY 登录文件；客户端重新登录后自动读取新凭据。刷新凭据被撤销时需重新登录相应客户端，登录后可再关闭。缺少文件凭据或云端连接／格式异常时，尝试同一配置目录的已运行本地服务并标记“本地服务备用”；登录失效和限流不会被备用路径掩盖。云端接口、CLI 版本标识与 OAuth 客户端配置属于内部协议，可能随 AGY 版本更新而变化。
 - **OpenCode Go**：优先从 omp（`~/.omp/agent/agent.db` 及各 profile）读取当前生效的 Go API Key，未找到时回退至 OpenCode 已保存的凭据（`~/.local/share/opencode/auth.json`），查询 `/zen/go/v1/usage`，显示 5H／周／月剩余比例，不抓取浏览器 Cookie。
 - **OpenCode GO-2**：第二把 OpenCode Go 订阅 Key，读取 `~/.config/ai-monitor/go2.key`（文件只包含 Key，建议权限 `600`），查询同一 `/zen/go/v1/usage` 接口，卡片显示在 OpenCode Go 下方。未放置 Key 文件时该卡片提示配置方法，不影响其他来源。
 - **SuperGrok**：使用 `~/.grok/auth.json` 中的订阅登录信息，查询 Grok Build 的订阅 credits 接口，按实际返回的周期解码。登录过期时提示重新登录 Grok。账号的实时接口仍受登录状态、服务端权限及内部协议版本影响，不能保证每个账号都有可查询额度。
@@ -245,7 +240,7 @@ AGY／AGY2 改为云端查询并支持令牌自动续期，关闭客户端也能
 
 OpenRouter 专用 Key 可保存在 `~/.config/ai-monitor/openrouter.key`，文件只包含 Key，建议权限 `600`。不要把 Key 写入源码、截图或聊天消息。
 
-程序只读取这些客户端的登录文件，不保存或打印凭据，不自动充值／切换账户，不向外发送会话记录。网络请求仅发送到对应服务；本地 AGY 的自签名证书例外仅适用于固定的 `127.0.0.1` 地址。数据快照只保留在当前进程内，退出后不留账户额度缓存。
+程序只读取这些客户端的登录文件，不保存或打印凭据，不自动充值／切换账户，不向外发送会话记录。网络请求仅发送到对应服务。数据快照只保留在当前进程内，退出后不留账户额度缓存。
 
 ## AI 线路
 
@@ -256,7 +251,6 @@ OpenRouter 专用 Key 可保存在 `~/.config/ai-monitor/openrouter.key`，文�
 | Codex | `https://chatgpt.com/backend-api/codex/responses` |
 | OpenCode Go | `https://opencode.ai/zen/go/v1/chat/completions` |
 | SuperGrok | `https://cli-chat-proxy.grok.com/v1/chat/completions` |
-| Antigravity | `https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent` |
 
 每条线路启动立即探测，默认每 10 秒一次，超时 5 秒，独立运行。通过 Rust Command 直接启动 curl，禁用 `.curlrc`，发送无凭据 HEAD，不发送提示词、不调用模型、不消耗模型 token；不跟随重定向，保留证书验证。每次建立新连接，继承监控进程的代理环境变量和系统路由。Codex 选择 ChatGPT 订阅入口，但探测不读取或发送订阅凭据。
 
@@ -281,8 +275,6 @@ network_interval_seconds = 10 # 5–300 秒
 web_port = 19999 # 本地网页端口；0 自动分配
 usage_db = "~/.local/share/herdr/usage.db"
 codex_home = "~/.codex"
-agy_home = "~/.gemini"
-agy2_home = "~/.gemini2"
 opencode_home = "~/.local/share/opencode"
 omp_home = "~/.omp"
 grok_home = "~/.grok"
@@ -300,15 +292,11 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-测试覆盖双账户隔离、自动续期及内存复用、令牌轮换、401 有界重试、登录撤销、Codex 多额度池与停用池过滤、额度缺失／过期、Go 用量方向、余额计算、Grok protobuf 错误帧、Linux CPU／内存／网络／磁盘指标、重试退避和小窗格渲染。`tests/hangup.rs` 另外验证终端挂断、`q` / Esc / Ctrl+C、SIGTERM / SIGHUP / SIGKILL 都能让进程退出并释放网页端口，包括存在未完成 HTTP 请求的情况：它用 tmux 起一个独立会话再关掉，未安装 tmux 的环境会跳过并打印跳过原因。
+测试覆盖 Codex 多额度池与停用池过滤、额度缺失／过期、Go 用量方向、余额计算、Grok protobuf 错误帧、Linux CPU／内存／网络／磁盘指标、重试退避和小窗格渲染。`tests/hangup.rs` 另外验证终端挂断、`q` / Esc / Ctrl+C、SIGTERM / SIGHUP / SIGKILL 都能让进程退出并释放网页端口，包括存在未完成 HTTP 请求的情况：它用 tmux 起一个独立会话再关掉，未安装 tmux 的环境会跳过并打印跳过原因。
 
 ## 协议参考
 
 - [Codex App Server 的多额度池契约](https://learn.chatgpt.com/docs/app-server)
-- [AGY 云端额度与 OAuth 查询参考](https://github.com/barramee27/crossusage/blob/feat/linux-windows-native-support/docs/providers/antigravity-cli.md)
-- [AGY OAuth 客户端配置参考](https://github.com/lbjlaq/Antigravity-Manager/blob/main/src-tauri/src/modules/oauth.rs)
-- [AGY 原生额度面板](https://www.antigravity.google/docs/cli/commands/usage)
 - [OpenCode Go usage 接口源码](https://github.com/anomalyco/opencode/blob/dev/packages/console/app/src/routes/zen/go/v1/usage.ts)
 - [OpenRouter credits 接口](https://openrouter.ai/docs/api/api-reference/credits/get-remaining-credits)
-- [CodexBar 的 AGY 本地接口与额度结构参考](https://github.com/steipete/CodexBar/tree/main/Sources/CodexBarCore/Providers/Antigravity)
 - [SuperGrok 订阅 protobuf 字段参考](https://github.com/aspinojony/grok-credential-manager/blob/main/app/weekly_quota.py)
