@@ -1,0 +1,223 @@
+{
+  "status": "installed-and-verified",
+  "upstreamVersion": "6.1.19",
+  "upstreamCommit": "8e9fac038dcd998bf23716df2b08379a15854ec9",
+  "patchSha256": "35edadc7761877137c886de702323e437dede9776543f789d0a9c255d7c6aa81",
+  "lastObservedRunningBundleId": "9f66ce9d74c595500a2b361e663ad8c020c374f8c2ec21e2569d577b2cd8f7de",
+  "previousInstalled": {
+    "status": "installed-and-verified",
+    "upstreamVersion": "6.1.19",
+    "upstreamCommit": "8e9fac038dcd998bf23716df2b08379a15854ec9",
+    "patchSha256": "efbbe8cbdb7f58169d2421ba19f04297bdc878e482e108b0b4d6a39809170b2c",
+    "expectedBundleId": "a6f06bee9f0ad6d8cf4bd6aecfd41710430105a061df3e102b62a4874376c510",
+    "artifactSha256": "158b109f6cc21232f21f33c5ed23d8b2b43ca9a9bfb0070429f24268d2a957f2",
+    "lastObservedRunningBundleId": "a6f06bee9f0ad6d8cf4bd6aecfd41710430105a061df3e102b62a4874376c510",
+    "sourceVerifiedAt": "2026-11-22T08:24:03.293Z",
+    "checks": {
+      "core": {
+        "pass": 1293,
+        "skip": 2,
+        "fail": 0
+      },
+      "launcher": {
+        "pass": 447,
+        "skip": 1,
+        "fail": 0
+      },
+      "maintenance": {
+        "pass": 9,
+        "skip": 0,
+        "fail": 0
+      },
+      "skips": "Upstream macOS/Windows-only checks on Linux",
+      "relocatableRuntimeSmoke": true,
+      "packagedLauncherSmoke": true
+    },
+    "linuxLibnotify": {
+      "source": "existing official v6.1.19 AppImage",
+      "artifactSha256": "23473a9156147282b3e516e8210c386a43d41f556be674e8b62285832880180c",
+      "libraryVersion": "0.8.7",
+      "librarySha256": "fe960926dd4681a35a3ebb9b730cd29d2a50763519fa37a5f86a5ca5698c8ae4",
+      "license": "LGPL-2.1 (present in runtime LICENSES)"
+    },
+    "liveSourceHelper": {
+      "kind": "compiled-source-helper override on the existing Launcher, before final package activation",
+      "at": "2026-11-22T08:12:33.767Z",
+      "traceId": "localfix_7b876889d042",
+      "issuedHash": "03bbae912a9c",
+      "issuedLength": 37,
+      "issuedEndsUnderscore": true,
+      "registrationAttempts": 77,
+      "actualPost": {
+        "model": "gpt-6-pro",
+        "exactToken": true,
+        "contextEqual": true,
+        "tokenHash": "03bbae912a9c",
+        "chars": 762
+      },
+      "rawJsonValid": true,
+      "literalValuePreserved": true,
+      "streamedTextMatches": true,
+      "completionRevision": 2
+    },
+    "installedHelperLiveSmoke": {
+      "kind": "default installed helper",
+      "at": "2026-11-22T08:46:31.309Z",
+      "traceId": "localfix_47402431f702",
+      "issuedHash": "faf028e5f102",
+      "issuedLength": 37,
+      "issuedEndsUnderscore": true,
+      "registrationAttempts": 17,
+      "actualPost": {
+        "model": "gpt-6-pro",
+        "exactToken": true,
+        "contextEqual": true,
+        "tokenHash": "faf028e5f102",
+        "chars": 762
+      },
+      "rawJsonValid": true,
+      "literalValuePreserved": true,
+      "streamedTextMatches": true,
+      "completionRevision": 2
+    },
+    "codexReviewSmoke": {
+      "at": "2026-11-22T08:58:31.371Z",
+      "model": "chatgpt-web/gpt-6-pro",
+      "reasoning": "max",
+      "rawJsonValid": true,
+      "knownDefectFound": true,
+      "completedCommands": 2,
+      "findings": 1,
+      "rawJsonSource": "bridge Responses response.completed before Codex review rendering",
+      "cliReviewRendered": true,
+      "fixtureSourceUnchanged": true,
+      "permissions": "inherited user configuration; read-only review instructions"
+    },
+    "activation": "installed",
+    "restartPolicy": "User fully quits and reopens Launcher; the agent must not stop its own communication service.",
+    "finalizedAt": "2026-11-22T08:44:43.575Z",
+    "installedHelperIdentity": {
+      "bundleId": "a6f06bee9f0ad6d8cf4bd6aecfd41710430105a061df3e102b62a4874376c510",
+      "helperScriptSha256": "005845d63f6b12062a73a0409e51f7eee92f3f5d47c386a6de3e039b910a406b",
+      "descriptorMatchesInstalledManifest": true,
+      "configuredHelperOverride": false
+    },
+    "validatedAt": "2026-11-22T09:00:06.923963+00:00",
+    "knownValidationLimitation": "Extra read-only/workspace-write CLI sandbox overrides hit a separate trusted-network-context compatibility error; regression inherits existing user permissions and verifies read-only review behavior."
+  },
+  "incident": {
+    "reviewFindings": 5,
+    "rawFinalUtf8Bytes": 4644,
+    "rawFinalSha256": "d5b0046a2c202790b8e9205bea96697e6d17d60571bd456900f3ce043c3b6924",
+    "initialPostEndedAtTool": true,
+    "finalSource": "same-page conversation GET",
+    "originalDomReplayMatched": true,
+    "foreignUserRejected": true
+  },
+  "liveSourceHelper": {
+    "at": "2026-11-22T13:08:55.947Z",
+    "traceId": "localfix_6d945e25046d",
+    "issuedHash": "7a5dc524e29f",
+    "issuedLength": 37,
+    "issuedEndsUnderscore": true,
+    "registrationAttempts": 20,
+    "actualPost": {
+      "model": "gpt-6-pro",
+      "exactToken": true,
+      "contextEqual": true,
+      "tokenHash": "7a5dc524e29f",
+      "chars": 762
+    },
+    "rawJsonValid": true,
+    "literalValuePreserved": true,
+    "streamedTextMatches": true,
+    "completionRevision": 4
+  },
+  "sourceCliReviewSmoke": {
+    "at": "2026-11-22T13:12:35.463Z",
+    "model": "chatgpt-web/gpt-5.6-pro",
+    "reasoning": "max",
+    "rawJsonValid": true,
+    "knownDefectFound": true,
+    "completedCommands": 1,
+    "findings": 1,
+    "rawJsonSource": "bridge Responses response.completed before Codex review rendering",
+    "cliReviewRendered": true,
+    "fixtureSourceUnchanged": true,
+    "permissions": "inherited user configuration; read-only review instructions"
+  },
+  "maintenanceTests": 13,
+  "herdrUsageTests": 142,
+  "restartPolicy": "User fully quits and reopens Launcher; the agent must not stop its own communication service.",
+  "activation": "installed",
+  "expectedBundleId": "9f66ce9d74c595500a2b361e663ad8c020c374f8c2ec21e2569d577b2cd8f7de",
+  "artifactSha256": "871557558b5add9885334d1b344d0959dc308068f16494e6935b5b929e49d3a5",
+  "sourceVerifiedAt": "2026-11-22T13:25:05.370Z",
+  "checks": {
+    "core": {
+      "pass": 1316,
+      "skip": 2,
+      "fail": 0
+    },
+    "launcher": {
+      "pass": 447,
+      "skip": 1,
+      "fail": 0
+    },
+    "relocatableRuntimeSmoke": true,
+    "packagedLauncherSmoke": true
+  },
+  "finalizedAt": "2026-11-22T13:50:42.032Z",
+  "validatedAt": "2026-11-22T13:53:24.514061+00:00",
+  "installedHelperIdentity": {
+    "bundleId": "9f66ce9d74c595500a2b361e663ad8c020c374f8c2ec21e2569d577b2cd8f7de",
+    "helperScriptSha256": "3f8fa134192a7663c176f4a652257f7d2297dbc609df9e92d60849200b8394fe",
+    "descriptorMatchesInstalledManifest": true,
+    "configuredHelperOverride": false
+  },
+  "installedHelperLiveSmoke": {
+    "at": "2026-11-22T13:51:09.040Z",
+    "traceId": "localfix_36f201e0a4e2",
+    "issuedHash": "5913c5707123",
+    "issuedLength": 37,
+    "issuedEndsUnderscore": true,
+    "registrationAttempts": 8,
+    "actualPost": {
+      "model": "gpt-6-pro",
+      "exactToken": true,
+      "contextEqual": true,
+      "tokenHash": "5913c5707123",
+      "chars": 762
+    },
+    "rawJsonValid": true,
+    "literalValuePreserved": true,
+    "streamedTextMatches": true,
+    "completionRevision": 2
+  },
+  "codexReviewSmoke": {
+    "at": "2026-11-22T13:51:58.871Z",
+    "model": "chatgpt-web/gpt-6-pro",
+    "reasoning": "max",
+    "rawJsonValid": true,
+    "knownDefectFound": true,
+    "completedCommands": 1,
+    "findings": 1,
+    "rawJsonSource": "bridge Responses response.completed before Codex review rendering",
+    "cliReviewRendered": true,
+    "fixtureSourceUnchanged": true,
+    "permissions": "inherited user configuration; read-only review instructions"
+  },
+  "installedOriginalModelReviewSmoke": {
+    "at": "2026-11-22T13:52:51.147Z",
+    "model": "chatgpt-web/gpt-5.6-pro",
+    "reasoning": "max",
+    "rawJsonValid": true,
+    "knownDefectFound": true,
+    "completedCommands": 1,
+    "findings": 1,
+    "rawJsonSource": "bridge Responses response.completed before Codex review rendering",
+    "cliReviewRendered": true,
+    "fixtureSourceUnchanged": true,
+    "permissions": "inherited user configuration; read-only review instructions"
+  }
+}

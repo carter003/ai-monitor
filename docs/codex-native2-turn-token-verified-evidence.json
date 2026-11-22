@@ -1,0 +1,194 @@
+{
+  "captured_at_utc": "2026-11-22T03:03:41.670956+00:00",
+  "runtime_version": "6.1.19",
+  "codex_cli_version": "0.171.0",
+  "confirmed_root_cause": "With a Codex Native2 mention selected, the composer switches from plain-text extraction to Markdown serialization. The runtime inserts opaque transport data as ordinary text, so final POST serialization escapes token characters and nested JSON after the DOM integrity check.",
+  "controlled_composer_roundtrips": [
+    {
+      "source": "composer-roundtrip.json",
+      "connector_selected": false,
+      "semantic_code_block": false,
+      "token_preserved": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "nested_json_line_preserved": true,
+      "original_chars": 585,
+      "sent_chars": 584
+    },
+    {
+      "source": "composer-roundtrip-connector.json",
+      "connector_selected": true,
+      "semantic_code_block": false,
+      "token_preserved": [
+        true,
+        true,
+        true,
+        false,
+        false,
+        true
+      ],
+      "nested_json_line_preserved": false,
+      "original_chars": 585,
+      "sent_chars": 666
+    },
+    {
+      "source": "composer-roundtrip-connector-pre.json",
+      "connector_selected": true,
+      "semantic_code_block": true,
+      "token_preserved": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "nested_json_line_preserved": true,
+      "original_chars": 585,
+      "sent_chars": 662
+    }
+  ],
+  "real_failure": {
+    "trace_id": "forensic_73d7bd0af5a1",
+    "model": "gpt-6-pro",
+    "issued_token": {
+      "length": 37,
+      "hash": "42742ba65190",
+      "ends_with_underscore": true
+    },
+    "pre_submit_dom_contains_exact_token": true,
+    "post_token": {
+      "length": 38,
+      "hash": "5cb8d63551af",
+      "matches_issued": false
+    },
+    "tool_calls": [
+      {
+        "sse_line": 43,
+        "tool": "codex_tool_inventory",
+        "token_length": 39,
+        "token_hash": "c2617ae60d35",
+        "matches_issued": false,
+        "changes": [
+          {
+            "operation": "insert",
+            "issued_range": [
+              36,
+              36
+            ],
+            "emitted_range": [
+              36,
+              37
+            ],
+            "inserted": "\\"
+          },
+          {
+            "operation": "insert",
+            "issued_range": [
+              37,
+              37
+            ],
+            "emitted_range": [
+              38,
+              39
+            ],
+            "inserted": "6"
+          }
+        ]
+      }
+    ],
+    "actual_tool_error": {
+      "sse_line": 46,
+      "text": "MCP error -32602: Input validation error: Invalid arguments for tool codex_tool_inventory: Copy turn_token exactly from the current request: turn_ followed by 32 case-sensitive characters. Do not guess or reuse an earlier token. at turn_token",
+      "is_error": true
+    }
+  },
+  "same_capability_transport_comparison": [
+    {
+      "request": 10,
+      "mode": "plain",
+      "model": "gpt-6-pro",
+      "issued_hash": "6756ca0ce80b",
+      "post_contains_exact_issued": false,
+      "post_token_length": 38,
+      "post_token_hash": "382cbd77f599",
+      "tool_calls": [
+        {
+          "sse_line": 43,
+          "token_length": 37,
+          "token_hash": "6756ca0ce80b",
+          "matches_issued": true
+        }
+      ]
+    },
+    {
+      "request": 11,
+      "mode": "semantic_code_block",
+      "model": "gpt-6-pro",
+      "issued_hash": "6756ca0ce80b",
+      "post_contains_exact_issued": true,
+      "post_token_length": 37,
+      "post_token_hash": "6756ca0ce80b",
+      "tool_calls": [
+        {
+          "sse_line": 43,
+          "token_length": 37,
+          "token_hash": "6756ca0ce80b",
+          "matches_issued": true
+        }
+      ]
+    }
+  ],
+  "launcher_log_references": [
+    {
+      "line": 9407,
+      "at": "2026-11-22T02:54:01.629Z",
+      "message": "[chatgpt-web] broker trace=forensic_73d7bd0af5a1 registered tokenHash=42742ba65190"
+    },
+    {
+      "line": 10192,
+      "at": "2026-11-22T03:02:06.849Z",
+      "message": "[chatgpt-web] broker trace=forensic_39de5e276ef1 registered tokenHash=6756ca0ce80b"
+    },
+    {
+      "line": 10210,
+      "at": "2026-11-22T03:02:24.534Z",
+      "message": "[chatgpt-web] broker claim received (tokenChars=37, tokenHash=6756ca0ce80b, valid=true)"
+    },
+    {
+      "line": 10236,
+      "at": "2026-11-22T03:02:49.954Z",
+      "message": "[chatgpt-web] broker claim received (tokenChars=37, tokenHash=6756ca0ce80b, valid=true)"
+    }
+  ],
+  "frontend_bundle": {
+    "name": "200429.7cb44b876c.js",
+    "sha256": "d199ba5287420c488c30784a6aca57296b434142b9eb0ae8d291b89ce7c49c81",
+    "entry_points": [
+      "eFVb.getChatGptPrompt",
+      "Nboy.i",
+      "rKPC.Q",
+      "rKPC.k",
+      "rKPC.serialize"
+    ]
+  },
+  "limits": [
+    "The four historical issued capability values could not be recovered. Their exact corruption mechanism cannot be assigned individually.",
+    "Models can sometimes recover an escaped token; input corruption does not imply every request fails.",
+    "The extra final digit in the failed tool argument appeared after POST serialization, during upstream parameter generation.",
+    "The real reproduced rejection was MCP input-format validation, not a 37-character retiredTurn=unknown rejection."
+  ],
+  "raw_evidence_directory": "/tmp/codex-turn-forensics-k5w_20nv",
+  "raw_evidence_committed": false,
+  "installed_runtime_or_config_modified": false,
+  "cleanup": {
+    "diagnostic_observer_stopped": true,
+    "owned_diagnostic_pages_closed": true,
+    "last_probe_owner_retired_verified": true
+  }
+}

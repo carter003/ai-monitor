@@ -110,28 +110,42 @@ impl PriceTable {
     /// bare `model` or their own provider prefix (`opencode-go/deepseek-v4-flash`
     /// must still find `deepseek/deepseek-v4-flash`).
     pub fn resolve(&self, raw_model: &str, usage: &UsageEvent) -> Priced {
+        if matches!(self.aliases.get(raw_model), Some(Alias::Ignored)) {
+            return Priced::Ignored;
+        }
+        match self.resolved_price(raw_model) {
+            Some(price) => Priced::Cost(cost(usage, price)),
+            None => Priced::Unresolved,
+        }
+    }
+
+    /// Whether the price selected by the normal resolution rules is invalid.
+    pub fn has_negative_price(&self, raw_model: &str) -> bool {
+        self.resolved_price(raw_model).is_some_and(|price| {
+            price.prompt < 0.0
+                || price.completion < 0.0
+                || price.cache_read.is_some_and(|value| value < 0.0)
+                || price.cache_write.is_some_and(|value| value < 0.0)
+        })
+    }
+
+    fn resolved_price(&self, raw_model: &str) -> Option<&Price> {
         if let Some(alias) = self.aliases.get(raw_model) {
             return match alias {
-                Alias::Ignored => Priced::Ignored,
-                Alias::Mapped(model_id) => match self.prices.get(model_id) {
-                    Some(price) => Priced::Cost(cost(usage, price)),
-                    None => Priced::Unresolved,
-                },
+                Alias::Ignored => None,
+                Alias::Mapped(model_id) => self.prices.get(model_id),
             };
         }
         if let Some(price) = self.prices.get(raw_model) {
-            return Priced::Cost(cost(usage, price));
+            return Some(price);
         }
         let bare = raw_model.rsplit('/').next().unwrap_or(raw_model);
         if bare != raw_model {
             if let Some(price) = self.prices.get(bare) {
-                return Priced::Cost(cost(usage, price));
+                return Some(price);
             }
         }
-        match self.by_bare_name.get(bare) {
-            Some(price) => Priced::Cost(cost(usage, price)),
-            None => Priced::Unresolved,
-        }
+        self.by_bare_name.get(bare)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -224,6 +238,7 @@ pub fn reprice_unpriced_events(
     connection: &mut Connection,
     price_table: &PriceTable,
 ) -> rusqlite::Result<usize> {
+    let tx = connection.transaction()?;
     struct UnpricedRow {
         source: String,
         event_id: String,
@@ -234,7 +249,7 @@ pub fn reprice_unpriced_events(
         output_total: i64,
     }
     let rows: Vec<UnpricedRow> = {
-        let mut select_stmt = connection.prepare(
+        let mut select_stmt = tx.prepare(
             "SELECT source, event_id, model, input_total, cache_read, cache_write, output_total
              FROM usage_event
              WHERE cost_usd IS NULL AND model IS NOT NULL",
@@ -273,7 +288,6 @@ pub fn reprice_unpriced_events(
         return Ok(0);
     }
 
-    let tx = connection.transaction()?;
     {
         let mut update_stmt =
             tx.prepare("UPDATE usage_event SET cost_usd = ?1 WHERE source = ?2 AND event_id = ?3")?;
@@ -281,6 +295,7 @@ pub fn reprice_unpriced_events(
             update_stmt.execute(rusqlite::params![cost, source, event_id])?;
         }
     }
+    db::refresh_hourly_costs(&tx)?;
     tx.commit()?;
 
     Ok(updates.len())

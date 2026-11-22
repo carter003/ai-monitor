@@ -284,6 +284,39 @@ pub fn rollup_closed_hours(connection: &mut Connection, now_ms: i64) -> rusqlite
     Ok(distinct_hours)
 }
 
+/// Refresh archived costs inside the transaction that changed event pricing.
+/// Keep the archived token counts and watermark intact. The watermark bounds
+/// the input so current-hour events cannot enter an archived aggregate.
+pub fn refresh_hourly_costs(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+    transaction.execute_batch(
+        "WITH archived AS MATERIALIZED (
+             SELECT date(e.occurred_at / 1000, 'unixepoch', 'localtime') AS day,
+                    CAST(strftime('%H', e.occurred_at / 1000, 'unixepoch', 'localtime') AS INTEGER) AS hour,
+                    CASE WHEN COALESCE(a.model_id, e.model, '') = '' THEN '__unknown__'
+                         ELSE COALESCE(a.model_id, e.model) END AS model,
+                    e.cost_usd
+             FROM usage_event e
+             LEFT JOIN model_alias a ON a.raw_model = e.model
+             WHERE e.occurred_at < CAST((SELECT cursor FROM collect_offset
+                                        WHERE kind = 'hourly-rollup') AS INTEGER)
+         ), costs AS MATERIALIZED (
+             SELECT day, hour, '' AS model, SUM(cost_usd) AS cost_usd
+             FROM archived GROUP BY day, hour
+             UNION ALL
+             SELECT day, hour, model, SUM(cost_usd) AS cost_usd
+             FROM archived GROUP BY day, hour, model
+         )
+         UPDATE usage_hourly AS h SET cost_usd = (
+             SELECT c.cost_usd FROM costs c
+             WHERE c.day = h.day AND c.hour = h.hour AND c.model = h.model
+         )
+         WHERE EXISTS (
+             SELECT 1 FROM costs c
+             WHERE c.day = h.day AND c.hour = h.hour AND c.model = h.model
+         );",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

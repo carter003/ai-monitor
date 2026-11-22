@@ -1,0 +1,2359 @@
+diff --git a/launcher/tests/fixtures/navigation-viewport.cjs b/launcher/tests/fixtures/navigation-viewport.cjs
+index 3c582a5..aef4f52 100644
+--- a/launcher/tests/fixtures/navigation-viewport.cjs
++++ b/launcher/tests/fixtures/navigation-viewport.cjs
+@@ -62,6 +62,15 @@ app.whenReady().then(async () => {
+     },
+   };
+   app.on("before-quit", () => {
++    // This fixture bypasses BrowserHost's normal lifecycle. Retire its child
++    // contents before window teardown without re-entering view presentation.
++    host.destroyed = true;
++    const views = [...host.turnTabs.values()].map(tab => tab.view).concat(host.view);
++    host.turnTabs.clear();
++    for (const view of views) {
++      const contents = view.webContents;
++      if (contents && !contents.isDestroyed()) contents.close();
++    }
+     global.navigationFixture.release();
+     server.close();
+     server.closeAllConnections();
+diff --git a/src/adapters/chatgpt-web/browser-helper-main.ts b/src/adapters/chatgpt-web/browser-helper-main.ts
+index b4296e7..47ca536 100644
+--- a/src/adapters/chatgpt-web/browser-helper-main.ts
++++ b/src/adapters/chatgpt-web/browser-helper-main.ts
+@@ -26,6 +26,7 @@ interface RunMessage {
+     traceId: string;
+     modelId: string;
+     reasoning?: string;
++    outputFormat?: BrowserTurn["outputFormat"];
+     modelFamily?: "5.6" | "6";
+     capabilities: ChatGptWebCapabilities;
+     nativeConnector?: boolean;
+@@ -221,6 +222,7 @@ async function run(message: RunMessage): Promise<void> {
+     traceId: message.turn.traceId,
+     modelId: message.turn.modelId,
+     reasoning: message.turn.reasoning,
++    outputFormat: message.turn.outputFormat,
+     ...(message.turn.modelFamily ? { modelFamily: message.turn.modelFamily } : {}),
+     capabilities: message.turn.capabilities,
+     ...(message.turn.nativeConnector ? { nativeConnector: true } : {}),
+diff --git a/src/adapters/chatgpt-web/browser-user-message.ts b/src/adapters/chatgpt-web/browser-user-message.ts
+index 1a0cfab..3044585 100644
+--- a/src/adapters/chatgpt-web/browser-user-message.ts
++++ b/src/adapters/chatgpt-web/browser-user-message.ts
+@@ -1,13 +1,54 @@
+ /** Runs in the page. Read the submitted text, excluding only observed renderer chrome. */
+ export function readChatGptUserMessage(
+   target: Element,
+-  connectorName?: string,
++  options?: string | { connectorName?: string; expectedLiteral?: string; requireLiteral?: boolean },
+ ): { text: string; leadingConnector: boolean } | undefined {
++  const connectorName = typeof options === "string" ? options : options?.connectorName;
++  const expectedLiteral = typeof options === "string" ? undefined : options?.expectedLiteral;
+   let leadingConnector = false;
+   let unsupported = false;
+   let seenText = false;
+   const rich = target.querySelector('[data-markdown-text-tone="user-message"].rich-text-user-turn');
+   if (target.querySelectorAll('[data-markdown-text-tone="user-message"].rich-text-user-turn').length > 1) return;
++  const connectorSelector = '[data-prompt-link-href^="app://"], a:has(> [data-prompt-link-href^="app://"])';
++  if (expectedLiteral !== undefined) {
++    const literals = [...target.querySelectorAll('pre[data-markdown-copy="code-block"]')].filter(block => {
++      const code = block.firstChild;
++      return block.childNodes.length === 1 && code instanceof HTMLElement
++        && code.matches('code[data-markdown-copy-content="true"]')
++        && code.textContent === expectedLiteral;
++    });
++    if (literals.length > 0) {
++      if (literals.length !== 1) return;
++      const literal = literals[0]!;
++      let seenLiteral = false;
++      let separator = "";
++      // A literal transport has one code block and, optionally, its leading app
++      // mention. Do not flatten extra paragraphs, blank blocks or sibling text
++      // into a match. In particular, preserve whitespace inside the code itself.
++      const readLiteral = (node: Node): boolean => {
++        if (node === literal) { seenLiteral = true; return true; }
++        if (node.nodeType === Node.TEXT_NODE) {
++          if (!node.textContent) return true;
++          if (!leadingConnector || seenLiteral) return false;
++          separator += node.textContent;
++          return /^[ \u00a0]{0,2}$/.test(separator);
++        }
++        if (!(node instanceof HTMLElement)) return false;
++        if (node.matches(connectorSelector)) {
++          if (seenLiteral || leadingConnector || !connectorName || node.textContent !== connectorName) return false;
++          leadingConnector = true;
++          return true;
++        }
++        if (!["DIV", "SPAN", "P"].includes(node.tagName)
++          || (!node.contains(literal) && !node.querySelector(connectorSelector))) return false;
++        return [...node.childNodes].every(readLiteral);
++      };
++      if (!readLiteral(target) || !seenLiteral) return;
++      return { text: expectedLiteral, leadingConnector };
++    }
++  }
++  if (typeof options === "object" && options.requireLiteral) return;
+   const text = (node: Node): string => {
+     if (node.nodeType === Node.TEXT_NODE) {
+       const value = node.textContent ?? "";
+@@ -36,20 +77,23 @@ export function readChatGptUserMessage(
+       return [...node.childNodes].map(text).join("");
+     }
+     if (node.matches('pre[data-markdown-copy="code-block"]')) {
+-      const code = node.querySelector('code[data-markdown-copy-content="true"][data-language]');
+-      if (!code || node.children.length !== 1) { unsupported = true; return ""; }
++      const code = node.firstChild;
++      if (node.childNodes.length !== 1 || !(code instanceof HTMLElement)
++        || !code.matches('code[data-markdown-copy-content="true"][data-language]')) { unsupported = true; return ""; }
+       seenText = true;
+       return `\`\`\`${code.getAttribute("data-language")}\n${code.textContent ?? ""}\n\`\`\``;
+     }
+     if (node === rich) {
+       const blocks = [...node.childNodes];
++      const lineBlock = (block: Node): boolean => block instanceof HTMLElement
++        && (block.tagName === "P" || block.matches('pre[data-markdown-copy="code-block"]'));
+       if (blocks.some(block => !(block instanceof HTMLElement)
+-        || !(block.tagName === "P" || block.matches('[data-markdown-copy="blank-lines"]')))) {
++        || !(lineBlock(block) || block.matches('[data-markdown-copy="blank-lines"]')))) {
+         unsupported = true;
+         return "";
+       }
+-      const value = blocks.map(block => text(block) + ((block as HTMLElement).tagName === "P" ? "\n" : "")).join("");
+-      return (blocks.at(-1) as HTMLElement | undefined)?.tagName === "P" ? value.slice(0, -1) : value;
++      const value = blocks.map(block => text(block) + (lineBlock(block) ? "\n" : "")).join("");
++      return blocks.length > 0 && lineBlock(blocks.at(-1)!) ? value.slice(0, -1) : value;
+     }
+     // These are text wrappers in the captured plain and rich-text user renderers.
+     // Other markup must not be silently flattened into a matching prompt.
+diff --git a/src/adapters/chatgpt-web/browser-worker.ts b/src/adapters/chatgpt-web/browser-worker.ts
+index 1f1fc71..0a9539f 100644
+--- a/src/adapters/chatgpt-web/browser-worker.ts
++++ b/src/adapters/chatgpt-web/browser-worker.ts
+@@ -838,8 +838,197 @@ function withBrowserTurnAbort<T>(promise: Promise<T>, signal?: AbortSignal): Pro
+   });
+ }
+ 
++/** Validate a page-authenticated readback against the exact final message and submitted user. */
++export function chatGptConversationFinalSource(
++  value: unknown,
++  conversationId: string,
++): { conversationId: string; messageId: string; userMessageId: string; text: string } | undefined {
++  const object = (input: unknown): Record<string, any> | undefined =>
++    input !== null && typeof input === "object" && !Array.isArray(input)
++      ? input as Record<string, any> : undefined;
++  const body = object(value);
++  if (!body || body.conversation_id !== conversationId || typeof body.current_node !== "string") return undefined;
++  const mapping = object(body.mapping);
++  const node = object(mapping?.[body.current_node]);
++  const message = object(node?.message);
++  if (!node || node.id !== body.current_node || message?.id !== body.current_node
++    || message?.author?.role !== "assistant" || message.channel !== "final"
++    || message.status !== "finished_successfully" || message.end_turn !== true
++    || (message.recipient !== undefined && message.recipient !== "all")
++    || message.content?.content_type !== "text" || !Array.isArray(message.content.parts)
++    || !message.content.parts.every((part: unknown) => typeof part === "string")) return undefined;
++  // The current DOM turn must also be an ancestor in the server's selected branch.
++  // A matching final ID alone cannot authorize a response from another submission.
++  const visited = new Set<string>();
++  let parent = node.parent;
++  let userMessageId: string | undefined;
++  while (typeof parent === "string" && visited.size < 4096 && !visited.has(parent)) {
++    visited.add(parent);
++    const ancestor = object(mapping?.[parent]);
++    if (!ancestor || ancestor.id !== parent) return undefined;
++    const ancestorMessage = object(ancestor.message);
++    if (ancestorMessage?.author?.role === "user") {
++      if (ancestorMessage.id === parent) userMessageId = parent;
++      break;
++    }
++    parent = ancestor.parent;
++  }
++  if (!userMessageId) return undefined;
++  const text = message.content.parts.join("");
++  if (text.length > 1_000_000) return undefined;
++  try {
++    JSON.parse(text);
++    return { conversationId, messageId: body.current_node, userMessageId, text };
++  } catch { return undefined; }
++}
++
++export function chatGptFinalJsonIsRequired(outputFormat: BrowserTurn["outputFormat"], visibleText: string): boolean {
++  if (outputFormat !== undefined) return true;
++  if (!chatGptJsonSourceRequired(visibleText)) return false;
++  // Only a complete JSON prefix followed by more text proves ordinary mixed prose.
++  // A malformed or truncated JSON-shaped answer still requires an original source.
++  const text = visibleText.trimStart();
++  const stack: string[] = [];
++  let quoted = false;
++  let escaped = false;
++  for (let index = 0; index < text.length; index++) {
++    const character = text[index]!;
++    if (quoted) {
++      if (escaped) escaped = false;
++      else if (character === "\\") escaped = true;
++      else if (character === '"') quoted = false;
++      continue;
++    }
++    if (character === '"') quoted = true;
++    else if (character === "{" || character === "[") stack.push(character);
++    else if (character === "}" || character === "]") {
++      if (stack.pop() !== (character === "}" ? "{" : "[")) return true;
++      if (stack.length === 0) {
++        try { JSON.parse(text.slice(0, index + 1)); } catch { return true; }
++        return text.slice(index + 1).trim().length === 0;
++      }
++    }
++  }
++  return true;
++}
++
++/** Observes authenticated app GETs only. Readback is a text source, never completion evidence. */
++export class ChatGptConversationFinalReadback {
++  private page?: Page;
++  private generation = 0;
++  private sequence = 0;
++  private latestSequence = 0;
++  private pending = new Set<Promise<void>>();
++  private latest?: ReturnType<typeof chatGptConversationFinalSource>;
++  private readonly response = (response: Response): void => {
++    const request = response.request();
++    if (request.method() !== "GET") return;
++    const url = new URL(response.url());
++    const match = /^\/backend-api\/conversation\/([a-f0-9-]{36})$/.exec(url.pathname);
++    if (url.origin !== "https://chatgpt.com" || !match || response.status() !== 200
++      || !response.headers()["content-type"]?.includes("application/json")) return;
++    try {
++      if (request.frame() !== this.page?.mainFrame()) return;
++    } catch { return; }
++    if (this.pending.size >= 8) return;
++    const generation = this.generation;
++    const sequence = ++this.sequence;
++    const conversationId = match[1]!;
++    const pending = (async () => {
++      try {
++        const bytes = await response.body();
++        if (generation !== this.generation || bytes.length > 8_000_000) return;
++        const body: unknown = JSON.parse(bytes.toString("utf8"));
++        const source = chatGptConversationFinalSource(body, conversationId);
++        if (source && sequence > this.latestSequence) {
++          this.latest = source;
++          this.latestSequence = sequence;
++        }
++      } catch { /* Failed readbacks cannot supply raw final text. */ }
++    })();
++    this.pending.add(pending);
++    void pending.finally(() => this.pending.delete(pending));
++  };
++
++  attach(page: Page): void {
++    if (this.page === page) return;
++    this.dispose();
++    this.page = page;
++    page.on("response", this.response);
++  }
++
++  begin(): void {
++    this.generation += 1;
++    this.latest = undefined;
++    this.pending.clear();
++  }
++
++  private async owner(responseTurn: Locator, identity: string, acceptedUserIdentity?: string) {
++    return responseTurn.evaluate((root, { identity, acceptedUserIdentity }) => {
++      const grouped = identity.startsWith("group:assistant:");
++      const key = grouped ? identity.slice("group:assistant:".length) : identity;
++      if (!root.isConnected || root.getAttribute(grouped ? "data-turn-key" : "data-turn-id") !== key) return undefined;
++      const units = [...root.querySelectorAll<HTMLElement>("[data-chatgpt-search-message-ids], [data-message-id]")]
++        .filter(element => {
++          if (element.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
++          for (let node: Element | null = element; node; node = node.parentElement) {
++            const style = getComputedStyle(node);
++            if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
++          }
++          return element.matches('[data-message-author-role="assistant"]')
++            || element.querySelector('[data-conversation-role="assistant"], [data-message-author-role="assistant"]') !== null;
++        });
++      const final = units.at(-1);
++      if (!final) return undefined;
++      const ids = final.getAttribute("data-chatgpt-search-message-ids")?.split(/\s+/)
++        ?? [final.getAttribute("data-message-id") ?? ""];
++      // Search-unit message IDs are backend identities. Both UI group keys and
++      // content-search-unit keys may use unrelated renderer identities.
++      let userMessageIds: string[] = [];
++      if (grouped) {
++        if (acceptedUserIdentity && acceptedUserIdentity !== `group:user:${key}`) return undefined;
++        const users = [...root.querySelectorAll('[data-chatgpt-search-unit-key$=":user"][data-chatgpt-search-message-ids]')];
++        if (users.length === 1) {
++          userMessageIds = (users[0]!.getAttribute("data-chatgpt-search-message-ids") ?? "").split(/\s+/).filter(Boolean);
++        }
++      } else if (acceptedUserIdentity) {
++        const users = [...document.querySelectorAll("[data-turn-id]")]
++          .filter(turn => turn.getAttribute("data-turn-id") === acceptedUserIdentity)
++          .flatMap(turn => [...turn.querySelectorAll('[data-message-author-role="user"][data-message-id]')]);
++        if (users.length === 1) userMessageIds = [users[0]!.getAttribute("data-message-id") ?? ""].filter(Boolean);
++      }
++      return { messageIds: ids.filter(Boolean), userMessageIds };
++    }, { identity, acceptedUserIdentity });
++  }
++
++  async read(responseTurn: Locator, identity: string, acceptedUserIdentity?: string): Promise<string | undefined> {
++    const generation = this.generation;
++    const page = this.page;
++    if (!page) return undefined;
++    const pageUrl = page.url();
++    await Promise.all([...this.pending]);
++    const source = this.latest;
++    if (!source || this.page !== page || generation !== this.generation || page.url() !== pageUrl) return undefined;
++    const path = new URL(pageUrl);
++    if (path.origin !== "https://chatgpt.com" || path.pathname !== `/c/${source.conversationId}`) return undefined;
++    const owner = await this.owner(responseTurn, identity, acceptedUserIdentity);
++    if (this.page !== page || generation !== this.generation || page.url() !== pageUrl
++      || !owner || owner.userMessageIds.length === 0) return undefined;
++    return owner.userMessageIds.includes(source.userMessageId) && owner.messageIds.includes(source.messageId)
++      ? source.text : undefined;
++  }
++
++  dispose(): void {
++    this.page?.off("response", this.response);
++    this.page = undefined;
++    this.begin();
++  }
++}
++
+ export interface BrowserTurn {
+   traceId: string;
++  /** Explicit structured-output contract supplied by the request parser. */
++  outputFormat?: import("../../types").CodexJsonSchemaOutputFormat;
+   modelId: string;
+   reasoning?: string;
+   modelFamily?: "5.6" | "6";
+@@ -882,6 +1071,34 @@ export interface BrowserTurn {
+   onLunaCheckpoint?: (captured: CapturedChatGptLunaCheckpoint) => void;
+ }
+ 
++/** Distinguish bare JSON transport from Markdown links and explicit fenced code. */
++export function chatGptJsonSourceRequired(text: string, segments: readonly Pick<ChatGptMarkdownSegment, "tag" | "html">[] = []): boolean {
++  if (!/^\s*(?:\{(?:\s*["}]|\s*$)|\[(?:\s*[\[{"\d\]-]|\s*(?:true|false|null)|\s*$))/.test(text)) return false;
++  const trimmed = text.trimStart();
++  if (trimmed.startsWith("[")) {
++    let depth = 0;
++    let quoted = false;
++    let escaped = false;
++    for (let index = 0; index < trimmed.length; index++) {
++      const character = trimmed[index];
++      if (quoted) {
++        if (escaped) escaped = false;
++        else if (character === "\\") escaped = true;
++        else if (character === '"') quoted = false;
++      } else if (character === '"') quoted = true;
++      else if (character === "[") depth++;
++      else if (character === "]" && --depth === 0) {
++        // Only the outer closing bracket can introduce Markdown link syntax.
++        // A JSON string may itself contain ](, ][ or ]: and must remain literal.
++        if (/^\s*(?:\(|\[|:)/.test(trimmed.slice(index + 1))) return false;
++        break;
++      }
++    }
++  }
++  return !segments.some(segment => segment.tag?.toLowerCase() === "pre"
++    || /<pre\b|data-markdown-copy=["']code-block["']/.test(segment.html));
++}
++
+ interface ChatGptAcknowledgedMultipartStage {
+   text: string;
+   acknowledgement: string;
+@@ -895,6 +1112,7 @@ interface ChatGptSubmissionBaseline {
+   domCache: ChatGptSubmissionDomCache;
+   submittedText?: string;
+   turnToken?: string;
++  literalConnectorSubmission?: boolean;
+   acceptedUserIdentity?: string;
+   acknowledgedStages?: readonly ChatGptAcknowledgedMultipartStage[];
+ }
+@@ -1845,6 +2063,37 @@ export function replacePlainTextInComposer(element: HTMLElement, value: string):
+   return document.execCommand("insertText", false, value);
+ }
+ 
++/**
++ * Runs in the page. A plugin mention makes the Markdown composer serialize the whole
++ * document as Markdown. Protocol JSON and opaque capabilities must therefore live in
++ * a semantic code block, rather than text that will acquire Markdown escapes on Send.
++ * Legacy composers retain their existing plain-text insertion path.
++ */
++export function insertLiteralTextIntoComposer(element: HTMLElement, value: string): boolean {
++  if (document.activeElement !== element) element.focus();
++  if (document.activeElement !== element) return false;
++  const selection = window.getSelection();
++  if (!selection) return false;
++  if (!selection.isCollapsed || !selection.anchorNode || !element.contains(selection.anchorNode)) {
++    const range = document.createRange();
++    range.selectNodeContents(element);
++    range.collapse(false);
++    selection.removeAllRanges();
++    selection.addRange(range);
++  }
++  if (!selection.isCollapsed || !selection.anchorNode || !element.contains(selection.anchorNode)) return false;
++  if (!element.hasAttribute("data-composer-markdown")) {
++    return document.execCommand("insertText", false, ` ${value}`);
++  }
++  const block = document.createElement("pre");
++  const code = document.createElement("code");
++  code.textContent = value;
++  block.appendChild(code);
++  // Chromium merges the first pasted block into the mention's paragraph. A real
++  // blank block absorbs that merge so the first protocol line stays in the PRE.
++  return document.execCommand("insertHTML", false, `<p><br></p>${block.outerHTML}`);
++}
++
+ export class ChatGptBrowserWorker {
+   static forProvider(provider: CodexProviderConfig): ChatGptBrowserWorker {
+     const config = resolveBrowserConfig(provider);
+@@ -2919,7 +3168,7 @@ export class ChatGptBrowserWorker {
+         const locator = page.locator(chatGptAssistantTurnSelector(identity!));
+         matches = baseline.acceptedUserIdentity
+           ? user === baseline.acceptedUserIdentity
+-          : Boolean(baseline.submittedText) && await this.userMessageMatchesSubmission(locator, baseline.submittedText!, signal, baseline.turnToken);
++          : Boolean(baseline.submittedText) && await this.userMessageMatchesSubmission(locator, baseline.submittedText!, signal, baseline.turnToken, baseline.literalConnectorSubmission);
+         // The accepted user identity, broker token or exact text establishes ownership.
+         // Activity can replace its temporary group while still generating; requiring
+         // a completed answer here mistakes that same unfinished turn for a foreign one.
+@@ -3003,8 +3252,14 @@ export class ChatGptBrowserWorker {
+     }
+   }
+ 
+-  private async userMessageMatchesSubmission(group: Locator, submitted: string, signal?: AbortSignal, turnToken?: string): Promise<boolean> {
++  private async userMessageMatchesSubmission(group: Locator, submitted: string, signal?: AbortSignal, turnToken?: string, requireLiteralConnector = false): Promise<boolean> {
+     return (await this.withExpandedUserMessage(group, async content => {
++      if (requireLiteralConnector) {
++        const observed = await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(
++          content.evaluate(readChatGptUserMessage, { connectorName: this.config.appName, expectedLiteral: submitted, requireLiteral: true }), signal,
++        ));
++        if (!observed?.leadingConnector || observed.text !== submitted) return false;
++      }
+       if (turnToken !== undefined) {
+         // The composer was already checked byte-for-byte before Send. ChatGPT's
+         // rich-text renderer can rewrite JSON/link labels afterwards, so use the
+@@ -3041,7 +3296,7 @@ export class ChatGptBrowserWorker {
+         }, turnToken), signal));
+       }
+       const observed = await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(
+-        content.evaluate(readChatGptUserMessage, this.config?.appName), signal,
++        content.evaluate(readChatGptUserMessage, { connectorName: this.config?.appName, expectedLiteral: submitted }), signal,
+       ));
+       return observed !== undefined && this.promptTextEquivalent(
+         submitted.replace(/\r\n?/g, "\n"), observed.text.replace(/\r\n?/g, "\n"),
+@@ -3070,6 +3325,7 @@ export class ChatGptBrowserWorker {
+     page: Page,
+     prompt: string,
+     abortSignal?: AbortSignal,
++    literal = false,
+   ): Promise<void> {
+     const deadline = Date.now() + 10_000;
+     let observed = "";
+@@ -3077,7 +3333,16 @@ export class ChatGptBrowserWorker {
+       throwIfPromptAttachmentAborted(abortSignal);
+       observed = await this.attachedPromptText(page, abortSignal);
+       throwIfPromptAttachmentAborted(abortSignal);
+-      if (this.promptTextEquivalent(prompt, observed)) return;
++      if (this.promptTextEquivalent(prompt, observed)) {
++        if (!literal) return;
++        const composer = await this.activeComposer(page, 30_000, abortSignal);
++        const protectedLiteral = await composer.evaluate((element, expected) => {
++          if (!element.hasAttribute("data-composer-markdown")) return true;
++          const blocks = element.querySelectorAll("pre");
++          return blocks.length === 1 && blocks[0]!.textContent === expected;
++        }, prompt, { timeout: 20_000, signal: abortSignal });
++        if (protectedLiteral) return;
++      }
+       await withBrowserTurnAbort(
+         new Promise(resolveSleep => setTimeout(resolveSleep, 50)),
+         abortSignal,
+@@ -3404,8 +3669,8 @@ export class ChatGptBrowserWorker {
+         signal: abortSignal,
+         timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
+       });
+-      await this.insertPromptText(page, ` ${prompt}`, abortSignal);
+-      await this.assertPromptAttached(page, prompt, abortSignal);
++      await this.insertPromptText(page, prompt, abortSignal, false, true);
++      await this.assertPromptAttached(page, prompt, abortSignal, true);
+     } catch (error) {
+       if (!composerMutationStarted || error instanceof ChatGptPersistentBrowserStateError) throw error;
+       try {
+@@ -3736,6 +4001,7 @@ export class ChatGptBrowserWorker {
+     text: string,
+     abortSignal?: AbortSignal,
+     replace = false,
++    literal = false,
+   ): Promise<void> {
+     throwIfPromptAttachmentAborted(abortSignal);
+     const composer = await this.activeComposer(page, 30_000, abortSignal);
+@@ -3745,7 +4011,9 @@ export class ChatGptBrowserWorker {
+     // delimiters from textContent, and leave the next insertion outside the intended block. The
+     // browser's plain-text editing command updates the same focused contenteditable atomically
+     // without running those Markdown shortcuts. Exact readback below remains the authority.
+-    const inserted = await composer.evaluate(replace ? replacePlainTextInComposer : insertPlainTextIntoComposer, text, {
++    const insert = literal ? insertLiteralTextIntoComposer
++      : replace ? replacePlainTextInComposer : insertPlainTextIntoComposer;
++    const inserted = await composer.evaluate(insert, text, {
+       timeout: 20_000,
+       signal: abortSignal,
+     });
+@@ -4787,6 +5055,8 @@ export class ChatGptBrowserWorker {
+     const prepare = reuseConversation ? turn.prepareResume : turn.prepare;
+     if (!prepare) throw new Error("The retained ChatGPT conversation has no continuation prompt");
+     const prepared = await prepare(transactionId);
++    const requiresRawJson = turn.outputFormat !== undefined;
++    const finalReadback = new ChatGptConversationFinalReadback();
+     const diagnostics = new ChatGptBrowserDiagnostics(
+       turn.traceId,
+       this.config.browserDiagnosticsPath ?? join(getConfigDir(), "diagnostics", "browser-turns"),
+@@ -4802,7 +5072,7 @@ export class ChatGptBrowserWorker {
+     const submissionRejection = new ChatGptSubmissionRejectionObserver(error => rejectionAbort.abort(error));
+     const streamDiagnostics = new ChatGptStreamDiagnostics(state => {
+       console.info(`[chatgpt-web] stream_lifecycle ${JSON.stringify({ traceId: turn.traceId, ...state })}`);
+-    });
++    }, { collectFinalJson: !turn.compaction && !turn.captureLunaCheckpoint });
+     let lastGenerationProgress = 0;
+     const generation = {
+       active: () => submissionRejection.hasActiveResponse(),
+@@ -4864,6 +5134,7 @@ export class ChatGptBrowserWorker {
+       if (!maintenancePage && !launcherSurfaceId) managedPage = page;
+       diagnosticPage = page;
+       await streamDiagnostics.attach(page);
++      if (!turn.compaction && !turn.captureLunaCheckpoint) finalReadback.attach(page);
+       const rebindLauncherPage = async (
+         attempt: number,
+         cause: Error,
+@@ -4919,6 +5190,7 @@ export class ChatGptBrowserWorker {
+         page = connection.page;
+         diagnosticPage = page;
+         await streamDiagnostics.attach(page);
++        if (!turn.compaction && !turn.captureLunaCheckpoint) finalReadback.attach(page);
+         console.warn(
+           `[chatgpt-web] browser turn ${turn.traceId} rebound its existing launcher page after a stalled DOM probe`,
+         );
+@@ -5091,6 +5363,7 @@ export class ChatGptBrowserWorker {
+                 await this.assertSelectedEffort(page, mode);
+                 submissionRejection.begin(page);
+                 streamDiagnostics.begin();
++                finalReadback.begin();
+                 await submissionRejection.captureAlertBaseline();
+               } },
+               undefined,
+@@ -5238,6 +5511,10 @@ export class ChatGptBrowserWorker {
+           await diagnostics.capture(page, "connector-catalog-refreshed");
+         }
+       }
++      if (mode.localTools && prepared.turnToken) {
++        const composer = await this.activeComposer(page, 30_000, turn.abortSignal);
++        submissionBaseline.literalConnectorSubmission = await composer.evaluate(element => element.hasAttribute("data-composer-markdown"));
++      }
+       await diagnostics.capture(page, "prompt-attachment-complete");
+       await this.runStage(turn.traceId, "file_attachment", browserStageTimeouts.fileAttachment, (stageSignal) => (
+         this.attachFiles(page, prepared, turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal)
+@@ -5271,6 +5548,7 @@ export class ChatGptBrowserWorker {
+             })}`);
+             submissionRejection.begin(page);
+             streamDiagnostics.begin();
++            finalReadback.begin();
+             await submissionRejection.captureAlertBaseline();
+             await turn.onSendActivated?.();
+           } },
+@@ -5315,9 +5593,14 @@ export class ChatGptBrowserWorker {
+       const checkpointStream = turn.captureLunaCheckpoint
+         ? new ChatGptLunaCheckpointStream()
+         : undefined;
++      let emittedAnswer = false;
++      let bufferJsonAnswer = requiresRawJson && !turn.compaction && !turn.captureLunaCheckpoint;
+       const emitMarkdownDelta = (delta: string): void => {
+         const visible = checkpointStream ? checkpointStream.push(delta) : delta;
+-        if (visible) turn.onTextDelta(visible);
++        if (visible) {
++          emittedAnswer = true;
++          turn.onTextDelta(visible);
++        }
+       };
+       const throwMarkdownConsistencyError = (error: unknown): never => {
+         if (!(error instanceof ChatGptMarkdownConsistencyError)) throw error;
+@@ -5472,7 +5755,12 @@ export class ChatGptBrowserWorker {
+             capturedResponse = true;
+             await diagnostics.capture(page, "response-visible");
+           }
+-          const textDelta = (() => {
++          if (!emittedAnswer && !turn.compaction && !checkpointStream
++            && (chatGptJsonSourceRequired(streamDiagnostics.latestJsonCandidate() ?? "")
++              || chatGptJsonSourceRequired(snapshot.visibleText))) {
++            bufferJsonAnswer = true;
++          }
++          const textDelta = bufferJsonAnswer ? "" : (() => {
+             try {
+               return markdownBuffer.observe(snapshot.markdownSegments);
+             } catch (error) {
+@@ -5531,6 +5819,25 @@ export class ChatGptBrowserWorker {
+             if (snapshot.visibleText === "api_tool unavailable") {
+               throw new Error("ChatGPT selected mode rejected the Codex Native MCP tool (api_tool unavailable)");
+             }
++            if (bufferJsonAnswer) {
++              const json = await streamDiagnostics.finishFinalJson()
++                ?? await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(
++                  finalReadback.read(responseTurn.locator, responseTurn.identity, submissionBaseline.acceptedUserIdentity),
++                  turn.abortSignal,
++                ));
++              if (json === undefined && chatGptFinalJsonIsRequired(turn.outputFormat, snapshot.visibleText)) {
++                throw new ChatGptWebAdapterError(
++                  "ChatGPT completed a structured answer without a complete valid owned JSON source.",
++                  { status: 502, errorType: "server_error", code: "browser_json_output_invalid", retryable: false },
++                );
++              }
++              if (json !== undefined) {
++                turn.onTextDelta(json);
++                finalText = json;
++                break;
++              }
++              emitMarkdownDelta(markdownBuffer.observe(snapshot.markdownSegments));
++            }
+             const final = (() => {
+               try {
+                 return markdownBuffer.finish();
+@@ -5642,6 +5949,7 @@ export class ChatGptBrowserWorker {
+       diagnostics.finish(diagnosticCompleted ? "completed" : "failed");
+       submissionRejection.dispose();
+       await streamDiagnostics.dispose();
++      finalReadback.dispose();
+       await Promise.all(usageWrites);
+       prepared.release();
+       if (turnConnection) {
+diff --git a/src/adapters/chatgpt-web/index.ts b/src/adapters/chatgpt-web/index.ts
+index 5c3e0b6..20757cc 100644
+--- a/src/adapters/chatgpt-web/index.ts
++++ b/src/adapters/chatgpt-web/index.ts
+@@ -729,6 +729,7 @@ export function createChatGptWebAdapter(
+         traceId,
+         modelId: parsed.modelId,
+         reasoning: parsed.options.reasoning,
++        outputFormat: parsed.options.outputFormat,
+         ...(parsed._chatgptModelFamily ? { modelFamily: parsed._chatgptModelFamily } : {}),
+         capabilities: turnCapabilities,
+         prepare: transactionId => prepareWith(checkpointInput.parsed, transactionId),
+@@ -792,6 +793,7 @@ export function createChatGptWebAdapter(
+       traceId,
+       modelId: parsed.modelId,
+       reasoning: parsed.options.reasoning,
++      outputFormat: parsed.options.outputFormat,
+       ...(parsed._chatgptModelFamily ? { modelFamily: parsed._chatgptModelFamily } : {}),
+       capabilities: turnCapabilities,
+       prepare: transactionId => prepareWith(checkpointInput.parsed, transactionId),
+diff --git a/src/adapters/chatgpt-web/launcher-helper-client.ts b/src/adapters/chatgpt-web/launcher-helper-client.ts
+index f09f536..321a98a 100644
+--- a/src/adapters/chatgpt-web/launcher-helper-client.ts
++++ b/src/adapters/chatgpt-web/launcher-helper-client.ts
+@@ -285,6 +285,7 @@ export class LauncherBrowserHelperClient {
+             traceId: turn.traceId,
+             modelId: turn.modelId,
+             reasoning: turn.reasoning,
++            outputFormat: turn.outputFormat,
+             ...(turn.modelFamily ? { modelFamily: turn.modelFamily } : {}),
+             capabilities: turn.capabilities,
+             ...(turn.nativeConnector ? { nativeConnector: true } : {}),
+diff --git a/src/adapters/chatgpt-web/raw-final-json.ts b/src/adapters/chatgpt-web/raw-final-json.ts
+new file mode 100644
+index 0000000..eb725ab
+--- /dev/null
++++ b/src/adapters/chatgpt-web/raw-final-json.ts
+@@ -0,0 +1,253 @@
++const object = (value: unknown): Record<string, unknown> | undefined =>
++  value !== null && typeof value === "object" && !Array.isArray(value)
++    ? value as Record<string, unknown> : undefined;
++
++export interface RawFinalJsonLimits {
++  maxFrameChars?: number;
++  maxTextChars?: number;
++  maxFrames?: number;
++}
++
++/** In-memory text source only; never evidence of browser completion or liveness. */
++export class RawFinalJsonCollector {
++  // Native private fields keep payloads out of JSON.stringify and diagnostic object spreads.
++  #buffer = "";
++  #decoder = new TextDecoder("utf-8", { fatal: true });
++  #invalid = false;
++  #invalidReason = "invalid_stream";
++  #utf8Pending = 0;
++  #done = false;
++  #frames = 0;
++  #path?: string;
++  #operation?: string;
++  #role: "assistant" | "other" | undefined;
++  #channel: "final" | "other" | undefined;
++  #successful = false;
++  #endTurn = false;
++  #hasMessage = false;
++  #textContent = false;
++  #parts?: string[];
++  #maxFrameChars: number;
++  #maxTextChars: number;
++  #maxFrames: number;
++
++  constructor(limits: RawFinalJsonLimits = {}) {
++    this.#maxFrameChars = limits.maxFrameChars ?? 256_000;
++    this.#maxTextChars = limits.maxTextChars ?? 1_000_000;
++    this.#maxFrames = limits.maxFrames ?? 100_000;
++    for (const limit of [this.#maxFrameChars, this.#maxTextChars, this.#maxFrames]) {
++      if (!Number.isSafeInteger(limit) || limit < 1) throw new Error("Invalid raw final JSON limit");
++    }
++  }
++
++  push(bytes: Uint8Array): void {
++    if (this.#invalid) return;
++    try {
++      // Bound transient buffering even when a caller supplies one very large CDP chunk.
++      for (let offset = 0; offset < bytes.length && !this.#invalid; offset += 16_384) {
++        const chunk = bytes.subarray(offset, offset + 16_384);
++        const decoded = this.#decoder.decode(chunk, { stream: true });
++        // TextDecoder buffers partial code points outside the visible SSE buffer.
++        for (const byte of chunk) {
++          if (this.#utf8Pending > 0) this.#utf8Pending -= 1;
++          else if (byte >= 0xc2) this.#utf8Pending = byte < 0xe0 ? 1 : byte < 0xf0 ? 2 : 3;
++        }
++        this.#buffer += decoded;
++        let boundary: RegExpExecArray | null;
++        while (!this.#invalid && (boundary = /\r?\n\r?\n/.exec(this.#buffer))) {
++          const frame = this.#buffer.slice(0, boundary.index);
++          this.#buffer = this.#buffer.slice(boundary.index + boundary[0].length);
++          if (frame.length > this.#maxFrameChars) { this.#invalidate("frame_limit"); break; }
++          this.#frame(frame);
++        }
++        if (this.#buffer.length > this.#maxFrameChars) this.#invalidate("frame_limit");
++      }
++    } catch { this.#invalidate("invalid_utf8"); }
++  }
++
++  /** Latest owned assistant/final text, including prose and fences; never a completion signal. */
++  latestFinalText(): string | undefined {
++    if (this.#invalid || !this.#eligible() || !this.#parts) return undefined;
++    return this.#parts.join("");
++  }
++
++  /** Provisional object/array prefix only. The caller may apply a tighter prose/link filter. */
++  latestJsonCandidate(): string | undefined {
++    const text = this.latestFinalText();
++    if (text === undefined) return undefined;
++    const prefix = text.trimStart();
++    if (!prefix) return undefined;
++    // Object/array prefixes justify holding Markdown; '-' and prose such as 'true story' do not.
++    return /^[\[{]/.test(prefix) ? text : undefined;
++  }
++
++  /** Only a gap-free successful final message, DONE, and a complete JSON value qualify. */
++  getCompletedJson(): string | undefined {
++    return this.#completionReason() === "complete" ? this.#parts!.join("") : undefined;
++  }
++
++  /** Fixed reasons and counts only. Never export message IDs, text, or parse errors. */
++  snapshot() {
++    return { reason: this.#completionReason(), frames: this.#frames, doneMarker: this.#done,
++      hasMessage: this.#hasMessage, eligible: this.#eligible(), successful: this.#successful,
++      endTurn: this.#endTurn, textChars: this.#parts?.reduce((sum, part) => sum + part.length, 0) ?? 0,
++      pendingChars: this.#buffer.length, pendingUtf8Bytes: this.#utf8Pending };
++  }
++
++  #completionReason(): string {
++    if (this.#invalid) return this.#invalidReason;
++    if (!this.#hasMessage) return "missing_message";
++    if (!this.#eligible()) return "not_final";
++    if (!this.#parts) return "missing_text";
++    if (this.#buffer.trim() || this.#utf8Pending) return "incomplete_frame";
++    if (!this.#done) return "missing_done";
++    if (!this.#successful || !this.#endTurn) return "unfinished_message";
++    try { JSON.parse(this.#parts.join("")); return "complete"; }
++    catch { return "invalid_json"; }
++  }
++
++  #eligible(): boolean { return this.#role === "assistant" && this.#channel === "final"; }
++
++  #invalidate(reason: string): void {
++    this.#invalid = true;
++    this.#invalidReason = reason;
++    this.#buffer = "";
++    this.#parts = undefined;
++  }
++
++  #frame(frame: string): void {
++    const data = frame.split(/\r?\n/).filter(line => line.startsWith("data:"))
++      .map(line => line.slice(5).replace(/^ /, "")).join("\n");
++    if (!data) return;
++    if (this.#done) { this.#invalidate("payload_after_done"); return; }
++    if (++this.#frames > this.#maxFrames) { this.#invalidate("frame_count_limit"); return; }
++    if (data === "[DONE]") {
++      // Flush to reject an incomplete UTF-8 sequence, including one before DONE.
++      this.#decoder.decode();
++      this.#done = true;
++      return;
++    }
++    let event: Record<string, unknown> | undefined;
++    try {
++      const value: unknown = JSON.parse(data);
++      const eventType = frame.split(/\r?\n/).find(line => line.startsWith("event:"))?.slice(6).trim();
++      if (eventType === "delta_encoding" && value === "v1") return;
++      event = object(value);
++    } catch { this.#invalidate("malformed_frame"); return; }
++    if (!event || event.error || event.error_code) { this.#invalidate("service_or_protocol_error"); return; }
++    if (object(event.message)) { this.#message(event.message); return; }
++    this.#patch(event);
++  }
++
++  #message(value: unknown): void {
++    const message = object(value);
++    this.#parts = undefined;
++    this.#hasMessage = false;
++    this.#textContent = false;
++    this.#role = undefined;
++    this.#channel = undefined;
++    this.#successful = false;
++    this.#endTurn = false;
++    if (!message || typeof message.id !== "string" || !message.id || message.id.length > 200) {
++      this.#invalidate("invalid_message"); return;
++    }
++    this.#hasMessage = true;
++    this.#role = object(message.author)?.role === "assistant" ? "assistant" : "other";
++    this.#channel = message.channel === "final" ? "final" : "other";
++    this.#successful = message.status === "finished_successfully";
++    this.#endTurn = message.end_turn === true;
++    if (this.#eligible() && message.content !== undefined) this.#content(message.content);
++  }
++
++  #content(value: unknown): void {
++    const content = object(value);
++    this.#textContent = content?.content_type === "text";
++    if (!content || !this.#textContent) { this.#parts = undefined; return; }
++    this.#setParts(content.parts);
++  }
++
++  #setParts(value: unknown): void {
++    if (!Array.isArray(value) || value.length > 64 || value.some(part => typeof part !== "string")) {
++      this.#invalidate("invalid_parts"); return;
++    }
++    if (value.reduce((sum, part) => sum + part.length, 0) > this.#maxTextChars) {
++      this.#invalidate("text_limit"); return;
++    }
++    this.#parts = [...value];
++  }
++
++  #patch(event: Record<string, unknown>, depth = 0,
++    previousPath = this.#path, previousOperation = this.#operation): void {
++    if (this.#invalid) return;
++    if (depth > 8) { this.#invalidate("patch_depth_limit"); return; }
++    const path = typeof event.p === "string" ? event.p : previousPath;
++    const operation = typeof event.o === "string" ? event.o : previousOperation;
++    if (depth === 0) { this.#path = path; this.#operation = operation; }
++    if (operation === "patch" && Array.isArray(event.v)) {
++      if (event.v.length > 256) { this.#invalidate("patch_count_limit"); return; }
++      let childPath = path;
++      let childOperation: string | undefined;
++      for (const entry of event.v) {
++        const child = object(entry);
++        if (!child) { this.#invalidate("invalid_patch"); return; }
++        childPath = typeof child.p === "string" ? child.p : childPath;
++        childOperation = typeof child.o === "string" ? child.o : childOperation;
++        this.#patch(child, depth + 1, childPath, childOperation);
++      }
++      return;
++    }
++    // Remove carries no value. It must not be mistaken for a non-payload control event.
++    if (operation === "remove" && (path === "" || path === "/message"
++      || path?.startsWith("/message/") && !path.startsWith("/message/metadata"))) {
++      this.#invalidate("removed_message_state"); return;
++    }
++    if (!Object.hasOwn(event, "v")) return; // Non-payload SSE control events.
++    const value = object(event.v);
++    if ((path === "" || path === undefined) && value?.message
++      && (operation === "add" || operation === "replace")) {
++      this.#message(value.message); return;
++    }
++    if (path === "/message" && (operation === "add" || operation === "replace")) {
++      this.#message(event.v); return;
++    }
++    if (path === undefined || operation === undefined || !this.#hasMessage) {
++      this.#invalidate("missing_patch_base"); return;
++    }
++    // Metadata, tool payloads and reasoning are never copied into collector state.
++    if (path === "/message/id") { this.#invalidate("message_identity_changed"); return; }
++    if (path.startsWith("/message/metadata") || !path.startsWith("/message/")) return;
++    const replace = operation === "replace" || operation === "add";
++    if (path === "/message/author/role" || path === "/message/author" || path === "/message/channel") {
++      if (!replace) { this.#invalidate("unsupported_operation"); return; }
++      if (path === "/message/channel") this.#channel = event.v === "final" ? "final" : "other";
++      else this.#role = (path.endsWith("/role") ? event.v : object(event.v)?.role) === "assistant" ? "assistant" : "other";
++      if (!this.#eligible()) { this.#parts = undefined; this.#textContent = false; }
++      return;
++    }
++    if (path === "/message/status" || path === "/message/end_turn") {
++      if (!replace) { this.#invalidate("unsupported_operation"); return; }
++      if (path === "/message/status") this.#successful = event.v === "finished_successfully";
++      else this.#endTurn = event.v === true;
++      return;
++    }
++    if (!this.#eligible() || !path.startsWith("/message/content")) return;
++    if (path === "/message/content" && replace) { this.#content(event.v); return; }
++    if (path === "/message/content/content_type" && replace) {
++      this.#textContent = event.v === "text";
++      if (!this.#textContent) this.#parts = undefined;
++      return;
++    }
++    if (!this.#textContent) { this.#invalidate("missing_text_base"); return; }
++    if (path === "/message/content/parts" && replace) { this.#setParts(event.v); return; }
++    const indexMatch = /^\/message\/content\/parts\/(0|[1-9]\d*)$/.exec(path);
++    if (!indexMatch || typeof event.v !== "string") { this.#invalidate("unsupported_content_patch"); return; }
++    const index = Number(indexMatch[1]);
++    // No guessing a missing prefix after late channel changes or an unobserved base.
++    if (!this.#parts || index > this.#parts.length || index >= 64) { this.#invalidate("missing_parts_base"); return; }
++    const parts = [...this.#parts];
++    if (operation === "append" && index < parts.length) parts[index] += event.v;
++    else if (replace) parts[index] = event.v;
++    else { this.#invalidate("unsupported_operation"); return; }
++    this.#setParts(parts);
++  }
++}
+diff --git a/src/adapters/chatgpt-web/stream-diagnostics.ts b/src/adapters/chatgpt-web/stream-diagnostics.ts
+index 510468d..00f87d5 100644
+--- a/src/adapters/chatgpt-web/stream-diagnostics.ts
++++ b/src/adapters/chatgpt-web/stream-diagnostics.ts
+@@ -1,4 +1,5 @@
+ import type { CDPSession, Page } from "playwright-core";
++import { RawFinalJsonCollector } from "./raw-final-json";
+ 
+ const MAX_FRAME_CHARS = 256_000;
+ const MAX_MESSAGES = 32;
+@@ -180,7 +181,11 @@ export class ChatGptStreamProjection {
+ 
+ type Capture = {
+   request: number; submission: number; projection: ChatGptStreamProjection; status?: number;
++  finalJson?: RawFinalJsonCollector;
++  finalJsonSnapshot?: ReturnType<RawFinalJsonCollector["snapshot"]>;
++  drainWaiters: Set<() => void>;
+   pending: Uint8Array[]; pendingBytes: number; streaming: boolean; unavailable: boolean;
++  reason?: "unsupported_mime_type" | "stream_unavailable" | "pending_buffer_overflow";
+   enabling?: Promise<void>; terminal?: "finished" | "aborted" | "failed" | "detached";
+   networkError?: string;
+ };
+@@ -192,10 +197,99 @@ export class ChatGptStreamDiagnostics {
+   private submission = 0;
+   private sequence = 0;
+   private generation = 0;
++  private jsonCapture?: Capture;
+ 
+-  constructor(private readonly report: (state: Record<string, unknown>) => void) {}
++  constructor(private readonly report: (state: Record<string, unknown>) => void,
++    private readonly options: { collectFinalJson?: boolean } = {}) {}
+ 
+-  begin(): void { this.submission += 1; }
++  begin(): number {
++    this.submission += 1;
++    this.clearFinalJson();
++    return this.submission;
++  }
++
++  /** A provisional text candidate only; DOM and the broker still own completion. */
++  latestJsonCandidate(): string | undefined {
++    const capture = this.jsonCapture;
++    return capture && this.usableFinalJson(capture) ? capture.finalJson?.latestJsonCandidate() : undefined;
++  }
++
++  /** Distinguish missing raw data from a final draft replaced with prose or a code fence. */
++  latestFinalText(): string | undefined {
++    const capture = this.jsonCapture;
++    return capture && this.usableFinalJson(capture) ? capture.finalJson?.latestFinalText() : undefined;
++  }
++
++  /** Bounded CDP tail drain after the caller's DOM fence; never asserts browser completion. */
++  async finishFinalJson(): Promise<string | undefined> {
++    const capture = this.jsonCapture;
++    const generation = this.generation;
++    if (!capture) {
++      if (this.options.collectFinalJson) this.report({ phase: "final_json_rejected",
++        submission: this.submission, reason: "no_owned_request" });
++      return undefined;
++    }
++    let timedOut = false;
++    let wake: () => void = () => {};
++    try {
++      await bounded(new Promise<void>(resolve => {
++        wake = () => {
++          if (generation !== this.generation || capture !== this.jsonCapture || capture.unavailable
++            || (capture.status !== undefined && (capture.status < 200 || capture.status >= 300))) {
++            resolve(); return;
++          }
++          // Terminal events can precede the response to streamResourceContent. Keep
++          // its initial bytes and all data queued before the terminal in order.
++          if (capture.enabling && !capture.streaming) return;
++          if (capture.terminal || capture.finalJson?.snapshot().doneMarker) resolve();
++        };
++        capture.drainWaiters.add(wake);
++        wake();
++      }));
++    } catch { timedOut = true; }
++    finally { capture.drainWaiters.delete(wake); }
++    if (generation !== this.generation || capture !== this.jsonCapture) return undefined;
++    const result = this.usableFinalJson(capture) ? capture.finalJson?.getCompletedJson() : undefined;
++    if (result === undefined) this.emit(capture, { phase: "final_json_rejected",
++      reason: this.captureReason(capture) ?? (timedOut ? "drain_timeout" : capture.finalJson?.snapshot().reason) });
++    return result;
++  }
++
++  private usableFinalJson(capture: Capture): boolean {
++    return capture.submission === this.submission && capture.streaming && !capture.unavailable
++      && capture.status !== undefined && capture.status >= 200 && capture.status < 300
++      && capture.terminal !== "detached" && capture.terminal !== "failed";
++  }
++
++  private clearFinalJson(): void {
++    const captures = new Set(this.captures.values());
++    if (this.jsonCapture) captures.add(this.jsonCapture);
++    this.jsonCapture = undefined;
++    for (const capture of captures) {
++      if (capture.finalJson) capture.finalJsonSnapshot = capture.finalJson.snapshot();
++      capture.finalJson = undefined;
++      this.notify(capture);
++    }
++  }
++
++  private notify(capture: Capture): void {
++    for (const wake of capture.drainWaiters) wake();
++  }
++
++  private captureReason(capture: Capture): string | undefined {
++    if (capture.terminal === "detached") return "detached";
++    if (capture.terminal === "failed") return "network_failed";
++    if (capture.reason) return capture.reason;
++    if (capture.status === undefined) return "missing_response";
++    if (capture.status < 200 || capture.status >= 300) return "http_error";
++    if (!capture.streaming) return "stream_pending";
++    return undefined;
++  }
++
++  private push(capture: Capture, bytes: Uint8Array): void {
++    capture.projection.push(bytes);
++    capture.finalJson?.push(bytes);
++  }
+ 
+   async attach(page: Page): Promise<void> {
+     await this.dispose();
+@@ -213,42 +307,64 @@ export class ChatGptStreamDiagnostics {
+       session.on("Network.requestWillBeSent", event => {
+         if (generation !== this.generation || !this.submission || event.frameId !== frameTree.frame.id || event.request.method !== "POST"
+           || event.request.url !== "https://chatgpt.com/backend-api/f/conversation") return;
++        this.clearFinalJson();
+         if (this.captures.size >= 12) { this.report({ unavailable: true, reason: "request_limit" }); return; }
+-        this.captures.set(event.requestId, { request: ++this.sequence, submission: this.submission,
+-          projection: new ChatGptStreamProjection(), pending: [], pendingBytes: 0, streaming: false, unavailable: false });
++        const capture: Capture = { request: ++this.sequence, submission: this.submission,
++          projection: new ChatGptStreamProjection(), drainWaiters: new Set(),
++          pending: [], pendingBytes: 0, streaming: false, unavailable: false,
++          ...(this.options.collectFinalJson ? { finalJson: new RawFinalJsonCollector() } : {}) };
++        this.captures.set(event.requestId, capture);
++        if (capture.finalJson) this.jsonCapture = capture;
+       });
+       session.on("Network.responseReceived", event => {
+         if (generation !== this.generation) return;
+         const capture = this.captures.get(event.requestId);
+-        if (!capture) return;
++        if (!capture || capture.terminal || capture.status !== undefined) return;
+         capture.status = event.response.status;
+-        if (event.response.mimeType !== "text/event-stream") return;
++        if (event.response.mimeType !== "text/event-stream") {
++          capture.unavailable = true;
++          capture.reason = "unsupported_mime_type";
++          this.notify(capture);
++          return;
++        }
+         capture.enabling = bounded(session!.send("Network.streamResourceContent", { requestId: event.requestId })).then(result => {
+           if (generation !== this.generation) return;
+-          capture.projection.push(Buffer.from(result.bufferedData, "base64"));
+-          capture.pending.forEach(bytes => capture.projection.push(bytes));
++          this.push(capture, Buffer.from(result.bufferedData, "base64"));
++          capture.pending.forEach(bytes => this.push(capture, bytes));
+           capture.streaming = true;
+-        }).catch(() => { capture.unavailable = true; }).finally(() => {
++        }).catch(() => {
++          capture.unavailable = true;
++          capture.reason ??= "stream_unavailable";
++        }).finally(() => {
+           capture.pending = [];
+           capture.pendingBytes = 0;
++          this.notify(capture);
+         });
++        this.notify(capture);
+       });
+       session.on("Network.dataReceived", event => {
+         if (generation !== this.generation) return;
+         const capture = this.captures.get(event.requestId);
+-        if (!capture || !event.data) return;
++        if (!capture || capture.terminal || capture.unavailable || !event.data) return;
+         const bytes = Buffer.from(event.data, "base64");
+-        if (capture.streaming) capture.projection.push(bytes);
++        if (capture.streaming) this.push(capture, bytes);
+         else if (capture.pendingBytes + bytes.length <= 1_000_000) {
+           capture.pending.push(bytes); capture.pendingBytes += bytes.length;
+-        } else capture.unavailable = true;
++        } else {
++          capture.unavailable = true;
++          capture.reason = "pending_buffer_overflow";
++          capture.pending = [];
++          capture.pendingBytes = 0;
++        }
++        this.notify(capture);
+       });
+       const finish = (id: string, terminal: Capture["terminal"], networkError?: string) => {
+         if (generation !== this.generation) return;
+         const capture = this.captures.get(id);
+-        if (!capture) return;
++        if (!capture || capture.terminal) return;
+         capture.terminal = terminal;
+         capture.networkError = networkError;
++        this.notify(capture);
+         void Promise.resolve(capture.enabling).then(() => {
+           if (generation !== this.generation || this.captures.get(id) !== capture) return;
+           this.emit(capture); this.captures.delete(id);
+@@ -259,18 +375,30 @@ export class ChatGptStreamDiagnostics {
+         NETWORK_ERRORS.has(event.errorText) ? event.errorText : "unknown"));
+       await bounded(session.send("Network.enable", { maxTotalBufferSize: 1_000_000, maxResourceBufferSize: 512_000, maxPostDataSize: 0 }));
+     } catch {
+-      if (generation === this.generation) this.generation += 1;
+-      this.report({ unavailable: true, reason: "observer_unavailable" });
++      // An older attach may reject after a new page has already been attached.
++      if (generation === this.generation) {
++        this.generation += 1;
++        for (const capture of this.captures.values()) {
++          capture.terminal ??= "detached";
++          this.emit(capture);
++        }
++        this.clearFinalJson();
++        this.captures.clear();
++        this.session = undefined;
++        this.report({ unavailable: true, reason: "observer_unavailable" });
++      }
+       if (session) await bounded(session.detach()).catch(() => {});
+-      this.session = undefined;
+     }
+   }
+ 
+-  private emit(capture: Capture): void {
++  private emit(capture: Capture, extra: Record<string, unknown> = {}): void {
++    const finalJson = capture.finalJson?.snapshot() ?? capture.finalJsonSnapshot;
++    const reason = this.captureReason(capture);
+     this.report({ request: capture.request, submission: capture.submission, status: capture.status,
+       terminal: capture.terminal, unavailable: capture.unavailable || !capture.streaming,
+       ...(capture.networkError ? { networkError: capture.networkError } : {}),
+-      ...capture.projection.snapshot() });
++      ...(reason ? { reason } : {}), ...(finalJson ? { finalJson } : {}),
++      ...capture.projection.snapshot(), ...extra });
+   }
+ 
+   async dispose(): Promise<void> {
+@@ -279,6 +407,7 @@ export class ChatGptStreamDiagnostics {
+       capture.terminal ??= "detached";
+       this.emit(capture);
+     }
++    this.clearFinalJson();
+     this.captures.clear();
+     const session = this.session;
+     this.session = undefined;
+diff --git a/tests/browser-cancellation.test.ts b/tests/browser-cancellation.test.ts
+index f2894c2..d82253b 100644
+--- a/tests/browser-cancellation.test.ts
++++ b/tests/browser-cancellation.test.ts
+@@ -5,9 +5,10 @@ import { spawnSync } from "node:child_process";
+ test("browser cancellation owns rejected operations even when already aborted", () => {
+   const source = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+   const start = source.indexOf("function withBrowserTurnAbort<T>");
+-  const end = source.indexOf("\nexport interface BrowserTurn", start);
++  const end = source.indexOf("\n}", start);
+   expect(start).toBeGreaterThan(0);
+-  const helper = new Bun.Transpiler({ loader: "ts", target: "node" }).transformSync(source.slice(start, end));
++  expect(end).toBeGreaterThan(start);
++  const helper = new Bun.Transpiler({ loader: "ts", target: "node" }).transformSync(source.slice(start, end + 2));
+   // The packaged helper runs on Node: test process survival, not just the caught
+   // outer error. Bun and Node can handle unowned rejections differently.
+   const child = spawnSync("node", ["--unhandled-rejections=strict", "-e", helper + `
+diff --git a/tests/browser-generation.test.ts b/tests/browser-generation.test.ts
+index c10c866..7b76523 100644
+--- a/tests/browser-generation.test.ts
++++ b/tests/browser-generation.test.ts
+@@ -197,4 +197,4 @@ test.skipIf(!process.env.LAUNCHER_TEST_ELECTRON)("captured Think toggles indepen
+     await app.close();
+     rmSync(userData, { recursive: true, force: true });
+   }
+-}, 20_000);
++}, 120_000);
+diff --git a/tests/browser-turn-binding.test.ts b/tests/browser-turn-binding.test.ts
+index dc2a778..6432e4e 100644
+--- a/tests/browser-turn-binding.test.ts
++++ b/tests/browser-turn-binding.test.ts
+@@ -1,6 +1,8 @@
+ import { expect, test } from "bun:test";
+ import { chromium, type Locator, type Page } from "playwright-core";
+ import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
++import { readChatGptUserMessage } from "../src/adapters/chatgpt-web/browser-user-message";
++import { formatChatGptWebMultipartStage } from "../src/adapters/chatgpt-web/prompt";
+ import { chatGptHtmlToMarkdown, ChatGptMarkdownBuffer } from "../src/adapters/chatgpt-web/markdown";
+ import { readFileSync } from "node:fs";
+ 
+@@ -315,6 +317,140 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("plain user code blocks prese
+   } finally { await browser.close(); }
+ });
+ 
++test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("literal user code wrappers unwrap only the exact expected source including embedded fences and JSON", async () => {
++  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
++  try {
++    const page = await browser.newPage();
++    const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), { config: { appName: "Codex Native2" } }) as any;
++    const prompt = ' \n```json\n{"path":"C:\\\\tmp","value":"_tail_","literal":"\\u0060"}\n```\n````\nturn_0123456789abcdef0123456789abcdef\n  ';
++    for (const layout of ["plain", "rich", "rich-mention"]) {
++      for (const language of [null, "", "text"]) {
++        await page.setContent('<div id="group"><div data-user-message-bubble><div data-search-result-target></div></div></div>');
++        await page.locator('[data-search-result-target]').evaluate((target, { layout, language, prompt }) => {
++          const root = layout === "plain" ? target : document.createElement("div");
++          if (root !== target) {
++            root.setAttribute("class", "rich-text-user-turn");
++            root.setAttribute("data-markdown-text-tone", "user-message");
++            target.append(root);
++          }
++          if (layout === "rich-mention") {
++            const paragraph = document.createElement("p");
++            paragraph.innerHTML = '<a href="/plugins/fixture"><span data-prompt-link-href="app://fixture">Codex Native2</span></a>  ';
++            root.append(paragraph);
++          }
++          const block = document.createElement("pre");
++          block.setAttribute("data-markdown-copy", "code-block");
++          const code = document.createElement("code");
++          code.setAttribute("data-markdown-copy-content", "true");
++          if (language !== null) code.setAttribute("data-language", language);
++          code.textContent = prompt;
++          block.append(code);
++          root.append(block);
++        }, { layout, language, prompt });
++        const content = page.locator('[data-search-result-target]');
++        const token = "turn_0123456789abcdef0123456789abcdef";
++        const matchesLiteral = (expected: string) => worker.userMessageMatchesSubmission(page.locator('#group'), expected, undefined, token, true);
++        expect(await matchesLiteral(prompt)).toBe(layout === "rich-mention");
++        expect(await matchesLiteral(prompt.replace("_tail_", "_changed_"))).toBeFalse();
++        expect(await content.evaluate(readChatGptUserMessage, { connectorName: "Codex Native2", expectedLiteral: prompt }))
++          .toEqual({ text: prompt, leadingConnector: layout === "rich-mention" });
++        expect((await content.evaluate(readChatGptUserMessage, "Codex Native2"))?.text).not.toBe(prompt);
++        expect(await worker.userMessageMatchesSubmission(page.locator('#group'), prompt)).toBeTrue();
++        expect(await worker.userMessageMatchesSubmission(page.locator('#group'), prompt.replace("_tail_", "_changed_"))).toBeFalse();
++      }
++    }
++  } finally { await browser.close(); }
++}, 15_000);
++
++test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("literal user wrappers reject extra text, blocks and incorrect mentions", async () => {
++  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
++  try {
++    const page = await browser.newPage();
++    const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), { config: { appName: "Codex Native2" } }) as any;
++    const prompt = '```json\n{"value":"_tail_","path":"C:\\\\tmp"}\n```';
++    for (const scenario of ["prefix", "suffix", "leading-space", "trailing-space", "empty-prefix-block", "empty-suffix-block",
++      "blank-lines", "extra-code", "duplicate-code", "pre-prefix", "pre-suffix", "wrong-mention", "duplicate-mention",
++      "late-mention", "missing-connector-name", "changed-json", "second-rich-container"]) {
++      await page.setContent('<div id="group"><div data-user-message-bubble><div data-search-result-target>'
++        + '<div data-markdown-text-tone="user-message" class="rich-text-user-turn">'
++        + '<p><a href="/plugins/fixture"><span data-prompt-link-href="app://fixture">Codex Native2</span></a>  </p>'
++        + '<pre data-markdown-copy="code-block"><code data-markdown-copy-content="true" data-language="text"></code></pre>'
++        + '</div></div></div></div>');
++      await page.locator('.rich-text-user-turn').evaluate((root, { scenario, prompt }) => {
++        const pre = root.querySelector("pre")!;
++        const code = root.querySelector("code")!;
++        code.textContent = prompt;
++        if (scenario === "prefix") root.prepend("unexpected");
++        if (scenario === "suffix") root.append("unexpected");
++        if (scenario === "leading-space") root.prepend(" ");
++        if (scenario === "trailing-space") root.append(" ");
++        if (scenario === "empty-prefix-block") root.prepend(document.createElement("p"));
++        if (scenario === "empty-suffix-block") root.append(document.createElement("p"));
++        if (scenario === "blank-lines") root.insertAdjacentHTML("beforeend", '<span data-markdown-copy="blank-lines">\n</span>');
++        if (scenario === "extra-code" || scenario === "duplicate-code") {
++          const extra = pre.cloneNode(true) as Element;
++          if (scenario === "extra-code") extra.querySelector("code")!.textContent = "other source";
++          root.append(extra);
++        }
++        if (scenario === "pre-prefix") pre.prepend("extra");
++        if (scenario === "pre-suffix") pre.append("extra");
++        if (scenario === "wrong-mention") root.querySelector("[data-prompt-link-href]")!.textContent = "Other connector";
++        if (scenario === "duplicate-mention") root.insertBefore(root.querySelector("p")!.cloneNode(true), pre);
++        if (scenario === "late-mention") root.append(root.querySelector("p")!);
++        if (scenario === "changed-json") code.textContent = prompt.replace("_tail_", "\\_tail\\_");
++        if (scenario === "second-rich-container") root.after(root.cloneNode(true));
++      }, { scenario, prompt });
++      const observed = await page.locator('[data-search-result-target]').evaluate(readChatGptUserMessage, {
++        ...(scenario === "missing-connector-name" ? {} : { connectorName: "Codex Native2" }), expectedLiteral: prompt,
++      });
++      expect(observed?.text, scenario).not.toBe(prompt);
++      if (scenario !== "missing-connector-name") {
++        expect(await worker.userMessageMatchesSubmission(page.locator('#group'), prompt), scenario).toBeFalse();
++      }
++    }
++  } finally { await browser.close(); }
++}, 15_000);
++
++test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("ordinary multipart user code blocks still reconstruct their original fences", async () => {
++  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
++  try {
++    const page = await browser.newPage();
++    const worker = Object.create(ChatGptBrowserWorker.prototype) as any;
++    const payload = JSON.stringify({ context: '```json\n{"value":"_tail_"}\n```', path: "C:\\tmp", literal: "\\u0060" });
++    const stage = formatChatGptWebMultipartStage(payload, `ctx_${"a".repeat(32)}`, 1, 2);
++    const [header, rest] = stage.text.split("\n```json\n");
++    const footer = rest!.slice(payload.length + "\n```\n".length);
++    for (const rich of [false, true]) {
++      await page.setContent('<div id="group"><div data-user-message-bubble><div data-search-result-target></div></div></div>');
++      await page.locator('[data-search-result-target]').evaluate((target, { rich, header, payload, footer }) => {
++        const root = rich ? document.createElement("div") : target;
++        if (rich) {
++          root.setAttribute("class", "rich-text-user-turn");
++          root.setAttribute("data-markdown-text-tone", "user-message");
++          target.append(root);
++        }
++        const pre = document.createElement("pre");
++        pre.setAttribute("data-markdown-copy", "code-block");
++        pre.innerHTML = '<code data-markdown-copy-content="true" data-language="json"></code>';
++        pre.firstChild!.textContent = payload;
++        if (rich) {
++          const before = document.createElement("p"); before.textContent = header!;
++          const after = document.createElement("p"); after.textContent = footer;
++          root.append(before, pre, after);
++        } else root.append(header + "\n", pre, "\n" + footer);
++      }, { rich, header, payload, footer });
++      const content = page.locator('[data-search-result-target]');
++      expect((await content.evaluate(readChatGptUserMessage, { expectedLiteral: stage.text }))?.text).toBe(stage.text);
++      expect((await content.evaluate(readChatGptUserMessage, "Codex Native2"))?.text).toBe(stage.text);
++      expect(await worker.userMessageMatchesSubmission(page.locator('#group'), stage.text)).toBeTrue();
++      expect(await worker.userMessageMatchesSubmission(page.locator('#group'), stage.text.replace("_tail_", "changed"))).toBeFalse();
++      await page.locator('pre').evaluate(block => block.append("unexpected outside code"));
++      expect((await content.evaluate(readChatGptUserMessage, { expectedLiteral: stage.text }))?.text).not.toBe(stage.text);
++      expect(await worker.userMessageMatchesSubmission(page.locator('#group'), stage.text)).toBeFalse();
++    }
++  } finally { await browser.close(); }
++}, 15_000);
++
+ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("rich-text rebind requires the exact prepared turn token after expansion", async () => {
+   const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
+   try {
+diff --git a/tests/browser-worker-contract.test.ts b/tests/browser-worker-contract.test.ts
+index 6f4d20e..6667a78 100644
+--- a/tests/browser-worker-contract.test.ts
++++ b/tests/browser-worker-contract.test.ts
+@@ -2119,8 +2119,9 @@ test("tool-capable prompts use the shared Playwright connector selection before
+       calls.push(["press", value]);
+     },
+     locator: () => ({ filter: () => selectedConnector }),
+-    evaluate: async (_fn: unknown, value: string) => {
+-      calls.push(["plainText", value]);
++    evaluate: async (fn: unknown, value: string) => {
++      expect((fn as Function).name).toBe("insertLiteralTextIntoComposer");
++      calls.push(["literalText", value]);
+       return true;
+     },
+   };
+@@ -2192,7 +2193,7 @@ test("tool-capable prompts use the shared Playwright connector selection before
+     ["selectedFocus"],
+     ["press", CHATGPT_COMPOSER_DOCUMENT_END_KEY],
+     ["selectedFocus"],
+-    ["plainText", " context"],
++    ["literalText", "context"],
+     ["assertPrompt"],
+   ]);
+ });
+diff --git a/tests/browser-worker-raw-final.test.ts b/tests/browser-worker-raw-final.test.ts
+new file mode 100644
+index 0000000..a35c213
+--- /dev/null
++++ b/tests/browser-worker-raw-final.test.ts
+@@ -0,0 +1,162 @@
++import { expect, test } from "bun:test";
++import { EventEmitter } from "node:events";
++import { createContext, runInContext } from "node:vm";
++import { ChatGptConversationFinalReadback, chatGptConversationFinalSource, chatGptFinalJsonIsRequired } from "../src/adapters/chatgpt-web/browser-worker";
++
++const conversationId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
++const userId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
++const finalId = "cccccccc-cccc-cccc-cccc-cccccccccccc";
++const groupId = "dddddddd-dddd-dddd-dddd-dddddddddddd";
++const text = JSON.stringify({ findings: [], overall_correctness: "patch is correct", literal: '_name_ `code` C:\\tmp\\a "quoted"\n```json' });
++const schema = { type: "json_schema" as const, name: "review", strict: true, schema: { type: "object" } };
++const readback = () => ({ conversation_id: conversationId, current_node: finalId, mapping: {
++  [userId]: { id: userId, parent: null, message: { id: userId, author: { role: "user" } } },
++  tool: { id: "tool", parent: userId, message: { id: "tool", author: { role: "tool" }, status: "in_progress", content: { parts: ["private tool data"] } } },
++  [finalId]: { id: finalId, parent: "tool", message: { id: finalId, author: { role: "assistant" }, channel: "final", status: "finished_successfully", end_turn: true, content: { content_type: "text", parts: [text] } } },
++} });
++
++test("async tool final is projected to exact raw JSON and ownership only", () => {
++  const source = chatGptConversationFinalSource(readback(), conversationId)!;
++  expect(source).toEqual({ conversationId, userMessageId: userId, messageId: finalId, text });
++  expect(JSON.stringify(source)).not.toContain("private tool data");
++});
++
++test("readback rejects incomplete, foreign, nonfinal, malformed, and oversized sources", () => {
++  const mutations = [
++    (b: any) => { b.conversation_id = "other"; },
++    (b: any) => { b.current_node = "tool"; },
++    (b: any) => { b.mapping[finalId].id = "other"; },
++    (b: any) => { b.mapping[finalId].message.id = "other"; },
++    (b: any) => { b.mapping[finalId].message.author.role = "tool"; },
++    (b: any) => { b.mapping[finalId].message.channel = "commentary"; },
++    (b: any) => { b.mapping[finalId].message.status = "in_progress"; },
++    (b: any) => { b.mapping[finalId].message.end_turn = false; },
++    (b: any) => { b.mapping[finalId].message.recipient = "tool"; },
++    (b: any) => { b.mapping[finalId].message.content.parts = ["{broken"]; },
++    (b: any) => { b.mapping[finalId].message.content.parts = [text, {}]; },
++    (b: any) => { b.mapping[finalId].message.content.parts = ['"' + 'x'.repeat(1_000_000) + '"']; },
++    (b: any) => { b.mapping.tool.parent = "tool"; },
++    (b: any) => { b.mapping[userId].message.id = "other"; },
++  ];
++  for (const mutate of mutations) {
++    const body = readback(); mutate(body);
++    expect(chatGptConversationFinalSource(body, conversationId)).toBeUndefined();
++  }
++});
++
++test("implicit pure JSON review requires original source while mixed prose remains ordinary", () => {
++  expect(chatGptFinalJsonIsRequired(undefined, text)).toBe(true);
++  expect(chatGptFinalJsonIsRequired(undefined, '{"foo":1}\nExplanation')).toBe(false);
++  expect(chatGptFinalJsonIsRequired(undefined, text + "\nExplanation")).toBe(false);
++  expect(chatGptFinalJsonIsRequired(undefined, '{"foo":1}')).toBe(true);
++  expect(chatGptFinalJsonIsRequired(undefined, '{"findings": [broken}')).toBe(true);
++  expect(chatGptFinalJsonIsRequired(undefined, "Ordinary prose replacing JSON")).toBe(false);
++  expect(chatGptFinalJsonIsRequired(schema, '{"foo":1}\nExplanation')).toBe(true);
++});
++
++function fixture() {
++  const { createWindow } = require("@mixmark-io/domino");
++  const window = createWindow(`<div data-turn-key="${groupId}"><div data-content-search-unit-key="${finalId}:0:user" data-chatgpt-search-unit-key="${groupId}:0:user" data-chatgpt-search-message-ids="${userId}"><div data-user-message-bubble></div></div><div data-chatgpt-search-message-ids="tool ${finalId}"><div data-conversation-role="assistant"></div></div></div>`);
++  const root = window.document.body.firstElementChild;
++  const context = createContext({ document: window.document, getComputedStyle: (node: HTMLElement) => node.style });
++  const page = new EventEmitter() as EventEmitter & { url: () => string; mainFrame: () => object };
++  const frame = {};
++  page.url = () => `https://chatgpt.com/c/${conversationId}`;
++  page.mainFrame = () => frame;
++  const response = (body: unknown = readback()) => ({
++    request: () => ({ method: () => "GET", frame: () => frame }),
++    url: () => `https://chatgpt.com/backend-api/conversation/${conversationId}`,
++    status: () => 200, headers: () => ({ "content-type": "application/json" }),
++    body: async () => Buffer.from(JSON.stringify(body)),
++  });
++  const locator = { evaluate: async (callback: Function, options: unknown) => runInContext(`(${callback.toString()})`, context)(root, options) };
++  const observer = new ChatGptConversationFinalReadback();
++  observer.attach(page as never);
++  observer.begin();
++  const read = () => observer.read(locator as never, `group:assistant:${groupId}`, `group:user:${groupId}`);
++  return { observer, page, root, response, read };
++}
++
++test("observed authenticated GET matches DOM IDs with group ID distinct from user ID", async () => {
++  const f = fixture();
++  f.page.emit("response", f.response());
++  expect(await f.read()).toBe(text);
++  f.observer.dispose();
++  expect(f.page.listenerCount("response")).toBe(0);
++});
++
++test("foreign final DOM ID, user branch, URL, and hidden message cannot supply a source", async () => {
++  for (const mutate of [
++    (f: ReturnType<typeof fixture>) => f.root.lastElementChild.setAttribute("data-chatgpt-search-message-ids", "foreign"),
++    (f: ReturnType<typeof fixture>) => f.root.firstElementChild.setAttribute("data-chatgpt-search-message-ids", finalId),
++    (f: ReturnType<typeof fixture>) => { f.page.url = () => "https://chatgpt.com/c/other"; },
++    (f: ReturnType<typeof fixture>) => f.root.lastElementChild.setAttribute("hidden", ""),
++  ]) {
++    const f = fixture(); mutate(f);
++    f.page.emit("response", f.response());
++    expect(await f.read()).toBeUndefined();
++    f.observer.dispose();
++  }
++});
++
++test("begin and page rebind invalidate pending and completed readbacks", async () => {
++  const f = fixture();
++  let resolveBody!: (body: Buffer) => void;
++  f.page.emit("response", { ...f.response(), body: () => new Promise<Buffer>(resolve => { resolveBody = resolve; }) });
++  f.observer.begin();
++  resolveBody(Buffer.from(JSON.stringify(readback())));
++  await Promise.resolve();
++  expect(await f.read()).toBeUndefined();
++  f.page.emit("response", f.response());
++  expect(await f.read()).toBe(text);
++  const next = fixture();
++  f.observer.attach(next.page as never);
++  expect(await f.read()).toBeUndefined();
++  expect(f.page.listenerCount("response")).toBe(0);
++  f.observer.dispose(); next.observer.dispose();
++});
++
++test("unchanged live-smoke literal retains exact original JSON without an output schema", () => {
++  const literal = "literal _name_ and `code` and C:\\tmp\\a_b 中文";
++  const raw = JSON.stringify({ probe_ok: true, literal_value: literal });
++  const body = readback();
++  body.mapping[finalId].message.content.parts = [raw];
++  const source = chatGptConversationFinalSource(body, conversationId)!;
++  expect(source.text).toBe(raw);
++  expect(JSON.parse(source.text).literal_value).toBe(literal);
++  expect(chatGptFinalJsonIsRequired(undefined, raw)).toBe(true);
++  expect(chatGptFinalJsonIsRequired(undefined, raw.slice(0, -1))).toBe(true);
++  expect(chatGptFinalJsonIsRequired(undefined, '{"path":"C:\\invalid"}')).toBe(true);
++  expect(chatGptFinalJsonIsRequired(undefined, '[{"quoted":"} [ \\\""}]\nExplanation')).toBe(false);
++});
++
++test("native conversation GET with model-switcher query supplies exact owned JSON", async () => {
++  const f = fixture();
++  f.page.emit("response", {
++    ...f.response(),
++    url: () => `https://chatgpt.com/backend-api/conversation/${conversationId}?include_model_switcher_metadata=true`,
++  });
++  expect(await f.read()).toBe(text);
++  f.observer.dispose();
++});
++
++test("query support preserves exact readback origin and conversation path", async () => {
++  for (const url of [
++    `https://foreign.example/backend-api/conversation/${conversationId}?include_model_switcher_metadata=true`,
++    `https://chatgpt.com/backend-api/conversation/${conversationId}/extra?include_model_switcher_metadata=true`,
++    `https://chatgpt.com/backend-api/conversation/${conversationId}-extra?include_model_switcher_metadata=true`,
++    `https://chatgpt.com/backend-api/conversation/other?include_model_switcher_metadata=${conversationId}`,
++  ]) {
++    const f = fixture();
++    f.page.emit("response", { ...f.response(), url: () => url });
++    expect(await f.read()).toBeUndefined();
++    f.observer.dispose();
++  }
++});
++
++test("POST responses are ignored before reading any GET-specific fields", async () => {
++  const f = fixture();
++  expect(() => f.page.emit("response", { request: () => ({ method: () => "POST" }) })).not.toThrow();
++  expect(await f.read()).toBeUndefined();
++  f.observer.dispose();
++});
+diff --git a/tests/composer-insert.test.ts b/tests/composer-insert.test.ts
+index 7e1db75..05558f4 100644
+--- a/tests/composer-insert.test.ts
++++ b/tests/composer-insert.test.ts
+@@ -2,7 +2,9 @@ import { afterEach, expect, test } from "bun:test";
+ import { chromium } from "playwright-core";
+ import {
+   ChatGptBrowserWorker,
++  chatGptJsonSourceRequired,
+   insertPlainTextIntoComposer,
++  insertLiteralTextIntoComposer,
+   replacePlainTextInComposer,
+ } from "../src/adapters/chatgpt-web/browser-worker";
+ 
+@@ -25,6 +27,24 @@ afterEach(() => {
+   (globalThis as Record<string, unknown>).window = originals.window;
+ });
+ 
++test("bare JSON holds its exact source without misclassifying Markdown links or code blocks", () => {
++  for (const text of ['{', '{"overall_correctness":', '[', '[1,', '[false,', '[{"key":"value"}]']) {
++    expect(chatGptJsonSourceRequired(text)).toBeTrue();
++  }
++  for (const text of ['[1](https://example.com)', '[false positive](https://example.com)',
++    '[1][reference]', '[1]: https://example.com', '- a list', 'ordinary prose']) {
++    expect(chatGptJsonSourceRequired(text)).toBeFalse();
++  }
++  expect(chatGptJsonSourceRequired('{}', [{ tag: 'pre', html: '<pre><code>{}</code></pre>' }])).toBeFalse();
++  expect(chatGptJsonSourceRequired('{}', [{ tag: 'div', html: '<div data-markdown-copy="code-block"><code>{}</code></div>' }])).toBeFalse();
++  expect(chatGptJsonSourceRequired('{"body":"inline code"}', [{ tag: 'p', html: '<p>{"body":"<code>inline code</code>"}</p>' }])).toBeTrue();
++  for (const literal of ['[source](https://example.com/a_b)', '[source][reference]', '[source]: literal', 'escaped \\" ]( value']) {
++    const array = JSON.stringify([literal, { overall_correctness: true }]);
++    expect(chatGptJsonSourceRequired(array)).toBeTrue();
++    expect(chatGptJsonSourceRequired(array.slice(0, array.length - 2))).toBeTrue();
++  }
++});
++
+ function harness(options: {
+   focusable: boolean;
+   caretInsideComposer: boolean;
+@@ -129,6 +149,39 @@ test("refuses plain replacement when focus cannot enter the composer (#977)", ()
+   expect(calls).toEqual([]);
+ });
+ 
++test("literal transport cannot edit a covered or detached composer", () => {
++  const { composer, calls } = harness({ focusable: false, caretInsideComposer: false });
++  expect(insertLiteralTextIntoComposer(composer, "transport")).toBeFalse();
++  expect(calls).toEqual([]);
++});
++
++test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("Native2 transport keeps opaque tokens and nested JSON in a semantic code block", async () => {
++  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
++  try {
++    const page = await browser.newPage();
++    const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
++      config: { appName: "Codex Native2" },
++    });
++    const token = `turn_${"A".repeat(30)}__`;
++    const payload = JSON.stringify({ text: 'Use "quotes", C:\\tmp\\file, `code`, _name_ and 中文 😀',
++      literal: '</code><script>globalThis.transportInjected = true</script>' });
++    const prompt = `Context\n\`\`\`text\n${payload}\n\`\`\`\nPass turn_token ${token} unchanged.`;
++    await page.setContent('<form><div id="prompt-textarea" contenteditable="true" data-composer-markdown style="min-height:40px">'
++      + '<p><span app-mention-path="app://fixture" app-mention-display-name="Codex Native2" contenteditable="false">Codex Native2</span> </p>'
++      + '</div></form>');
++    await worker.attachPrompt(page, prompt, true);
++    const composer = page.locator("#prompt-textarea");
++    expect(await composer.locator("pre").count()).toBe(1);
++    expect(await composer.locator("pre code").textContent()).toBe(prompt);
++    expect(await worker.attachedPromptText(page)).toBe(prompt);
++    expect(await worker.connectorIsSelected(composer)).toBeTrue();
++    expect(await composer.locator("script").count()).toBe(0);
++    expect(await page.evaluate(() => (globalThis as Record<string, unknown>).transportInjected)).toBeUndefined();
++    expect(JSON.parse((await composer.locator("pre code").textContent())!.split("\n")[2]!)).toEqual(JSON.parse(payload));
++    await worker.assertPromptAttached(page, prompt, undefined, true);
++  } finally { await browser.close(); }
++}, 30_000);
++
+ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("multipart attachment replaces a draft restored after the initial clear", async () => {
+   const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
+   try {
+@@ -166,7 +219,7 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("a selected connector never a
+     const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+       config: { appName: "Codex Native2" },
+     });
+-    const prompt = "Task context\n".repeat(5_000) + "\nrequest_id: current";
++    const prompt = "Task context\n".repeat(500) + "\nrequest_id: current";
+     for (const modern of [false, true]) {
+       const pill = modern
+         ? '<span app-mention-path="app://fixture" app-mention-display-name="Codex Native2" contenteditable="false">Codex Native2</span>'
+diff --git a/tests/launcher-viewport-browser.test.ts b/tests/launcher-viewport-browser.test.ts
+index cf06391..bf746ec 100644
+--- a/tests/launcher-viewport-browser.test.ts
++++ b/tests/launcher-viewport-browser.test.ts
+@@ -26,12 +26,27 @@ test.skipIf(!process.env.LAUNCHER_TEST_ELECTRON)("finishing another Electron tab
+       await app.evaluate((_, zoom) => {
+         const host = (globalThis as any).viewportFixture;
+         host.turnTabs.get("first").view.webContents.setZoomFactor(zoom);
+-        host.selectedTabId = "home";
++        host.selectedTabId = "first";
+         host.syncViewVisibility();
+       }, zoom);
+       await page.waitForTimeout(200);
++      // Finish the zoom's initial resize while drawable. Offscreen views do not
++      // reliably receive animation frames for Playwright's stability polling.
++      await page.evaluate(() => new Promise<void>(resolve =>
++        requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
++      await app.evaluate(() => {
++        const host = (globalThis as any).viewportFixture;
++        host.selectedTabId = "home";
++        host.syncViewVisibility();
++      });
+       const before = await dimensions();
+-      await page.getByRole("button", { name: "Models", exact: true }).click();
++      const models = page.getByRole("button", { name: "Models", exact: true });
++      expect(await models.isVisible()).toBe(true);
++      expect(await models.isEnabled()).toBe(true);
++      // Exercise the offscreen input without waiting for suppressed RAF ticks;
++      // still require an actual visible menu before the other task finishes.
++      await models.click({ force: true });
++      expect(await page.getByRole("menu").isVisible()).toBe(true);
+       await app.evaluate(() => {
+         const host = (globalThis as any).viewportFixture;
+         const second = host.turnTabs.get("second");
+diff --git a/tests/raw-final-json.test.ts b/tests/raw-final-json.test.ts
+new file mode 100644
+index 0000000..da2818e
+--- /dev/null
++++ b/tests/raw-final-json.test.ts
+@@ -0,0 +1,262 @@
++import { expect, test } from "bun:test";
++import { RawFinalJsonCollector } from "../src/adapters/chatgpt-web/raw-final-json";
++
++const frame = (value: unknown) => `data: ${JSON.stringify(value)}\n\n`;
++const done = "data: [DONE]\n\n";
++const message = (text: string, overrides: Record<string, unknown> = {}) => ({
++  id: "synthetic-message", author: { role: "assistant" }, channel: "final",
++  status: "finished_successfully", end_turn: true,
++  content: { content_type: "text", parts: [text] }, ...overrides,
++});
++const terminal = frame({ p: "", o: "patch", v: [
++  { p: "/message/status", o: "replace", v: "finished_successfully" },
++  { p: "/message/end_turn", o: "replace", v: true },
++] });
++const push = (collector: RawFinalJsonCollector, value: string) => collector.push(Buffer.from(value));
++
++test("whole final messages preserve JSON escapes, underscores, arrays, and Unicode exactly", () => {
++  const text = String.raw`{"overall_correctness":"合法_值","items":["C:\\tmp\\a_b","\\[literal\\]","a\nb"]}`;
++  const collector = new RawFinalJsonCollector();
++  const bytes = Buffer.from(frame({ message: message(text) }) + done);
++  for (const byte of bytes) collector.push(Uint8Array.of(byte));
++  expect(collector.getCompletedJson()).toBe(text);
++  expect(JSON.parse(collector.getCompletedJson()!)).toEqual(JSON.parse(text));
++});
++
++test("JSON candidates are provisional until successful status, end_turn and DONE", () => {
++  const collector = new RawFinalJsonCollector();
++  push(collector, frame({ message: message('{"ok":', { status: "in_progress", end_turn: false }) }));
++  expect(collector.latestJsonCandidate()).toBe('{"ok":');
++  expect(collector.getCompletedJson()).toBeUndefined();
++  push(collector, frame({ p: "/message/content/parts/0", o: "append", v: "true}" }));
++  expect(collector.getCompletedJson()).toBeUndefined();
++  push(collector, terminal);
++  expect(collector.getCompletedJson()).toBeUndefined();
++  push(collector, done);
++  expect(collector.getCompletedJson()).toBe('{"ok":true}');
++});
++
++test("batched patches and inherited value-only appends reconstruct exact text", () => {
++  const collector = new RawFinalJsonCollector();
++  push(collector, frame({ p: "", o: "add", v: { message: message("", { status: "in_progress", end_turn: false }) } })
++    + frame({ p: "/message/content/parts/0", o: "append", v: '{"overall_' })
++    + frame({ v: 'correctness":' })
++    + frame({ p: "", o: "patch", v: [
++      { p: "/message/content/parts/0", o: "append", v: '"ok"' }, { v: "}" },
++      { p: "/message/status", o: "replace", v: "finished_successfully" },
++      { p: "/message/end_turn", o: "replace", v: false }, { v: true },
++    ] }) + done);
++  expect(collector.getCompletedJson()).toBe('{"overall_correctness":"ok"}');
++});
++
++test("nested patch fields cannot steal the context of a following root message", () => {
++  const collector = new RawFinalJsonCollector();
++  push(collector, frame({ p: "", o: "add", v: { message: message('{"old":true}') } })
++    + frame({ o: "patch", v: [{ p: "/message/status", o: "replace", v: "finished_partial" }] })
++    + frame({ o: "add", v: { message: message('{"current":true}') } }) + done);
++  expect(collector.getCompletedJson()).toBe('{"current":true}');
++});
++
++test("content and parts replacements revise the undelivered draft instead of appending twice", () => {
++  const collector = new RawFinalJsonCollector();
++  push(collector, frame({ message: message('{"old":0}') })
++    + frame({ p: "/message/content", o: "replace", v: { content_type: "text", parts: ["[", "1]"] } })
++    + frame({ p: "/message/content/parts/1", o: "replace", v: "2" })
++    + frame({ p: "/message/content/parts/2", o: "add", v: "]" }) + done);
++  expect(collector.getCompletedJson()).toBe("[2]");
++});
++
++test("analysis, commentary, tool, and metadata payloads never become final text or serialized state", () => {
++  const collector = new RawFinalJsonCollector();
++  for (const [role, channel] of [["assistant", "analysis"], ["tool", "final"], ["assistant", "commentary"]]) {
++    push(collector, frame({ message: message('"PRIVATE-body"', { author: { role }, channel }) })
++      + frame({ p: "/message/content/parts/0", o: "append", v: "PRIVATE-delta" }));
++    expect(collector.latestJsonCandidate()).toBeUndefined();
++  }
++  push(collector, frame({ message: message('{"public":true}', { metadata: { secret: "PRIVATE-meta" } }) })
++    + frame({ p: "/message/metadata", o: "replace", v: { secret: "PRIVATE-patch" } }) + done);
++  expect(collector.getCompletedJson()).toBe('{"public":true}');
++  expect(JSON.stringify(collector)).toBe("{}");
++  expect(JSON.stringify({ ...collector })).toBe("{}");
++});
++
++test("a late final channel never promotes discarded commentary or guesses its missing prefix", () => {
++  const collector = new RawFinalJsonCollector();
++  push(collector, frame({ message: message('{"PRIVATE":', { channel: "commentary" }) })
++    + frame({ p: "/message/channel", o: "replace", v: "final" })
++    + frame({ p: "/message/content/parts/0", o: "append", v: "true}" }) + done);
++  expect(collector.latestJsonCandidate()).toBeUndefined();
++  expect(collector.getCompletedJson()).toBeUndefined();
++});
++
++test("a complete replacement can establish the base after a late channel change", () => {
++  const collector = new RawFinalJsonCollector();
++  push(collector, frame({ message: message("PRIVATE", { channel: "analysis" }) })
++    + frame({ p: "/message/channel", o: "replace", v: "final" })
++    + frame({ p: "/message/content", o: "replace", v: { content_type: "text", parts: ['{"safe":true}'] } }) + done);
++  expect(collector.getCompletedJson()).toBe('{"safe":true}');
++});
++
++test("a subsequent non-final message invalidates the previous final candidate", () => {
++  const collector = new RawFinalJsonCollector();
++  push(collector, frame({ message: message('{"stale":true}') })
++    + frame({ message: message("PRIVATE", { channel: "analysis" }) }) + done);
++  expect(collector.getCompletedJson()).toBeUndefined();
++});
++
++test("incomplete, malformed, service-error, and unknown-base streams cannot qualify", () => {
++  for (const input of [
++    frame({ message: message('{"ok":true}') }),
++    frame({ message: message('{"ok":true}', { status: "in_progress" }) }) + done,
++    frame({ message: message('{"ok":true}', { end_turn: false }) }) + done,
++    frame({ message: message('{"ok":true}', { status: "finished_partial" }) }) + done,
++    frame({ message: message('{"ok":true}') }) + done + "data: {",
++    "data: {broken}\n\n" + frame({ message: message("{}") }) + done,
++    frame({ error: "PRIVATE-service-error" }) + frame({ message: message("{}") }) + done,
++    frame({ v: "missing base" }) + frame({ message: message("{}") }) + done,
++    frame({ message: message("{}") }) + frame({ p: "/message/content/unknown", o: "replace", v: "x" }) + done,
++  ]) {
++    const collector = new RawFinalJsonCollector();
++    push(collector, input);
++    expect(collector.getCompletedJson()).toBeUndefined();
++  }
++});
++
++test("only one entire valid JSON value qualifies, including scalar schema values", () => {
++  for (const text of ["{}", "[]", '"hello_world"', "true", "false", "null", "123", "-1.25e2", " \n{}\r\n"]) {
++    const collector = new RawFinalJsonCollector();
++    push(collector, frame({ message: message(text) }) + done);
++    expect(collector.getCompletedJson()).toBe(text);
++  }
++  for (const text of ['{"bad":', "{} {}", "```json\n{}\n```", "text {}", String.raw`{"bad\_key":1}`]) {
++    const collector = new RawFinalJsonCollector();
++    push(collector, frame({ message: message(text) }) + done);
++    expect(collector.getCompletedJson()).toBeUndefined();
++  }
++});
++
++test("frame, total text, frame count and patch bounds fail closed", () => {
++  const cases = [
++    { limits: { maxFrameChars: 64 }, input: frame({ message: message("{}") }) },
++    { limits: { maxTextChars: 3 }, input: frame({ message: message("[123]") }) },
++    { limits: { maxTextChars: 3 }, input: frame({ message: message("[") })
++      + frame({ p: "/message/content/parts/0", o: "append", v: "123]" }) },
++    { limits: { maxFrames: 1 }, input: frame({ message: message("{}") }) + frame({ type: "ping" }) },
++    { limits: {}, input: frame({ message: message("{}") })
++      + frame({ p: "", o: "patch", v: Array.from({ length: 257 }, () => ({ p: "/message/status", o: "replace", v: "finished_successfully" })) }) },
++  ];
++  for (const { limits, input } of cases) {
++    const collector = new RawFinalJsonCollector(limits);
++    push(collector, input + done);
++    expect(collector.getCompletedJson()).toBeUndefined();
++    expect(collector.latestJsonCandidate()).toBeUndefined();
++  }
++});
++
++test("CRLF and SSE multi-line data fields are decoded without changing final text", () => {
++  const collector = new RawFinalJsonCollector();
++  push(collector, `event: message\r\ndata: {"message":\r\ndata: ${JSON.stringify(message("[1,2]"))}}\r\n\r\n`
++    + "data: [DONE]\r\n\r\n");
++  expect(collector.getCompletedJson()).toBe("[1,2]");
++});
++
++test("invalid UTF-8 and payloads after DONE cannot silently alter a completed result", () => {
++  const collector = new RawFinalJsonCollector();
++  collector.push(Uint8Array.of(0xff));
++  push(collector, frame({ message: message("{}") }) + done);
++  expect(collector.getCompletedJson()).toBeUndefined();
++  const trailing = new RawFinalJsonCollector();
++  push(trailing, frame({ message: message("{}") }) + done + frame({ message: message("[]") }));
++  expect(trailing.getCompletedJson()).toBeUndefined();
++});
++
++test("the v1 delta_encoding protocol marker precedes whole messages and value-only text patches", () => {
++  const collector = new RawFinalJsonCollector();
++  push(collector, 'event: delta_encoding\ndata: "v1"\n\n'
++    + frame({ p: "", o: "add", v: { message: message("", { status: "in_progress", end_turn: false }) } })
++    + frame({ p: "/message/content/parts/0", o: "append", v: '{"overall_correctness":' })
++    + frame({ v: '"correct"}' }) + terminal + done);
++  expect(collector.getCompletedJson()).toBe('{"overall_correctness":"correct"}');
++  for (const marker of ['data: "v1"\n\n', 'event: delta_encoding\ndata: "v2"\n\n']) {
++    const unknown = new RawFinalJsonCollector();
++    push(unknown, marker + frame({ message: message("{}") }) + done);
++    expect(unknown.getCompletedJson()).toBeUndefined();
++  }
++});
++
++test("ordinary Markdown bullets and scalar-looking prose do not request a JSON hold", () => {
++  for (const text of ["- bullet", "true story", "normal prose", "# Heading", "123. numbered list", "```json\n{}\n```", "```\n[1,2]\n```" ]) {
++    const collector = new RawFinalJsonCollector();
++    push(collector, frame({ message: message(text) }) + done);
++    expect(collector.latestJsonCandidate()).toBeUndefined();
++    expect(collector.latestFinalText()).toBe(text);
++    expect(collector.getCompletedJson()).toBeUndefined();
++  }
++});
++
++test("an initially JSON-looking draft may be replaced with prose for Markdown fallback", () => {
++  const collector = new RawFinalJsonCollector();
++  push(collector, frame({ message: message('{"draft":', { status: "in_progress", end_turn: false }) }));
++  expect(collector.latestJsonCandidate()).toBe('{"draft":');
++  push(collector, frame({ p: "/message/content/parts/0", o: "replace", v: "- ordinary bullet" }) + terminal + done);
++  expect(collector.latestJsonCandidate()).toBeUndefined();
++  expect(collector.latestFinalText()).toBe("- ordinary bullet");
++  expect(collector.getCompletedJson()).toBeUndefined();
++});
++
++test("oversized Unicode user frames fail within bounds without exposing private payloads", () => {
++  const collector = new RawFinalJsonCollector({ maxFrameChars: 512 });
++  const bytes = Buffer.from(frame({ message: message("PRIVATE-秘密".repeat(200), {
++    author: { role: "user" }, channel: null,
++  }) }) + frame({ message: message("{}") }) + done);
++  for (let offset = 0; offset < bytes.length; offset += 17) collector.push(bytes.subarray(offset, offset + 17));
++  expect(collector.getCompletedJson()).toBeUndefined();
++  expect(JSON.stringify(collector)).toBe("{}");
++});
++
++
++test("pending UTF-8 bytes after DONE keep the source incomplete across chunk boundaries", () => {
++  const collector = new RawFinalJsonCollector();
++  push(collector, frame({ message: message("{}") }) + done);
++  collector.push(Uint8Array.of(0xe7));
++  expect(collector.getCompletedJson()).toBeUndefined();
++  collector.push(Uint8Array.of(0xa7));
++  expect(collector.getCompletedJson()).toBeUndefined();
++});
++
++test("message identity patches cannot relabel a previously captured final", () => {
++  const collector = new RawFinalJsonCollector();
++  push(collector, frame({ message: message('{"stale":true}') })
++    + frame({ p: "/message/id", o: "replace", v: "another-message" }) + done);
++  expect(collector.getCompletedJson()).toBeUndefined();
++});
++
++
++test("failure diagnostics distinguish missing DONE, unfinished messages, malformed JSON and protocol errors", () => {
++  const cases = [
++    [frame({ message: message('{}') }), "missing_done"],
++    [frame({ message: message('{}', { end_turn: false }) }) + done, "unfinished_message"],
++    [frame({ message: message('{"PRIVATE-payload":') }) + done, "invalid_json"],
++    ["data: {PRIVATE-broken}\n\n", "malformed_frame"],
++    [frame({ error: "PRIVATE-error" }), "service_or_protocol_error"],
++    [frame({ message: message('{}') }) + done, "complete"],
++  ];
++  for (const [input, reason] of cases) {
++    const collector = new RawFinalJsonCollector();
++    push(collector, input!);
++    expect(collector.snapshot().reason).toBe(reason);
++    const serialized = JSON.stringify(collector.snapshot());
++    expect(serialized).not.toContain("PRIVATE");
++    expect(serialized).not.toContain("synthetic-message");
++    expect(JSON.stringify(collector)).toBe("{}");
++  }
++});
++
++
++test("payload-free remove patches cannot leave deleted final content eligible", () => {
++  for (const path of ["", "/message", "/message/content", "/message/content/parts/0", "/message/status"]) {
++    const collector = new RawFinalJsonCollector();
++    push(collector, frame({ message: message('{}') }) + frame({ p: path, o: "remove" }) + done);
++    expect(collector.getCompletedJson()).toBeUndefined();
++  }
++});
+diff --git a/tests/stream-diagnostics.test.ts b/tests/stream-diagnostics.test.ts
+index 94bb29d..03f89e6 100644
+--- a/tests/stream-diagnostics.test.ts
++++ b/tests/stream-diagnostics.test.ts
+@@ -164,3 +164,428 @@ test("late events from a detached page cannot change a new page's capture with t
+   expect(reports).toHaveLength(1);
+   expect(reports[0]).toMatchObject({ terminal: "detached", unavailable: true, doneMarker: false });
+ });
++
++const rawFinal = (text: string) => frame({ message: {
++  id: "synthetic-final", author: { role: "assistant" }, channel: "final",
++  status: "finished_successfully", end_turn: true,
++  content: { content_type: "text", parts: [text] }, metadata: { secret: "PRIVATE-metadata" },
++} });
++const done = "data: [DONE]\n\n";
++const flush = () => new Promise<void>(resolve => setImmediate(resolve));
++
++function rawSession(buffered: Promise<{ bufferedData: string }> = Promise.resolve({ bufferedData: "" })) {
++  const session = new EventEmitter() as any;
++  session.send = async (method: string) => method === "Page.getFrameTree"
++    ? { frameTree: { frame: { id: "main" } } }
++    : method === "Network.streamResourceContent" ? buffered : {};
++  session.detach = async () => {};
++  const page = { context: () => ({ newCDPSession: async () => session }) } as any;
++  const request = (id: string, owner = "main") => session.emit("Network.requestWillBeSent", {
++    requestId: id, frameId: owner,
++    request: { method: "POST", url: "https://chatgpt.com/backend-api/f/conversation" },
++  });
++  const response = (id: string, status = 200, mimeType = "text/event-stream") => session.emit("Network.responseReceived", {
++    requestId: id, response: { status, mimeType },
++  });
++  const data = (id: string, text: string) => session.emit("Network.dataReceived", {
++    requestId: id, data: Buffer.from(text).toString("base64"),
++  });
++  return { session, page, request, response, data };
++}
++
++test("raw final collection is opt-in and reports stay content-free when enabled", async () => {
++  for (const enabled of [false, true]) {
++    const reports: any[] = [];
++    const owned = rawSession();
++    const observer = new ChatGptStreamDiagnostics(value => reports.push(value), { collectFinalJson: enabled });
++    await observer.attach(owned.page);
++    observer.begin();
++    owned.request("owned");
++    owned.response("owned");
++    await flush();
++    const answer = '{"PRIVATE-body":"秘密","overall_correctness":[true]}';
++    owned.data("owned", 'event: delta_encoding\ndata: "v1"\n\n' + rawFinal(answer) + done);
++    expect(observer.latestJsonCandidate()).toBe(enabled ? answer : undefined);
++    owned.session.emit("Network.loadingFinished", { requestId: "owned" });
++    await flush();
++    // A network-terminal event deletes the diagnostic capture, but not the selected private result.
++    expect(await observer.finishFinalJson()).toBe(enabled ? answer : undefined);
++    await observer.dispose();
++    expect(reports).toHaveLength(1);
++    expect(JSON.stringify(reports)).not.toContain("PRIVATE");
++    expect(JSON.stringify(reports)).not.toContain("秘密");
++    expect(JSON.stringify(reports)).not.toContain("overall_correctness");
++  }
++});
++
++test("finishFinalJson awaits buffered data before queued deltas, accepting aborted streams only with DONE", async () => {
++  for (const includeDone of [false, true]) {
++    const reports: any[] = [];
++    const buffered = Promise.withResolvers<{ bufferedData: string }>();
++    const owned = rawSession(buffered.promise);
++    const observer = new ChatGptStreamDiagnostics(value => reports.push(value), { collectFinalJson: true });
++    await observer.attach(owned.page);
++    observer.begin();
++    owned.request("owned");
++    owned.response("owned");
++    const answer = '{"overall_correctness":true}';
++    const initial = frame({ message: {
++      id: "synthetic", author: { role: "assistant" }, channel: "final", status: "in_progress", end_turn: false,
++      content: { content_type: "text", parts: ['{"overall_'] },
++    } });
++    owned.data("owned", frame({ p: "/message/content/parts/0", o: "append", v: 'correctness":true}' })
++      + frame({ p: "", o: "patch", v: [
++        { p: "/message/status", o: "replace", v: "finished_successfully" },
++        { p: "/message/end_turn", o: "replace", v: true },
++      ] }) + (includeDone ? done : ""));
++    owned.session.emit("Network.loadingFailed", { requestId: "owned", canceled: true, errorText: "net::ERR_ABORTED" });
++    const finishing = observer.finishFinalJson();
++    buffered.resolve({ bufferedData: Buffer.from(initial).toString("base64") });
++    expect(await finishing).toBe(includeDone ? answer : undefined);
++    await flush();
++    expect(reports[0]).toMatchObject({ terminal: "aborted", doneMarker: includeDone });
++    await observer.dispose();
++  }
++});
++
++test("begin resets candidates and old submissions cannot overwrite the current final", async () => {
++  const owned = rawSession();
++  const reports: any[] = [];
++  const observer = new ChatGptStreamDiagnostics(value => reports.push(value), { collectFinalJson: true });
++  await observer.attach(owned.page);
++  expect(observer.begin()).toBe(1);
++  owned.request("old");
++  owned.response("old");
++  await flush();
++  owned.data("old", rawFinal('{"old":true}') + done);
++  expect(await observer.finishFinalJson()).toBe('{"old":true}');
++  expect(observer.begin()).toBe(2);
++  expect(observer.latestJsonCandidate()).toBeUndefined();
++  expect(await observer.finishFinalJson()).toBeUndefined();
++  owned.data("old", rawFinal('{"PRIVATE-stale":true}') + done);
++  expect(await observer.finishFinalJson()).toBeUndefined();
++  owned.request("current");
++  owned.response("current");
++  await flush();
++  owned.data("current", rawFinal('{"current":true}') + done);
++  owned.session.emit("Network.loadingFinished", { requestId: "old" });
++  expect(await observer.finishFinalJson()).toBe('{"current":true}');
++  await observer.dispose();
++  expect(reports.filter(report => !report.phase).map(report => report.submission)).toEqual([1, 2]);
++  expect(JSON.stringify(reports)).not.toContain("PRIVATE");
++});
++
++test("a new begin while buffered data is pending fences an already awaiting finishFinalJson", async () => {
++  const buffered = Promise.withResolvers<{ bufferedData: string }>();
++  const owned = rawSession(buffered.promise);
++  const observer = new ChatGptStreamDiagnostics(() => {}, { collectFinalJson: true });
++  await observer.attach(owned.page);
++  observer.begin();
++  owned.request("old");
++  owned.response("old");
++  const finishing = observer.finishFinalJson();
++  observer.begin();
++  buffered.resolve({ bufferedData: Buffer.from(rawFinal('{"old":true}') + done).toString("base64") });
++  expect(await finishing).toBeUndefined();
++  expect(await observer.finishFinalJson()).toBeUndefined();
++  await observer.dispose();
++});
++
++test("page rebinding drops old final content and ignores late events with reused request ids", async () => {
++  const first = rawSession();
++  const second = rawSession();
++  const observer = new ChatGptStreamDiagnostics(() => {}, { collectFinalJson: true });
++  await observer.attach(first.page);
++  observer.begin();
++  first.request("reused");
++  first.response("reused");
++  await flush();
++  first.data("reused", rawFinal('{"old":true}') + done);
++  expect(await observer.finishFinalJson()).toBe('{"old":true}');
++  await observer.attach(second.page);
++  expect(await observer.finishFinalJson()).toBeUndefined();
++  second.request("reused");
++  second.response("reused");
++  await flush();
++  first.data("reused", rawFinal('{"PRIVATE-stale":true}') + done);
++  first.session.emit("Network.loadingFinished", { requestId: "reused" });
++  expect(observer.latestJsonCandidate()).toBeUndefined();
++  second.data("reused", rawFinal('{"current":true}') + done);
++  expect(await observer.finishFinalJson()).toBe('{"current":true}');
++  await observer.dispose();
++  expect(await observer.finishFinalJson()).toBeUndefined();
++});
++
++test("only the latest owned request supplies a candidate, never foreign frames or before-Send requests", async () => {
++  const owned = rawSession();
++  const observer = new ChatGptStreamDiagnostics(() => {}, { collectFinalJson: true });
++  await observer.attach(owned.page);
++  owned.request("before-send");
++  observer.begin();
++  owned.request("foreign", "other");
++  for (const id of ["before-send", "foreign"]) {
++    owned.response(id);
++    owned.data(id, rawFinal('{"PRIVATE-foreign":true}') + done);
++  }
++  expect(await observer.finishFinalJson()).toBeUndefined();
++  owned.request("first");
++  owned.response("first");
++  await flush();
++  owned.data("first", rawFinal('{"old":true}') + done);
++  expect(await observer.finishFinalJson()).toBe('{"old":true}');
++  owned.request("second");
++  expect(observer.latestJsonCandidate()).toBeUndefined();
++  owned.response("second");
++  await flush();
++  owned.data("second", rawFinal('{"new":true}') + done);
++  expect(await observer.finishFinalJson()).toBe('{"new":true}');
++  await observer.dispose();
++});
++
++test("HTTP errors, failed networks, incomplete frames and pending-buffer overflow never supply JSON", async () => {
++  for (const kind of ["http", "failed", "incomplete", "overflow"] as const) {
++    const buffered = Promise.withResolvers<{ bufferedData: string }>();
++    const owned = rawSession(buffered.promise);
++    const reports: any[] = [];
++    const observer = new ChatGptStreamDiagnostics(value => reports.push(value), { collectFinalJson: true });
++    await observer.attach(owned.page);
++    observer.begin();
++    owned.request("owned");
++    owned.response("owned", kind === "http" ? 500 : 200);
++    if (kind === "overflow") owned.data("owned", "PRIVATE-overflow".repeat(70_000));
++    buffered.resolve({ bufferedData: Buffer.from(rawFinal("{}") + done).toString("base64") });
++    await flush();
++    if (kind === "incomplete") owned.data("owned", "data: {");
++    if (kind === "failed") owned.session.emit("Network.loadingFailed", {
++      requestId: "owned", canceled: false, errorText: "net::ERR_CONNECTION_RESET",
++    });
++    expect(await observer.finishFinalJson()).toBeUndefined();
++    await observer.dispose();
++    expect(JSON.stringify(reports)).not.toContain("PRIVATE");
++  }
++});
++
++test("latestFinalText distinguishes ordinary prose and raw code fences from missing JSON source", async () => {
++  const owned = rawSession();
++  const reports: any[] = [];
++  const observer = new ChatGptStreamDiagnostics(value => reports.push(value), { collectFinalJson: true });
++  await observer.attach(owned.page);
++  for (const text of ["- PRIVATE-bullet", "```json\n{\"PRIVATE-fenced\":true}\n```", "```\n[1,2]\n```" ]) {
++    observer.begin();
++    expect(observer.latestFinalText()).toBeUndefined();
++    owned.request("owned");
++    owned.response("owned");
++    await flush();
++    owned.data("owned", rawFinal(text) + done);
++    expect(observer.latestFinalText()).toBe(text);
++    expect(observer.latestJsonCandidate()).toBeUndefined();
++    expect(await observer.finishFinalJson()).toBeUndefined();
++    owned.session.emit("Network.loadingFinished", { requestId: "owned" });
++    await flush();
++    expect(observer.latestFinalText()).toBe(text);
++  }
++  await observer.dispose();
++  expect(observer.latestFinalText()).toBeUndefined();
++  expect(JSON.stringify(reports)).not.toContain("PRIVATE");
++});
++
++test("terminal state is immutable while the initial CDP buffer drains", async () => {
++  const buffered = Promise.withResolvers<{ bufferedData: string }>();
++  const owned = rawSession(buffered.promise);
++  const reports: any[] = [];
++  const observer = new ChatGptStreamDiagnostics(value => reports.push(value), { collectFinalJson: true });
++  await observer.attach(owned.page);
++  observer.begin();
++  owned.request("owned");
++  owned.response("owned");
++  owned.session.emit("Network.loadingFailed", {
++    requestId: "owned", canceled: false, errorText: "net::ERR_CONNECTION_RESET",
++  });
++  owned.session.emit("Network.loadingFinished", { requestId: "owned" });
++  buffered.resolve({ bufferedData: Buffer.from(rawFinal("{}") + done).toString("base64") });
++  expect(await observer.finishFinalJson()).toBeUndefined();
++  await flush();
++  const lifecycle = reports.filter(report => report.terminal !== undefined && !report.phase);
++  expect(lifecycle).toHaveLength(1);
++  expect(lifecycle[0]).toMatchObject({ terminal: "failed", networkError: "net::ERR_CONNECTION_RESET" });
++  await observer.dispose();
++});
++
++test("data delivered after a terminal event cannot supply a missing DONE during CDP drain", async () => {
++  const buffered = Promise.withResolvers<{ bufferedData: string }>();
++  const owned = rawSession(buffered.promise);
++  const reports: any[] = [];
++  const observer = new ChatGptStreamDiagnostics(value => reports.push(value), { collectFinalJson: true });
++  await observer.attach(owned.page);
++  observer.begin();
++  owned.request("owned");
++  owned.response("owned");
++  owned.session.emit("Network.loadingFailed", { requestId: "owned", canceled: true, errorText: "net::ERR_ABORTED" });
++  owned.data("owned", done);
++  buffered.resolve({ bufferedData: Buffer.from(rawFinal("{}")).toString("base64") });
++  expect(await observer.finishFinalJson()).toBeUndefined();
++  await flush();
++  expect(reports.find(report => !report.phase)).toMatchObject({ terminal: "aborted", doneMarker: false });
++  await observer.dispose();
++});
++
++test("a failed stale attach cannot clear or detach the current page's raw capture", async () => {
++  const delayedTree = Promise.withResolvers<unknown>();
++  const first = rawSession();
++  let oldDetaches = 0;
++  first.session.send = async (method: string) => method === "Page.getFrameTree" ? delayedTree.promise : {};
++  first.session.detach = async () => { oldDetaches += 1; };
++  const current = rawSession();
++  let currentDetaches = 0;
++  current.session.detach = async () => { currentDetaches += 1; };
++  const observer = new ChatGptStreamDiagnostics(() => {}, { collectFinalJson: true });
++  const attachingOld = observer.attach(first.page);
++  await flush();
++  await observer.attach(current.page);
++  observer.begin();
++  current.request("owned");
++  current.response("owned");
++  await flush();
++  current.data("owned", rawFinal("{}") + done);
++  delayedTree.reject(new Error("PRIVATE-old-page-closed"));
++  await attachingOld;
++  expect(await observer.finishFinalJson()).toBe("{}");
++  expect(oldDetaches).toBe(1);
++  expect(currentDetaches).toBe(0);
++  await observer.dispose();
++  expect(currentDetaches).toBe(1);
++});
++
++test("finishFinalJson drains a CDP tail arriving after the DOM completion caller", async () => {
++  const owned = rawSession();
++  const observer = new ChatGptStreamDiagnostics(() => {}, { collectFinalJson: true });
++  await observer.attach(owned.page);
++  observer.begin();
++  owned.request("owned");
++  owned.response("owned");
++  await flush();
++  owned.data("owned", rawFinal('{"PRIVATE-tail":true}'));
++  let settled = false;
++  const finishing = observer.finishFinalJson().then(result => { settled = true; return result; });
++  await flush();
++  expect(settled).toBeFalse();
++  owned.data("owned", done);
++  expect(await finishing).toBe('{"PRIVATE-tail":true}');
++  await observer.dispose();
++});
++
++test("finishFinalJson also waits for the owned response before draining its buffered tail", async () => {
++  const owned = rawSession(Promise.resolve({ bufferedData: Buffer.from(rawFinal("{}") + done).toString("base64") }));
++  const observer = new ChatGptStreamDiagnostics(() => {}, { collectFinalJson: true });
++  await observer.attach(owned.page);
++  observer.begin();
++  owned.request("owned");
++  let settled = false;
++  const finishing = observer.finishFinalJson().then(result => { settled = true; return result; });
++  await flush();
++  expect(settled).toBeFalse();
++  owned.response("owned");
++  expect(await finishing).toBe("{}");
++  await observer.dispose();
++});
++
++test("a tail drain times out without inventing DONE and exports only safe missing reasons", async () => {
++  const owned = rawSession();
++  const reports: any[] = [];
++  const observer = new ChatGptStreamDiagnostics(value => reports.push(value), { collectFinalJson: true });
++  await observer.attach(owned.page);
++  observer.begin();
++  owned.request("PRIVATE-request-id");
++  owned.response("PRIVATE-request-id");
++  await flush();
++  owned.data("PRIVATE-request-id", rawFinal('{"PRIVATE-body":"秘密"}'));
++  const started = performance.now();
++  expect(await observer.finishFinalJson()).toBeUndefined();
++  expect(performance.now() - started).toBeGreaterThanOrEqual(1_900);
++  expect(performance.now() - started).toBeLessThan(3_500);
++  expect(reports).toHaveLength(1);
++  expect(reports[0]).toMatchObject({ phase: "final_json_rejected", reason: "drain_timeout",
++    finalJson: { reason: "missing_done", doneMarker: false, hasMessage: true, eligible: true,
++      successful: true, endTurn: true, textChars: 21, pendingChars: 0, pendingUtf8Bytes: 0 } });
++  await observer.dispose();
++  expect(reports.filter(report => !report.phase)).toHaveLength(1);
++  expect(JSON.stringify(reports)).not.toContain("PRIVATE");
++  expect(JSON.stringify(reports)).not.toContain("秘密");
++});
++
++test("begin, a new request and dispose immediately fence and wake a pending tail drain", async () => {
++  for (const action of ["begin", "request", "dispose"] as const) {
++    const buffered = Promise.withResolvers<{ bufferedData: string }>();
++    const owned = rawSession(buffered.promise);
++    const reports: any[] = [];
++    const observer = new ChatGptStreamDiagnostics(value => reports.push(value), { collectFinalJson: true });
++    await observer.attach(owned.page);
++    observer.begin();
++    owned.request("old");
++    owned.response("old");
++    const oldFinishes = [observer.finishFinalJson(), observer.finishFinalJson()];
++    if (action === "begin") observer.begin();
++    else if (action === "request") owned.request("new");
++    else await observer.dispose();
++    // Resolving the CDP command is deliberately deferred until both waits wake.
++    const results = await Promise.race([
++      Promise.all(oldFinishes),
++      new Promise<never>((_, reject) => {
++        const timer = setTimeout(() => reject(new Error("Tail drain did not wake")), 250);
++        void Promise.all(oldFinishes).finally(() => clearTimeout(timer));
++      }),
++    ]);
++    expect(results).toEqual([undefined, undefined]);
++    buffered.resolve({ bufferedData: Buffer.from(rawFinal('{"PRIVATE-stale":true}') + done).toString("base64") });
++    await flush();
++    expect(observer.latestJsonCandidate()).toBeUndefined();
++    expect(reports.filter(report => report.phase)).toHaveLength(0);
++    await observer.dispose();
++    expect(JSON.stringify(reports)).not.toContain("PRIVATE");
++  }
++});
++
++test("a terminal without DONE ends the tail drain immediately and records the collector reason", async () => {
++  const owned = rawSession();
++  const reports: any[] = [];
++  const observer = new ChatGptStreamDiagnostics(value => reports.push(value), { collectFinalJson: true });
++  await observer.attach(owned.page);
++  observer.begin();
++  owned.request("owned");
++  owned.response("owned");
++  await flush();
++  owned.data("owned", rawFinal("{}"));
++  const finishing = observer.finishFinalJson();
++  owned.session.emit("Network.loadingFinished", { requestId: "owned" });
++  expect(await finishing).toBeUndefined();
++  await flush();
++  expect(reports.filter(report => report.phase)).toMatchObject([
++    { phase: "final_json_rejected", reason: "missing_done", finalJson: { reason: "missing_done" } },
++  ]);
++  expect(reports.filter(report => !report.phase)).toHaveLength(1);
++  await observer.dispose();
++});
++
++test("observation errors and unsupported responses carry safe transport rejection reasons", async () => {
++  for (const kind of ["command", "mime", "http", "overflow"] as const) {
++    const buffered = Promise.withResolvers<{ bufferedData: string }>();
++    const owned = rawSession(buffered.promise);
++    const reports: any[] = [];
++    const observer = new ChatGptStreamDiagnostics(value => reports.push(value), { collectFinalJson: true });
++    await observer.attach(owned.page);
++    observer.begin();
++    owned.request("owned");
++    owned.response("owned", kind === "http" ? 500 : 200, kind === "mime" ? "PRIVATE-mime" : "text/event-stream");
++    if (kind === "command") buffered.reject(new Error("PRIVATE-CDP-URL-token"));
++    else {
++      if (kind === "overflow") owned.data("owned", "PRIVATE-overflow".repeat(70_000));
++      buffered.resolve({ bufferedData: Buffer.from(rawFinal("{}") + done).toString("base64") });
++    }
++    expect(await observer.finishFinalJson()).toBeUndefined();
++    expect(reports.find(report => report.phase)?.reason).toBe({ command: "stream_unavailable",
++      mime: "unsupported_mime_type", http: "http_error", overflow: "pending_buffer_overflow" }[kind]);
++    await observer.dispose();
++    expect(reports.filter(report => !report.phase)).toHaveLength(1);
++    expect(JSON.stringify(reports)).not.toContain("PRIVATE");
++  }
++});

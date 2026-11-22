@@ -199,7 +199,7 @@ import_prices
 升级安装脚本会重复下载 AppImage（约数百 MB），除非明确要升级，否则直接运行即可：
 
 ```sh
-# 已安装版本（当前 6.1.3）
+# 已安装版本（当前 6.1.19）
 ls ~/.local/lib/codex-web-gpt/          # 每个版本一个目录
 ls ~/.local/bin/codex-web-gpt           # 启动包装脚本
 
