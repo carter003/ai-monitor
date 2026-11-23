@@ -326,3 +326,29 @@ Linux 打包必须使用上游兼容 libnotify / 自有 AppImage 工具准备，
 新包基于 v6.1.19，patch SHA-256 为 `35edadc7761877137c886de702323e437dede9776543f789d0a9c255d7c6aa81`，目标 bundle 为 `9f66ce9d74c595500a2b361e663ad8c020c374f8c2ec21e2569d577b2cd8f7de`。全量核心 1316 pass / 2 skip / 0 fail，Launcher 447 pass / 1 skip / 0 fail，可迁移 Runtime、Linux AppImage ABI 与打包 Launcher smoke 通过。维护脚本 13 项、herdr-usage 142 项测试通过。已完成预置，status 为 `awaiting-user-restart`，当时仍运行首次最终包。
 
 2026-11-22 21:50（上海时间）用户重开 Launcher 后完成 finalize。实际运行 bundle、AppImage、Runtime 清单与入口凭据匹配。默认 helper 实测尾下划线 token 长度 37，实际 POST 逐字一致，嵌套 context、原始 JSON 和特殊字面字符通过，完成栅栏 revision 2。通过安装中的 bridge 执行 GPT-6 Pro/max 与原故障模型 GPT-5.6 Pro/max 两次 CLI 审查，均完成一次成功工具读取、找到一个已知缺陷，最终原始 JSON 可解析。两次安装后审查的 POST 采集均记录 complete；工具阶段结束后经 GET 交付的分支由此前源码实机与现场重放覆盖。最终状态为 `installed-and-verified`。
+
+### 11.5 Native2 调用参数的末字符转录错误（2026-11-22 23:21，上海时间）
+
+核对 w4:p4 的 ERP 审查、同回合 Broker 日志和浏览器缓存的服务端会话响应。注册与服务端 user 消息中的 token 逐字符相同（长度 37，摘要 `2a7183fd518f`）。两次 assistant 工具参数的摘要分别为 `b561e94a5b32` 和 `37d5348af1cb`，两个值各自仅在第 37 位异于签发值。Broker 两次拒绝，随后才结束回合。此次故障可定位至生成工具参数的复制步骤；这些记录没有提供模型内部选择具体字符的依据。
+
+Native2 的当前请求在唯一完整 token 后提供末四字符的独立逐字符核对信息。对于格式正确但未命中活动或已结束记录的 native claim，Broker 仅回显调用方自己提交的末四字符；参数与请求不同时提示重抄整个原值并重试一次，已完全一致时停止。该核对信息不参与认证，权限仍取决于签发的完整值、回合状态和完成栅栏。隔离 stdio MCP 回归用两种末字符错误尝试命令，两次均被拒；用完整原值后下游收到预期命令，测试验证了可恢复的边界。真实模型是否遵循纠错指令仍是模型行为。
+
+修复后的源码 bridge 连接运行中的 Launcher 与 Broker，隔离 Git 夹具的两次 GPT-6 Pro/max CLI 审查都返回了可解析的最终 review JSON 并找到了已知缺陷。第二次由真实 Broker 抽样签发与故障末字符相同的新 token（摘要 `038934e756ea`），两次 claim 均精确命中，两次工具执行成功。线上诊断沿用当前安装的 Broker；新增拒绝提示由新源码的隔离 stdio MCP 用例验证。实机通过记录属于成功复制路径。
+
+该次 v6.1.19 补丁摘要为 `03c085f961d881276281bc7d5c4c76e06a3229d3a7a9f2d69b433dfbbf4343c1`，新 bundle 为 `371e97f693093f090daeee175be89a33c3e57a9fb5761ab2bf1b91595e459c8f`。核心 1316 pass / 2 skip / 0 fail，Launcher 447 pass / 1 skip / 0 fail，两项打包 smoke 通过；维护测试清理退出进程时遇到 cmdline 变空的竞态，补查进程状态后连续三轮 13 项全过。已 stage，等待用户正常退出并重开 Launcher 后 finalize 与默认安装入口验收。
+
+2026-11-22 23:52（上海时间）重开后已完成 finalize。实际运行 bundle、安装凭据及默认 helper 文件摘要一致。实机 Native2 调用的 37 字符尾下划线 token 与嵌套 context 在 POST 中逐字一致，完成栅栏 revision 2，返回的原始 JSON 与流式文本一致。安装版 GPT-6 Pro/max CLI 审查在隔离夹具中完成 2 次成功命令读取，识别 1 项缺陷，原始 JSON 与 CLI 展示均通过，夹具源码保持原样。错参拒绝后重新提交的覆盖来自隔离 MCP 回归。状态为 `installed-and-verified`。
+
+### 11.6 Activity 临时分组收尾重绑时的字面包装识别错误（2026-11-23 13:42，上海时间）
+
+核对 `w4:p13`（模型 `chatgpt-web/gpt-6-sol`，浏览器诊断 `3987e388c4ff-9bf1ffae`）及同日 `c109e568c734`、`e5710d185154` 三个失败回合：Send 确认瞬间 ChatGPT 先挂载不含 `[data-user-message-bubble]` 的临时 Activity 分组（`18-send-accepted.json` 中 `turns.user = 0`），因此 `acceptedUserIdentity` 为空；模型通过 `TurnBroker` 执行完全部本地命令并流式输出完整最终总结后，ChatGPT 在收起 Activity、结束生成的瞬间（`stopButtonCount = 0`、`renderedCompletionActionCount = 6`）将临时分组切换为正式分组并挂回折叠的用户消息气泡（`turns.user = 1`）。
+
+现场只读检查该临时会话标签页 DOM 与外层组件属性确认：`insertLiteralTextIntoComposer` 插入的 `<p><br></p><pre><code>…</code></pre>` 被序列化为 mention 链接加 `&#x20;\n\n\n` 与四反引号代码块（内部 60,062 字符完整保留）；前端 `MarkdownRoot.rich-text-user-turn` 将其渲染为 `<p><a …>…Codex Native2</a><span> </span></p>`、同级 `<span data-markdown-copy="blank-lines">\n</span>` 及唯一 `<pre data-markdown-copy="code-block"><code data-markdown-copy-content="true">…</code></pre>`。旧 `readChatGptUserMessage` 的 `readLiteral` 要求所有 `SPAN` 均包含代码块或连接器，且不允许 mention 段落与 `PRE` 之间的单个 `blank-lines` 节点，导致展开“显示更多”后返回 `undefined`，触发 `reconcileAssistantTurnBinding` 抛出普通 `Error`，再被 `submittedTurnFailure` 包装为 `chatgpt_submitted_turn_failed`（`ChatGPT stopped responding after the task started...`）。
+
+`browser-user-message.ts` 现精确识别 mention `<p>` 内紧随连接器的可见纯空格 `<span>`（总计 1–2 个空格/`\u00a0`）以及 `rich` 容器下位于 mention `<p>` 与唯一 `PRE` 之间的单个 `<span data-markdown-copy="blank-lines">\n</span>`；继续拒绝前导/尾随 `blank-lines`、重复空行、无 mention 空行、段落外空白 `<span>`、非空白字符、多余代码块和错误连接器。`browser-turn-binding.test.ts` 新增真实渲染结构与“Activity 无初始气泡 → 收尾换 key 挂载折叠气泡并展开重绑”端到端回归；另补齐并行全量测试下 `browser-turn-binding.test.ts` 与 `delivery-timeout.test.ts` 受 Bun 1.4.0 `expect(...).rejects.toMatchObject` 同步符号化阻塞影响的超时预算，保留全部原断言。
+
+新包基于 `v6.1.19`（`8e9fac038dcd998bf23716df2b08379a15854ec9`），patch SHA-256 为 `d82aa743ea9d3db4c48f6e7112fbd8250483cece3500fa9eedceb0a04f3cab31`，目标 `bundleId` 为 `4343f6d3afc2a7e8a5a00bad75abcaa95eacd414b4615c175b4f7ff69122cf60`，AppImage SHA-256 为 `7c27ecade480c845427693930ed15e02517d6b3cf593ad81201008976d5f6480`。干净 `v6.1.19` 补丁检查、维护脚本 13 项测试、核心 **1317 pass / 2 skip / 0 fail**、Launcher **447 pass / 1 skip / 0 fail**、可迁移 Runtime smoke 与 Linux AppImage ABI/打包 smoke 全部通过。已执行 `stage` 预置，`status` 为 `awaiting-user-restart`（当前运行仍为 `371e97f6…595e459c8f`），等待用户正常退出并重开 Launcher 后执行 `finalize` 与实机验收。
+
+2026-11-23 15:50（上海时间）按用户明确指令，本会话执行 `systemctl --user restart codex-web-gpt`（当前 omp 通道不依赖该服务）。新 bundle 启动后 `status` 转为 `awaiting-finalize`，随后 `finalize` 成功：实际运行 bundleId、安装凭据、AppImage 与 Runtime 清单摘要一致，`matchesReceipt: true`。安装版默认 helper 实机调用中，37 字符尾下划线 token 与嵌套 context 在真实 POST 中逐字一致，原始 JSON、特殊字面字符与完成栅栏 revision 2 均通过；GPT-6 Pro/max CLI 审查完成 1 次成功命令读取、找到 1 项已知缺陷，原始 JSON 与 CLI 展示通过，夹具源码未改写。状态更新为 `installed-and-verified`，证据写入 `verification.json`。
+
+后续实机回归默认值已改为 GPT-6 Sol Instant（`low`），避免消耗 Pro 次数；`live-smoke.ts` 与 `review-smoke.mjs` 均在该档位重新通过，POST 逐字一致、原始 JSON 与 CLI 审查均正常，证据已覆盖 `verification.json` 中的安装后快照。仅当用户明确要求或显式设置 `CHATGPT_WEB_SMOKE_REASONING=max` / `CODEX_REVIEW_MODEL` 时才使用 Pro。

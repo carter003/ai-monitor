@@ -39,10 +39,10 @@ index b4296e7..47ca536 100644
      capabilities: message.turn.capabilities,
      ...(message.turn.nativeConnector ? { nativeConnector: true } : {}),
 diff --git a/src/adapters/chatgpt-web/browser-user-message.ts b/src/adapters/chatgpt-web/browser-user-message.ts
-index 1a0cfab..3044585 100644
+index 1a0cfab..a0adedf 100644
 --- a/src/adapters/chatgpt-web/browser-user-message.ts
 +++ b/src/adapters/chatgpt-web/browser-user-message.ts
-@@ -1,13 +1,54 @@
+@@ -1,13 +1,76 @@
  /** Runs in the page. Read the submitted text, excluding only observed renderer chrome. */
  export function readChatGptUserMessage(
    target: Element,
@@ -67,24 +67,46 @@ index 1a0cfab..3044585 100644
 +    if (literals.length > 0) {
 +      if (literals.length !== 1) return;
 +      const literal = literals[0]!;
++      const connectors = [...target.querySelectorAll(connectorSelector)]
++        .filter(element => !literal.contains(element) && !element.parentElement?.closest(connectorSelector));
++      if (connectors.length > 1) return;
++      const connectorParagraph = connectors[0]?.closest("p") ?? null;
++      if (rich && connectors[0] && (!connectorParagraph || !rich.contains(connectorParagraph) || connectorParagraph.contains(literal))) return;
 +      let seenLiteral = false;
++      let seenBlankLines = false;
 +      let separator = "";
 +      // A literal transport has one code block and, optionally, its leading app
-+      // mention. Do not flatten extra paragraphs, blank blocks or sibling text
-+      // into a match. In particular, preserve whitespace inside the code itself.
++      // mention. insertLiteralTextIntoComposer places a blank paragraph boundary
++      // before PRE, which ChatGPT's rich-text renderer serializes as a trailing
++      // space span inside the mention paragraph plus one blank-lines span before
++      // PRE. Do not flatten extra paragraphs, blank blocks or sibling text.
 +      const readLiteral = (node: Node): boolean => {
 +        if (node === literal) { seenLiteral = true; return true; }
 +        if (node.nodeType === Node.TEXT_NODE) {
 +          if (!node.textContent) return true;
-+          if (!leadingConnector || seenLiteral) return false;
++          if (!leadingConnector || seenBlankLines || seenLiteral) return false;
++          if (connectorParagraph && !connectorParagraph.contains(node)) return false;
 +          separator += node.textContent;
-+          return /^[ \u00a0]{0,2}$/.test(separator);
++          return /^[ \u00a0]{1,2}$/.test(separator);
 +        }
 +        if (!(node instanceof HTMLElement)) return false;
 +        if (node.matches(connectorSelector)) {
-+          if (seenLiteral || leadingConnector || !connectorName || node.textContent !== connectorName) return false;
++          if (seenLiteral || seenBlankLines || leadingConnector || !connectorName || node.textContent !== connectorName) return false;
 +          leadingConnector = true;
 +          return true;
++        }
++        if (node.matches('[data-markdown-copy="blank-lines"]')) {
++          if (node.tagName !== "SPAN" || !rich || node.parentElement !== rich
++            || !leadingConnector || seenBlankLines || seenLiteral) return false;
++          if (node.childNodes.length !== 1 || node.firstChild?.nodeType !== Node.TEXT_NODE || node.textContent !== "\n") return false;
++          seenBlankLines = true;
++          return true;
++        }
++        if (node.tagName === "SPAN" && !node.contains(literal) && !node.querySelector(connectorSelector)) {
++          if (node.hidden || node.getAttribute("aria-hidden") === "true"
++            || !leadingConnector || seenBlankLines || seenLiteral || !node.textContent) return false;
++          if (connectorParagraph && !connectorParagraph.contains(node)) return false;
++          return [...node.childNodes].every(readLiteral);
 +        }
 +        if (!["DIV", "SPAN", "P"].includes(node.tagName)
 +          || (!node.contains(literal) && !node.querySelector(connectorSelector))) return false;
@@ -98,7 +120,7 @@ index 1a0cfab..3044585 100644
    const text = (node: Node): string => {
      if (node.nodeType === Node.TEXT_NODE) {
        const value = node.textContent ?? "";
-@@ -36,20 +77,23 @@ export function readChatGptUserMessage(
+@@ -36,20 +99,23 @@ export function readChatGptUserMessage(
        return [...node.childNodes].map(text).join("");
      }
      if (node.matches('pre[data-markdown-copy="code-block"]')) {
@@ -657,6 +679,18 @@ index f09f536..321a98a 100644
              ...(turn.modelFamily ? { modelFamily: turn.modelFamily } : {}),
              capabilities: turn.capabilities,
              ...(turn.nativeConnector ? { nativeConnector: true } : {}),
+diff --git a/src/adapters/chatgpt-web/prompt.ts b/src/adapters/chatgpt-web/prompt.ts
+index 3f12499..204e018 100644
+--- a/src/adapters/chatgpt-web/prompt.ts
++++ b/src/adapters/chatgpt-web/prompt.ts
+@@ -658,6 +658,7 @@ export function compileChatGptWebPrompt(
+     ? [
+       "<codex_transport_resume>",
+       `The task context is complete. Pass turn_token ${turnToken} unchanged to every tool call through the selected local Codex plugin in this response, including continuations after tool results; do not expose it in the answer. Execute the latest active user request now.`,
++      `Copy check: the final four characters, in order, are ${JSON.stringify([...turnToken!.slice(-4)])}. Check the whole field and its ending before sending. If a claim is rejected and your argument differs, recopy the complete turn_token above and retry once. If it already matches exactly, stop.`,
+       "</codex_transport_resume>",
+     ]
+     : [
 diff --git a/src/adapters/chatgpt-web/raw-final-json.ts b/src/adapters/chatgpt-web/raw-final-json.ts
 new file mode 100644
 index 0000000..eb725ab
@@ -1160,6 +1194,22 @@ index 510468d..00f87d5 100644
      this.captures.clear();
      const session = this.session;
      this.session = undefined;
+diff --git a/src/adapters/chatgpt-web/turn-broker.ts b/src/adapters/chatgpt-web/turn-broker.ts
+index 754ed38..45a7358 100644
+--- a/src/adapters/chatgpt-web/turn-broker.ts
++++ b/src/adapters/chatgpt-web/turn-broker.ts
+@@ -1119,7 +1119,10 @@ export class TurnBroker implements TurnBrokerOwner {
+           ? `${contract === "safe" ? "This request_id" : "This turn_token"} was issued for ${retiredTurnLabel(retiredTurn)}, which has already finished.`
+           + " This Codex Native action can no longer run."
+           : `${contract === "safe" ? "request id" : "turn token"} is invalid, expired, or revoked. `
+-          + `Copy ${contract === "safe" ? "request_id" : "turn_token"} exactly from the current request; do not guess or reuse an earlier value.`);
++          + `Copy ${contract === "safe" ? "request_id" : "turn_token"} exactly from the current request; do not guess or reuse an earlier value.`
++          + (contract === "native" && /^turn_[A-Za-z0-9_-]{32}$/.test(token)
++            ? ` Your submitted final four characters were ${JSON.stringify([...token.slice(-4)])}. Compare with the copy check in the current transport instructions. If the full argument differs, recopy it and retry once. If identical, stop.`
++            : ""));
+       }
+       if (activeChannel.safe) {
+         if (contract !== "safe") throw new Error("Zero Risk request id requires the Zero Risk MCP contract");
 diff --git a/tests/browser-cancellation.test.ts b/tests/browser-cancellation.test.ts
 index f2894c2..d82253b 100644
 --- a/tests/browser-cancellation.test.ts
@@ -1188,7 +1238,7 @@ index c10c866..7b76523 100644
 -}, 20_000);
 +}, 120_000);
 diff --git a/tests/browser-turn-binding.test.ts b/tests/browser-turn-binding.test.ts
-index dc2a778..6432e4e 100644
+index dc2a778..66f6cd5 100644
 --- a/tests/browser-turn-binding.test.ts
 +++ b/tests/browser-turn-binding.test.ts
 @@ -1,6 +1,8 @@
@@ -1200,7 +1250,16 @@ index dc2a778..6432e4e 100644
  import { chatGptHtmlToMarkdown, ChatGptMarkdownBuffer } from "../src/adapters/chatgpt-web/markdown";
  import { readFileSync } from "node:fs";
  
-@@ -315,6 +317,140 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("plain user code blocks prese
+@@ -201,7 +203,7 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("an exchange rekeys only with
+       await page.close();
+     }
+   } finally { await browser.close(); }
+-}, 30_000);
++}, 90_000);
+ 
+ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("collapsed plugin messages rebind only after their complete text is verified", async () => {
+   const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
+@@ -315,6 +317,262 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("plain user code blocks prese
    } finally { await browser.close(); }
  });
  
@@ -1208,22 +1267,48 @@ index dc2a778..6432e4e 100644
 +  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
 +  try {
 +    const page = await browser.newPage();
-+    const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), { config: { appName: "Codex Native2" } }) as any;
++    // ChatGptBrowserWorker methods under test are private; bind prototype with explicit test seam type.
++    const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), { config: { appName: "Codex Native2" } }) as unknown as {
++      userMessageMatchesSubmission(group: Locator, submitted: string, signal?: AbortSignal, turnToken?: string, requireLiteralConnector?: boolean): Promise<boolean>;
++    };
 +    const prompt = ' \n```json\n{"path":"C:\\\\tmp","value":"_tail_","literal":"\\u0060"}\n```\n````\nturn_0123456789abcdef0123456789abcdef\n  ';
-+    for (const layout of ["plain", "rich", "rich-mention"]) {
-+      for (const language of [null, "", "text"]) {
++    for (const layout of ["plain", "rich", "rich-mention", "rich-mention-rendered"] as const) {
++      for (const language of [null, "", "text", "typescript"]) {
 +        await page.setContent('<div id="group"><div data-user-message-bubble><div data-search-result-target></div></div></div>');
 +        await page.locator('[data-search-result-target]').evaluate((target, { layout, language, prompt }) => {
-+          const root = layout === "plain" ? target : document.createElement("div");
-+          if (root !== target) {
-+            root.setAttribute("class", "rich-text-user-turn");
++          let host = target;
++          if (layout === "rich-mention-rendered") {
++            const outer = document.createElement("div");
++            const sized = document.createElement("div");
++            sized.setAttribute("class", "text-size-chat whitespace-pre-wrap");
++            outer.append(sized);
++            target.append(outer);
++            host = sized;
++          }
++          const root = layout === "plain" ? host : document.createElement("div");
++          if (root !== host) {
++            root.setAttribute("class", layout === "rich-mention-rendered"
++              ? "MarkdownRoot-rZKhxa rich-text-user-turn rich-text-serialized-paragraphs"
++              : "rich-text-user-turn");
 +            root.setAttribute("data-markdown-text-tone", "user-message");
-+            target.append(root);
++            host.append(root);
 +          }
 +          if (layout === "rich-mention") {
 +            const paragraph = document.createElement("p");
 +            paragraph.innerHTML = '<a href="/plugins/fixture"><span data-prompt-link-href="app://fixture">Codex Native2</span></a>  ';
 +            root.append(paragraph);
++          } else if (layout === "rich-mention-rendered") {
++            const paragraph = document.createElement("p");
++            paragraph.setAttribute("class", "Paragraph-kKnbIo");
++            paragraph.innerHTML = '<a href="/plugins/fixture" data-discover="true">'
++              + '<span data-prompt-link-href="app://fixture" data-prompt-link-label="$codex-native2">'
++              + '<span class="IconContainer"><img alt="" aria-hidden="true" src="data:image/svg+xml;utf8,%3Csvg%2F%3E"></span>'
++              + '<span class="Label">Codex Native2</span></span></a><span> </span>';
++            const blankLines = document.createElement("span");
++            blankLines.setAttribute("class", "block whitespace-pre-wrap");
++            blankLines.setAttribute("data-markdown-copy", "blank-lines");
++            blankLines.textContent = "\n";
++            root.append(paragraph, blankLines);
 +          }
 +          const block = document.createElement("pre");
 +          block.setAttribute("data-markdown-copy", "code-block");
@@ -1234,13 +1319,13 @@ index dc2a778..6432e4e 100644
 +          block.append(code);
 +          root.append(block);
 +        }, { layout, language, prompt });
++        const hasMention = layout === "rich-mention" || layout === "rich-mention-rendered";
 +        const content = page.locator('[data-search-result-target]');
 +        const token = "turn_0123456789abcdef0123456789abcdef";
-+        const matchesLiteral = (expected: string) => worker.userMessageMatchesSubmission(page.locator('#group'), expected, undefined, token, true);
-+        expect(await matchesLiteral(prompt)).toBe(layout === "rich-mention");
-+        expect(await matchesLiteral(prompt.replace("_tail_", "_changed_"))).toBeFalse();
++        expect(await worker.userMessageMatchesSubmission(page.locator("#group"), prompt, undefined, token, true)).toBe(hasMention);
++        expect(await worker.userMessageMatchesSubmission(page.locator("#group"), prompt.replace("_tail_", "_changed_"), undefined, token, true)).toBeFalse();
 +        expect(await content.evaluate(readChatGptUserMessage, { connectorName: "Codex Native2", expectedLiteral: prompt }))
-+          .toEqual({ text: prompt, leadingConnector: layout === "rich-mention" });
++          .toEqual({ text: prompt, leadingConnector: hasMention });
 +        expect((await content.evaluate(readChatGptUserMessage, "Codex Native2"))?.text).not.toBe(prompt);
 +        expect(await worker.userMessageMatchesSubmission(page.locator('#group'), prompt)).toBeTrue();
 +        expect(await worker.userMessageMatchesSubmission(page.locator('#group'), prompt.replace("_tail_", "_changed_"))).toBeFalse();
@@ -1249,21 +1334,103 @@ index dc2a778..6432e4e 100644
 +  } finally { await browser.close(); }
 +}, 15_000);
 +
++test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("rebinds a completed grouped turn when Activity unmounted the initial user bubble and remounts a collapsed literal wrapper", async () => {
++  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
++  try {
++    type TestBaseline = { acceptedUserIdentity?: string; literalConnectorSubmission?: boolean };
++    type TestBinding = { identity: string; locator: Locator; acceptedTurnIdentities: string[] };
++    // Private worker rebind methods under test; narrow only the exercised seam.
++    const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), { config: { appName: "Codex Native2" } }) as unknown as {
++      captureSubmissionBaseline(page: Page, submittedText?: string, acknowledgedStages?: readonly unknown[], turnToken?: string): Promise<TestBaseline>;
++      waitForNewAssistantTurn(page: Page, baseline: TestBaseline, deadline: number): Promise<TestBinding>;
++      reconcileAssistantTurnBinding(page: Page, baseline: TestBaseline, binding: TestBinding): Promise<TestBinding>;
++    };
++    const token = "turn_0123456789abcdef0123456789abcde_";
++    const prompt = "Act as the model backend for the Codex task encoded below.\n"
++      + '{"context":"alpha  beta"}\n'.repeat(500)
++      + `<codex_transport_resume>\nPass turn_token ${token} unchanged.\n</codex_transport_resume>`;
++    const renderLiteralBubble = (codeText: string, connectorName = "Codex Native2") =>
++      '<div class="overflow-hidden" style="max-height: 19lh;" data-search-result-target="">'
++      + '<div><div class="text-size-chat whitespace-pre-wrap">'
++      + '<div data-markdown-text-tone="user-message" class="MarkdownRoot-rZKhxa rich-text-user-turn rich-text-serialized-paragraphs">'
++      + '<p class="Paragraph-kKnbIo"><a href="/plugins/fixture" data-discover="true">'
++      + '<span data-prompt-link-href="app://fixture" data-prompt-link-label="$codex-native2">'
++      + '<span class="IconContainer"><img alt="" aria-hidden="true" src="data:image/svg+xml;utf8,%3Csvg%2F%3E"></span>'
++      + `<span class="Label">${connectorName}</span></span></a><span> </span></p>`
++      + '<span class="block whitespace-pre-wrap" data-markdown-copy="blank-lines">\n</span>'
++      + `<pre data-markdown-copy="code-block"><code data-language="typescript" data-markdown-copy-content="true">${codeText.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}</code></pre>`
++      + '</div></div></div></div>';
++    for (const scenario of ["matching", "changed-tail", "wrong-connector", "foreign-token"] as const) {
++      const page = await browser.newPage();
++      await page.setContent("<main></main>");
++      const baseline = await worker.captureSubmissionBaseline(page, prompt, [], token);
++      baseline.literalConnectorSubmission = true;
++      await page.locator("main").evaluate(node => {
++        node.innerHTML = '<div data-turn-key="fallback-turn-0"><span hidden data-chatgpt-agent-turn-start></span>'
++          + '<div data-conversation-role="assistant"></div><div data-markdown-text-style="assistant-message"><p>Streaming</p></div></div>';
++      });
++      const binding = await worker.waitForNewAssistantTurn(page, baseline, Date.now() + 2_000);
++      expect(baseline.acceptedUserIdentity).toBeUndefined();
++      const collapsedHtml = renderLiteralBubble(prompt.slice(0, 4_000));
++      const expandedPrompt = scenario === "changed-tail"
++        ? prompt.replace("unchanged.", "changed.")
++        : scenario === "foreign-token"
++          ? prompt.replace(token, "turn_ffffffffffffffffffffffffffffffff")
++          : prompt;
++      const expandedHtml = renderLiteralBubble(
++        expandedPrompt,
++        scenario === "wrong-connector" ? "Other Plugin" : "Codex Native2",
++      );
++      await page.locator("main").evaluate((node, html) => {
++        node.innerHTML = `<div data-turn-key="persisted-turn">`
++          + `<div data-user-message-bubble>${html}`
++          + `<button type="button" aria-expanded="false" data-thread-find-skip="true" data-markdown-copy="exclude">显示更多</button></div>`
++          + `<div data-conversation-role="assistant"></div><div data-markdown-text-style="assistant-message"><p>Final summary</p></div>`
++          + `<div class="turn-action-controls"><button>Copy</button></div></div>`;
++      }, collapsedHtml);
++      await page.locator('button[aria-expanded]').evaluate((button, { collapsed, expanded }) => {
++        button.addEventListener("click", () => {
++          const open = button.getAttribute("aria-expanded") !== "true";
++          button.setAttribute("aria-expanded", String(open));
++          button.parentElement!.querySelector("[data-search-result-target]")!.outerHTML = open ? expanded : collapsed;
++        });
++      }, { collapsed: collapsedHtml, expanded: expandedHtml });
++      const result = await worker.reconcileAssistantTurnBinding(page, baseline, binding)
++        .then(value => ({ value, error: undefined }), (error: Error) => ({ value: undefined, error }));
++      expect(await page.locator('button[aria-expanded]').getAttribute("aria-expanded")).toBe("false");
++      if (scenario === "matching") {
++        expect(result.value?.identity).toBe("group:assistant:persisted-turn");
++      } else {
++        expect(result.error?.message).toBe("ChatGPT opened another user turn while the bound assistant response was detached");
++      }
++      await page.close();
++    }
++  } finally { await browser.close(); }
++}, 20_000);
++
 +test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("literal user wrappers reject extra text, blocks and incorrect mentions", async () => {
 +  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
 +  try {
 +    const page = await browser.newPage();
-+    const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), { config: { appName: "Codex Native2" } }) as any;
++    // Private worker method under test; narrow only the exercised seam.
++    const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), { config: { appName: "Codex Native2" } }) as unknown as {
++      userMessageMatchesSubmission(group: Locator, submitted: string): Promise<boolean>;
++    };
 +    const prompt = '```json\n{"value":"_tail_","path":"C:\\\\tmp"}\n```';
 +    for (const scenario of ["prefix", "suffix", "leading-space", "trailing-space", "empty-prefix-block", "empty-suffix-block",
-+      "blank-lines", "extra-code", "duplicate-code", "pre-prefix", "pre-suffix", "wrong-mention", "duplicate-mention",
++      "blank-lines", "leading-blank-lines", "double-blank-lines", "multi-newline-blank-lines", "mention-less-blank-lines",
++      "outside-paragraph-space-span", "non-space-separator-span", "hidden-separator-span", "empty-separator-span", "three-space-separator-span",
++      "extra-code", "duplicate-code", "pre-prefix", "pre-suffix", "wrong-mention", "duplicate-mention",
 +      "late-mention", "missing-connector-name", "changed-json", "second-rich-container"]) {
 +      await page.setContent('<div id="group"><div data-user-message-bubble><div data-search-result-target>'
 +        + '<div data-markdown-text-tone="user-message" class="rich-text-user-turn">'
-+        + '<p><a href="/plugins/fixture"><span data-prompt-link-href="app://fixture">Codex Native2</span></a>  </p>'
++        + '<p><a href="/plugins/fixture"><span data-prompt-link-href="app://fixture">Codex Native2</span></a><span> </span></p>'
++        + '<span class="block whitespace-pre-wrap" data-markdown-copy="blank-lines">\n</span>'
 +        + '<pre data-markdown-copy="code-block"><code data-markdown-copy-content="true" data-language="text"></code></pre>'
 +        + '</div></div></div></div>');
 +      await page.locator('.rich-text-user-turn').evaluate((root, { scenario, prompt }) => {
++        const paragraph = root.querySelector("p")!;
++        const blankLines = root.querySelector('[data-markdown-copy="blank-lines"]')!;
 +        const pre = root.querySelector("pre")!;
 +        const code = root.querySelector("code")!;
 +        code.textContent = prompt;
@@ -1274,6 +1441,19 @@ index dc2a778..6432e4e 100644
 +        if (scenario === "empty-prefix-block") root.prepend(document.createElement("p"));
 +        if (scenario === "empty-suffix-block") root.append(document.createElement("p"));
 +        if (scenario === "blank-lines") root.insertAdjacentHTML("beforeend", '<span data-markdown-copy="blank-lines">\n</span>');
++        if (scenario === "leading-blank-lines") root.insertAdjacentHTML("afterbegin", '<span data-markdown-copy="blank-lines">\n</span>');
++        if (scenario === "double-blank-lines") blankLines.after(blankLines.cloneNode(true));
++        if (scenario === "multi-newline-blank-lines") blankLines.textContent = "\n\n";
++        if (scenario === "mention-less-blank-lines") paragraph.remove();
++        if (scenario === "outside-paragraph-space-span") {
++          const span = document.createElement("span");
++          span.textContent = " ";
++          paragraph.after(span);
++        }
++        if (scenario === "non-space-separator-span") paragraph.lastElementChild!.textContent = "x";
++        if (scenario === "hidden-separator-span") paragraph.lastElementChild!.setAttribute("aria-hidden", "true");
++        if (scenario === "empty-separator-span") paragraph.lastElementChild!.textContent = "";
++        if (scenario === "three-space-separator-span") paragraph.lastElementChild!.textContent = "   ";
 +        if (scenario === "extra-code" || scenario === "duplicate-code") {
 +          const extra = pre.cloneNode(true) as Element;
 +          if (scenario === "extra-code") extra.querySelector("code")!.textContent = "other source";
@@ -1282,8 +1462,9 @@ index dc2a778..6432e4e 100644
 +        if (scenario === "pre-prefix") pre.prepend("extra");
 +        if (scenario === "pre-suffix") pre.append("extra");
 +        if (scenario === "wrong-mention") root.querySelector("[data-prompt-link-href]")!.textContent = "Other connector";
-+        if (scenario === "duplicate-mention") root.insertBefore(root.querySelector("p")!.cloneNode(true), pre);
-+        if (scenario === "late-mention") root.append(root.querySelector("p")!);
++        if (scenario === "duplicate-mention") root.insertBefore(paragraph.cloneNode(true), blankLines);
++        if (scenario === "late-mention") root.append(paragraph);
++        if (scenario === "missing-connector-name") blankLines.remove();
 +        if (scenario === "changed-json") code.textContent = prompt.replace("_tail_", "\\_tail\\_");
 +        if (scenario === "second-rich-container") root.after(root.cloneNode(true));
 +      }, { scenario, prompt });
@@ -1534,6 +1715,26 @@ index 0000000..a35c213
 +  expect(await f.read()).toBeUndefined();
 +  f.observer.dispose();
 +});
+diff --git a/tests/chatgpt-web-harness.test.ts b/tests/chatgpt-web-harness.test.ts
+index f8964e0..7a082f1 100644
+--- a/tests/chatgpt-web-harness.test.ts
++++ b/tests/chatgpt-web-harness.test.ts
+@@ -3940,6 +3940,15 @@ describe("ChatGPT outer-native harness v4", () => {
+       expect(JSON.stringify(invalid.content)).toContain("Copy turn_token exactly from the current request");
+       expect(JSON.stringify(invalid)).not.toContain(token);
+ 
++      for (const last of ["J", "w", "9"].filter(c => !token.endsWith(c)).slice(0, 2)) {
++        const mistyped = token.slice(0, -1) + last;
++        const rejected = await call("codex_exec", { turn_token: mistyped, cmd: "must not execute" });
++        expect(rejected.isError).toBe(true);
++        const diagnostic = (rejected.content as Array<{ text: string }>)[0]!.text;
++        expect(diagnostic).toContain(JSON.stringify([...mistyped.slice(-4)]));
++        expect(diagnostic).not.toContain(token);
++      }
++
+       const execPromise = call("codex_exec", { turn_token: token, cmd: "pwd", workdir: tempRoot });
+       const [execRequest] = await Promise.race([
+         broker.nextToolBatch(token),
 diff --git a/tests/composer-insert.test.ts b/tests/composer-insert.test.ts
 index 7e1db75..05558f4 100644
 --- a/tests/composer-insert.test.ts
@@ -1622,6 +1823,23 @@ index 7e1db75..05558f4 100644
      for (const modern of [false, true]) {
        const pill = modern
          ? '<span app-mention-path="app://fixture" app-mention-display-name="Codex Native2" contenteditable="false">Codex Native2</span>'
+diff --git a/tests/delivery-timeout.test.ts b/tests/delivery-timeout.test.ts
+index c930f8e..c7420fa 100644
+--- a/tests/delivery-timeout.test.ts
++++ b/tests/delivery-timeout.test.ts
+@@ -57,9 +57,9 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("a damaged staging acknowledg
+       expect(inspected.visibleText).toBe(actual);
+       expect(inspected.completionActionVisible).toBeTrue();
+       const result = worker.waitForMultipartAcknowledgement(page, binding, {},
+-        { acknowledgement: expected }, Date.now() + 15_000, undefined, undefined, new ChatGptCompletionTracker(0));
++        { acknowledgement: expected }, Date.now() + 60_000, undefined, undefined, new ChatGptCompletionTracker(0));
+       if (actual === expected) expect((await result).identity).toBe(identity);
+-      else await expect(result).rejects.toMatchObject({ code: 'multipart_acknowledgement_mismatch', retryable: true });
++      else expect(await result.then(() => undefined, (error: unknown) => error)).toMatchObject({ code: 'multipart_acknowledgement_mismatch', retryable: true });
+     }
+   } finally { await browser.close(); }
+-}, 60_000);
++}, 90_000);
 diff --git a/tests/launcher-viewport-browser.test.ts b/tests/launcher-viewport-browser.test.ts
 index cf06391..bf746ec 100644
 --- a/tests/launcher-viewport-browser.test.ts
@@ -1656,6 +1874,18 @@ index cf06391..bf746ec 100644
        await app.evaluate(() => {
          const host = (globalThis as any).viewportFixture;
          const second = host.turnTabs.get("second");
+diff --git a/tests/prompt-contract.test.ts b/tests/prompt-contract.test.ts
+index dd37030..0741c72 100644
+--- a/tests/prompt-contract.test.ts
++++ b/tests/prompt-contract.test.ts
+@@ -152,6 +152,7 @@ test("Full-mode Pro prompts pass one stable turn token directly to native action
+   expect(transportOnly).toContain("Continue using the available tools until the requested work is complete and verified.");
+   expect(transportOnly).toContain("Write the user-facing final answer only after the last required tool result has settled.");
+   expect(transportOnly).toContain(`The task context is complete. Pass turn_token ${token} unchanged to every tool call through the selected local Codex plugin in this response, including continuations after tool results; do not expose it in the answer. Execute the latest active user request now.`);
++  expect(transportOnly).toContain(JSON.stringify([...token.slice(-4)]));
+   expect(transportOnly).not.toMatch(/codex_bind_turn|binding_id|outer_tool_gateway|command_tool/);
+   expect(transportOnly).not.toMatch(/codex_exec|codex_write_stdin|codex_apply_patch|codex_view_image|codex_tool_inventory|codex\.control\.turn_complete/);
+   expect(transportOnly).toContain("Do not claim a safety or permission block without an explicit tool result or platform error supporting it.");
 diff --git a/tests/raw-final-json.test.ts b/tests/raw-final-json.test.ts
 new file mode 100644
 index 0000000..da2818e

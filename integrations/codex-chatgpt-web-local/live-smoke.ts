@@ -15,6 +15,7 @@ const { ChatGptBrowserWorker, closeChatGptBrowserWorkers } = await load("src/ada
 const { callTurnBroker } = await load("src/adapters/chatgpt-web/turn-broker.ts");
 const { ChatGptExternalTurnProgress } = await load("src/adapters/chatgpt-web/turn-progress.ts");
 const { CHATGPT_WEB_MODEL_ID } = await load("src/adapters/chatgpt-web/model.ts");
+const smokeReasoning = process.env.CHATGPT_WEB_SMOKE_REASONING || "low";
 const { chromium } = await load("node_modules/playwright-core/index.mjs");
 const hash = (text: string) => createHash("sha256").update(text).digest("hex").slice(0, 12);
 const traceId = `localfix_${randomBytes(6).toString("hex")}`;
@@ -65,7 +66,7 @@ try {
     + `\`\`\`text\n<codex_context_json>\n${context}\n</codex_context_json>\n\`\`\`\n`
     + `<codex_transport_resume>\nPass turn_token ${token} unchanged to the inventory call. Never print the token.\n</codex_transport_resume>`;
   const chunks: string[] = [];
-  const result = await worker.run({ traceId, modelId: CHATGPT_WEB_MODEL_ID, modelFamily: "6", reasoning: "max",
+  const result = await worker.run({ traceId, modelId: CHATGPT_WEB_MODEL_ID, modelFamily: "6", reasoning: smokeReasoning,
     capabilities: { localToolsEnabled: true, solAvailable: config.solAvailable, extraHighAvailable: config.extraHighAvailable,
       proAvailable: config.proAvailable },
     prepare: async () => ({ text: prompt, images: [], turnToken: token, release() {} }),
@@ -89,8 +90,9 @@ try {
   if (completionRevision === undefined || completionRevision < 2) {
     throw new Error("No completed broker activity proved that Native2 accepted the issued token");
   }
-  const evidence = { at: new Date().toISOString(), traceId, issuedHash: hash(token), issuedLength: token.length,
-    issuedEndsUnderscore: true, registrationAttempts: attempts + 1, actualPost: observed[0],
+  const evidence = { at: new Date().toISOString(), traceId, model: "gpt-6-sol-instant", reasoning: smokeReasoning,
+    issuedHash: hash(token), issuedLength: token.length, issuedEndsUnderscore: true,
+    registrationAttempts: attempts + 1, actualPost: observed[0],
     rawJsonValid: true, literalValuePreserved: true, streamedTextMatches: true, completionRevision };
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
   await writeFile(join(stateDir, "live-smoke.json"), JSON.stringify(evidence, null, 2) + "\n", { mode: 0o600 });

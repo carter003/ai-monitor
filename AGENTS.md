@@ -6,17 +6,17 @@
 
 用户指定本仓库作为 Codex Web GPT 本地补丁和后续升级的维护入口。收到“升级 Codex Web GPT”“更新本地 Native2 修复”等请求时，按本节执行完整的准备、验证、打包、安装和健康检查；不要直接换成未携带补丁的官方包。
 
-**当前对话的通信也经过这个服务。用户已明确指出：关闭它会切断本 Agent 的通信。默认使用 `stage` 预置更新，保留当前进程和 Runtime，由用户正常退出 Launcher 并重开后，再执行 `finalize` 和实机验收。不要在对话内执行 stop、restart、drain、shutdown 或 kill 来切换这个通信服务；健康计数为零并不能证明当前对话可以安全中断。** GNOME 还可能把 Electron/daemon 移到独立 app scope，停止 systemd 入口不等于它们已经退出。不得通过反复停止、跨 scope 杀进程或直接覆盖正在运行的 Runtime 来绕过这一点。
+默认使用 `stage` 预置更新，保留当前进程和 Runtime；常规路径是由用户正常退出 Launcher 并重开后，再执行 `finalize` 和实机验收。**只有用户明确提出重启 `codex-web-gpt` 时，才可按其指令执行重启**（优先正常退出并重开；需要命令行时用 `systemctl --user restart codex-web-gpt`），并在重启后核对实际 bundleId、健康状态和文件哈希。无论当前 Agent 是否通过该服务通信，未经用户明确指令都不得自行 stop、restart、drain、shutdown 或 kill 来切换它；健康计数为零并不能证明可以安全中断。GNOME 还可能把 Electron/daemon 移到独立 app scope，仅停 systemd 入口不等于它们已经退出。不得通过反复停止、跨 scope 杀进程或直接覆盖正在运行的 Runtime 来绕过。
 
 ### 文件与职责
 
 - 维护入口：`integrations/codex-chatgpt-web-local/README.md`、`upgrade.mjs`。
 - 可迁移源码补丁：`integrations/codex-chatgpt-web-local/local-fixes.patch`。这是修复内容的持久来源，不能只在外部源码工作区保留修改。
-- 安装后的真实验收：同目录 `live-smoke.ts` 检查真实 POST 和原始 JSON，`review-smoke.mjs` 检查 Codex CLI 的 Pro/max 审查、实际工具读取和已知缺陷。调用方式见维护入口；两项都会真实调用模型。
+- 安装后的真实验收：同目录 `live-smoke.ts` 检查真实 POST 和原始 JSON，`review-smoke.mjs` 检查 Codex CLI 审查、实际工具读取和已知缺陷。两项默认使用 GPT-6 Sol Instant（`low`）；只有显式指定或用户要求时才用 GPT-6 Pro / GPT-5.6 Pro。调用方式见维护入口；两项都会真实调用模型。
 - 本机源码工作区：`~/.local/src/codex-chatgpt-web`；升级前检查分支和工作树，不得用 `reset --hard`、强制 checkout 等方式丢弃修改。
 - 根因与脱敏实验记录：`docs/codex-native2-turn-token-root-cause.md` 的 §10–§11，以及 `docs/codex-native2-turn-token-verified-evidence.json`。§1–§9 是被更正的初版调查，不应据此重新认定“编辑器已排除”或实施模糊 token 匹配。
 - 自定义安装包、来源和校验信息以升级脚本生成的安装凭据为准。检查具体路径的方式见维护入口的 `status` 命令；不能只凭 `/healthz` 的版本号认定补丁已经运行。
-- 当前修复的继续检查点：`integrations/codex-chatgpt-web-local/verification.json`。首次包已通过安装后的实机回归。后续异步 review 修复包已完成 finalize、默认安装 helper 的 Native2 实测和 GPT-6 Pro/max、GPT-5.6 Pro/max 两次 CLI 审查，状态为 `installed-and-verified`。收到状态查询或继续指令时先核对实际状态，不重复构建、不丢弃现有源码；后续升级完成后更新该快照和报告 §11。
+- 当前修复的继续检查点：`integrations/codex-chatgpt-web-local/verification.json`。首次包、异步 review 修复包及 Native2 参数末字符复制核对补丁（`bundleId=371e97f6…595e459c8f`，见报告 §11.1–§11.5）均已完成 `installed-and-verified`。最新版本 Activity 收尾换 key 字面包装重绑修复包（`patchSha256=d82aa743…04f3cab31`，`bundleId=4343f6d3…69122cf60`，见报告 §11.6）已完成全量验证、打包、`stage`、`finalize` 和两项实机回归，状态为 **`installed-and-verified`**。收到状态查询或继续指令时先核对实际状态，不重复构建、不丢弃现有源码。
 
 ### 必须保留的修复行为
 
@@ -33,7 +33,7 @@
 3. 使用目标版本 `packageManager` 锁定的 Bun 和两份 lockfile 安装依赖，运行相关回归、上游验证、Runtime/Launcher 构建与打包 smoke。浏览器回归应使用可用的 Chromium，不能把 skipped 当成已验证。Linux 打包必须运行上游兼容 libnotify / 自有 AppImage 工具准备，并通过最终安装包 ABI 检查；库缓存来源和摘要见维护入口与构建凭据，不能直接使用下载工具集中的旧库。
 4. 重新导出并检查 `local-fixes.patch`，使其可在干净的目标版本上应用。更新安装来源记录和维护说明。
 5. 用户已要求升级或安装时，完成检查后执行 `stage`，无需重复索取同一次任务的授权。它备份入口、配置和 Runtime，将下次启动入口指向不可变自定义 AppImage，不停止当前进程，也不替换正在运行的 Runtime。检查 `status` 应明确显示 `awaiting-user-restart`，不能把预置当作已生效。
-6. 告知用户需要正常“退出并重开” Launcher，原因是当前通信依赖该服务。收到用户恢复后的继续指令，先运行 `status`；观察到目标 bundle 后运行 `finalize`，核对运行进程、健康状态、完整文件哈希及 CLI 入口，再执行隔离的 Native2 调用和审查回归。若还是旧 bundle，不得自行停服务。上游目标版本必须保留“单实例锁先于 Runtime 安装”的顺序；迁移时核实这一条件。未激活时 `rollback` 仅取消预置；激活后的回滚另需遵守相同通信约束。
+6. 常规情况下告知用户需要正常“退出并重开” Launcher。**若用户明确要求由 Agent 重启 `codex-web-gpt`，可执行 `systemctl --user restart codex-web-gpt`**，但仍须在重启后核对 bundleId、健康状态和文件哈希；未经要求不得自行停服务。收到用户恢复后的继续指令，先运行 `status`；观察到目标 bundle 后运行 `finalize`，核对运行进程、健康状态、完整文件哈希及 CLI 入口，再执行隔离的 Native2 调用和审查回归。若还是旧 bundle 且用户未要求重启，不得自行停服务。上游目标版本必须保留“单实例锁先于 Runtime 安装”的顺序；迁移时核实这一条件。未激活时 `rollback` 仅取消预置；激活后的回滚另需遵守相同通信约束。实机回归默认使用 GPT-6 Sol Instant（`low`），避免消耗 Pro 次数；只有显式指定或用户要求时才用 Pro。
 7. 最终说明上游版本、补丁标识、验证结果、安装位置及回滚方式，并更新本节引用的维护记录。
 
 不要直接修改 `~/.codex-chatgpt-web/versions/*/app/`、绕过 Runtime 清单校验，或依赖指向旧版本的静态 CLI 软链接。官方内置更新不会自动携带本地源码补丁；后续升级继续通过本仓库维护入口执行。

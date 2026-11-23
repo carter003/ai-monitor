@@ -62,13 +62,20 @@ async function stopDetachedFixture(pidFile, entry) {
   catch (error) { if (error.code === 'ENOENT') return; throw error; }
   const { pid, startTime } = identity;
   assert.ok(Number.isSafeInteger(pid) && pid > 1 && pid !== process.pid && /^\d+$/.test(startTime), 'Invalid fixture PID identity');
+  async function sameLiveProcess() {
+    const stat = await fs.readFile(`/proc/${pid}/stat`, 'utf8');
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    return fields[19] === startTime && !['Z', 'X'].includes(fields[0]);
+  }
   async function running() {
     try {
-      const stat = await fs.readFile(`/proc/${pid}/stat`, 'utf8');
-      const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-      // Detached children can remain zombies until init reaps them.
-      if (fields[19] !== startTime || ['Z', 'X'].includes(fields[0])) return false;
+      if (!await sameLiveProcess()) return false;
       const argv = (await fs.readFile(`/proc/${pid}/cmdline`, 'utf8')).split('\0').filter(Boolean);
+      // A fixture exiting after SIGTERM can lose its cmdline between the two proc reads.
+      if (!argv.length) {
+        await new Promise(resolve => setTimeout(resolve, 20));
+        if (!await sameLiveProcess()) return false;
+      }
       assert.deepEqual(argv, [process.execPath, entry], 'Refusing to signal a non-fixture process');
       return true;
     } catch (error) { if (['ENOENT', 'ESRCH'].includes(error.code)) return false; throw error; }

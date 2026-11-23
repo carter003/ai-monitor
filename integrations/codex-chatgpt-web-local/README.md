@@ -8,9 +8,10 @@
 
 首次修复基于 [miuuyy/codex-chatgpt-web v6.1.19](https://github.com/miuuyy/codex-chatgpt-web/tree/v6.1.19)，提交 `8e9fac038dcd998bf23716df2b08379a15854ec9`。本机工作区为 `~/.local/src/codex-chatgpt-web`，本地分支 `carter/native2-literal-transport-v6.1.19`。升级时以目标 tag 和升级凭据为准，不能继续假定这个提交是最新版本。
 
-- 输入：`browser-worker.ts` 在 Native2 mention 后插入真正的语义代码块，使用 `textContent` 转义内容，并校验完整文本与节点。`browser-user-message.ts` 只解开与本回合输入完全一致的代码块包装；额外文本、错误 mention 和多块内容仍拒绝。
+- 输入：`browser-worker.ts` 在 Native2 mention 后插入 `<p><br></p>` 边界与真正的语义代码块，使用 `textContent` 转义内容，并校验完整文本与节点。`browser-user-message.ts` 精确匹配真实前端渲染出的 mention 段落内尾随空格 `<span>`、mention 段落与 `PRE` 之间的单个 `blank-lines` 节点及唯一代码块正文；前导/尾随空行、额外文本、错误 mention 和多块内容仍拒绝。
+- 工具参数：Native2 的请求末尾单列 token 的末四字符供复制核对。Broker 拒绝未知 token 后只提示调用方自己提交的末四字符；只有完整签发值可以进入原有鉴权流程。
 - 输出：`raw-final-json.ts` 只在内存中收集当前请求的 assistant/final 原始文本，要求完整成功结束、DONE 和合法 JSON。`stream-diagnostics.ts` 管理请求与页面归属；长工具回合的初始 POST 可能在工具执行期间结束，worker 还监听同一页主 frame 的会话 GET。它比对页面会话、已绑定 turn 的用户与最终消息 ID、服务端当前节点和最近用户祖先，验证 assistant/final 已成功结束并解析 JSON。只在 DOM 完成检查及 Broker 完成栅栏通过后输出原始文本。显式 schema 与完整 JSON 保留原始文本；普通回复以完整 JSON 开头再接解释时可走 Markdown 路径。
-- 回归：覆盖字面内容插入、焦点保护、消息归属、SSE 分帧与覆盖、页面重绑、网络失败、内容大小限制及原始 JSON 的引号、反斜杠和反引号。另修正上游测试设施：导航 fixture 的子视图退出清理；实际需约 74 秒的 18 组 Think 组合测试的 120 秒预算；离屏视口测试先完成缩放绘制，再显式检查按钮可见、可用和菜单已打开，避免依赖离屏动画帧。全部原断言保留。
+- 回归：覆盖字面内容插入、焦点保护、消息归属、Activity 临时分组无初始用户气泡时的收尾折叠气泡展开重绑、SSE 分帧与覆盖、页面重绑、网络失败、内容大小限制及原始 JSON 的引号、反斜杠和反引号。另修正上游测试设施：导航 fixture 的子视图退出清理；实际需约 74 秒的 18 组 Think 组合测试的 120 秒预算；并行浏览器回归下 Bun 1.4.0 `rejects.toMatchObject` 同步符号化阻塞对应的测试超时预算；离屏视口测试先完成缩放绘制，再显式检查按钮可见、可用和菜单已打开，避免依赖离屏动画帧。全部原断言保留。
 
 Broker token 校验、工具权限、任务归属与完成栅栏没有放宽。完整原始浏览器记录不纳入补丁。
 
@@ -140,18 +141,20 @@ node --test integrations/codex-chatgpt-web-local/upgrade.test.mjs
 <已安装runtime/bun> run integrations/codex-chatgpt-web-local/live-smoke.ts [sourcepath]
 ```
 
-例如使用 `~/.codex-chatgpt-web/versions/6.1.19-linux-x64/runtime/bun`；省略 sourcepath 时使用外部源码 checkout。它使用安装中的 helper，真实调用一次 Pro/max inventory（不执行 shell），检查真实尾 `_` token 的 POST 字节和 raw JSON，将脱敏证据写入 `.state/live-smoke.json`。**这一步会真实调用模型，在已授权的升级任务中执行；它不是单元测试。**
+例如使用 `~/.codex-chatgpt-web/versions/6.1.19-linux-x64/runtime/bun`；省略 sourcepath 时使用外部源码 checkout。它使用安装中的 helper，默认以 GPT-6 Sol Instant（`low`）真实调用一次 inventory（不执行 shell），检查真实尾 `_` token 的 POST 字节和 raw JSON，将脱敏证据写入 `.state/live-smoke.json`。需要 Pro 时用 `CHATGPT_WEB_SMOKE_REASONING=max` 显式指定。**这一步会真实调用模型，在已授权的升级任务中执行；它不是单元测试。**
 
 再运行真实 Codex CLI 审查回归：
 
 ```bash
 node integrations/codex-chatgpt-web-local/review-smoke.mjs
+# 默认 GPT-6 Sol Instant（low）；仅在用户明确要求时切到 Pro：
+# CODEX_REVIEW_MODEL='chatgpt-web/gpt-6-pro' CODEX_REVIEW_REASONING=max node integrations/codex-chatgpt-web-local/review-smoke.mjs
 ```
 
-脚本在权限受限的临时目录创建独立 Git 仓库，将乘法改成错误的加法，使用 Pro/max 发起只读 `review --uncommitted` 审查指令。它继承用户现有 CLI 权限配置，不强制覆盖沙箱或审批设置；在当前 CLI/bridge 组合中额外指定只读沙箱会触发可信环境缺少网络字段的独立兼容问题，该问题不属于本次序列化修复。
+脚本在权限受限的临时目录创建独立 Git 仓库，将乘法改成错误的加法，默认使用 GPT-6 Sol Instant（`low`）发起只读 `review --uncommitted` 审查指令；可用 `CODEX_REVIEW_MODEL` / `CODEX_REVIEW_REASONING` 显式指定 Pro。它继承用户现有 CLI 权限配置，不强制覆盖沙箱或审批设置；在当前 CLI/bridge 组合中额外指定只读沙箱会触发可信环境缺少网络字段的独立兼容问题，该问题不属于本次序列化修复。
 
 **Codex CLI 会把合法 review JSON 渲染成审查文本，`-o` 文件不应按 JSON 检验。** 脚本为这一次子进程建立临时 loopback 转发，保持 HTTP 字节和认证头不变，只在 bridge 的 `response.completed` 中读取最终 assistant 文本，验证原始 JSON 及 `overall_correctness` 字段；不记录请求或认证内容，也不改全局路由。验收还要求至少一次成功的命令读取、审查发现该文件的已知缺陷、CLI 正常展示审查，以及夹具源码未被审查过程改写。转发仅用于测试，关闭时不影响真实服务。
 
-脱敏结果写入 `.state/review-smoke.json`；失败时仅打印私有诊断目录，原始输出和 CLI 事件不进入仓库。可用 `CODEX_BIN` 指定 CLI 可执行文件。
+脱敏结果写入 `.state/review-smoke.json`；失败时仅打印私有诊断目录，原始输出和 CLI 事件不进入仓库。可用 `CODEX_BIN` 指定 CLI 可执行文件，`CODEX_REVIEW_MODEL` / `CODEX_REVIEW_REASONING` 指定模型与推理档位。
 
 **官方内置自动更新不会携带本地 patch，可能替换 AppImage、wrapper 或同版本 runtime。** 更新后必须运行 `status` 检查 bundleId 漂移；以后通过本流程迁移补丁、验证并重新安装。不要仅凭 `/healthz` 返回 6.1.19 就认定本地修复仍在运行。

@@ -1,21 +1,340 @@
 {
   "status": "installed-and-verified",
+  "activation": "installed",
   "upstreamVersion": "6.1.19",
   "upstreamCommit": "8e9fac038dcd998bf23716df2b08379a15854ec9",
-  "patchSha256": "35edadc7761877137c886de702323e437dede9776543f789d0a9c255d7c6aa81",
-  "lastObservedRunningBundleId": "9f66ce9d74c595500a2b361e663ad8c020c374f8c2ec21e2569d577b2cd8f7de",
+  "patchSha256": "d82aa743ea9d3db4c48f6e7112fbd8250483cece3500fa9eedceb0a04f3cab31",
+  "expectedBundleId": "4343f6d3afc2a7e8a5a00bad75abcaa95eacd414b4615c175b4f7ff69122cf60",
+  "lastObservedRunningBundleId": "4343f6d3afc2a7e8a5a00bad75abcaa95eacd414b4615c175b4f7ff69122cf60",
+  "artifactSha256": "7c27ecade480c845427693930ed15e02517d6b3cf593ad81201008976d5f6480",
+  "sourceVerifiedAt": "2026-11-23T07:14:21.399Z",
+  "builtAt": "2026-11-23T07:16:44.181Z",
+  "incident": {
+    "model": "chatgpt-web/gpt-6-sol",
+    "affectedDiagnosticTurns": 3,
+    "sendAcceptedUserCount": 0,
+    "completedEndUserCount": 1,
+    "innerPromptChars": 60062,
+    "renderedWrapperNodes": [
+      "P > A[app-mention] + SPAN(' ')",
+      "SPAN[data-markdown-copy='blank-lines']('\\n')",
+      "PRE[data-markdown-copy='code-block'] > CODE[data-markdown-copy-content='true']"
+    ],
+    "workerError": "ChatGPT opened another user turn while the bound assistant response was detached",
+    "maskedAdapterCode": "chatgpt_submitted_turn_failed"
+  },
+  "checks": {
+    "core": {
+      "pass": 1317,
+      "skip": 2,
+      "fail": 0
+    },
+    "launcher": {
+      "pass": 447,
+      "skip": 1,
+      "fail": 0
+    },
+    "maintenance": {
+      "pass": 13,
+      "fail": 0
+    },
+    "cleanTagPatchApplyCheck": true,
+    "relocatableRuntimeSmoke": true,
+    "packagedLauncherSmoke": true
+  },
+  "restartPolicy": "User fully quits and reopens Launcher; the agent must not stop its own communication service.",
+  "finalizedAt": "2026-11-23T07:50:44.855Z",
+  "validatedAt": "2026-11-23T08:01:22.818Z",
+  "installedHelperIdentity": {
+    "bundleId": "4343f6d3afc2a7e8a5a00bad75abcaa95eacd414b4615c175b4f7ff69122cf60",
+    "helperScriptSha256": "d0a3820bfa11e684cdc46938869d1968ba7d05b24edee6aecd9cb8ce3f7a10db",
+    "descriptorMatchesInstalledManifest": true,
+    "configuredHelperOverride": false
+  },
+  "installedHelperLiveSmoke": {
+    "at": "2026-11-23T08:00:42.602Z",
+    "traceId": "localfix_7548bc941fbf",
+    "model": "gpt-6-sol-instant",
+    "reasoning": "low",
+    "issuedHash": "551624722b14",
+    "issuedLength": 37,
+    "issuedEndsUnderscore": true,
+    "registrationAttempts": 71,
+    "actualPost": {
+      "model": "gpt-6",
+      "exactToken": true,
+      "contextEqual": true,
+      "tokenHash": "551624722b14",
+      "chars": 762
+    },
+    "rawJsonValid": true,
+    "literalValuePreserved": true,
+    "streamedTextMatches": true,
+    "completionRevision": 2
+  },
+  "codexReviewSmoke": {
+    "at": "2026-11-23T08:01:22.818Z",
+    "model": "chatgpt-web/gpt-6-sol-instant",
+    "reasoning": "low",
+    "rawJsonValid": true,
+    "knownDefectFound": true,
+    "completedCommands": 2,
+    "findings": 1,
+    "rawJsonSource": "bridge Responses response.completed before Codex review rendering",
+    "cliReviewRendered": true,
+    "fixtureSourceUnchanged": true,
+    "permissions": "inherited user configuration; read-only review instructions"
+  },
   "previousInstalled": {
     "status": "installed-and-verified",
+    "activation": "installed",
     "upstreamVersion": "6.1.19",
     "upstreamCommit": "8e9fac038dcd998bf23716df2b08379a15854ec9",
-    "patchSha256": "efbbe8cbdb7f58169d2421ba19f04297bdc878e482e108b0b4d6a39809170b2c",
-    "expectedBundleId": "a6f06bee9f0ad6d8cf4bd6aecfd41710430105a061df3e102b62a4874376c510",
-    "artifactSha256": "158b109f6cc21232f21f33c5ed23d8b2b43ca9a9bfb0070429f24268d2a957f2",
-    "lastObservedRunningBundleId": "a6f06bee9f0ad6d8cf4bd6aecfd41710430105a061df3e102b62a4874376c510",
-    "sourceVerifiedAt": "2026-11-22T08:24:03.293Z",
+    "patchSha256": "03c085f961d881276281bc7d5c4c76e06a3229d3a7a9f2d69b433dfbbf4343c1",
+    "expectedBundleId": "371e97f693093f090daeee175be89a33c3e57a9fb5761ab2bf1b91595e459c8f",
+    "lastObservedRunningBundleId": "371e97f693093f090daeee175be89a33c3e57a9fb5761ab2bf1b91595e459c8f",
+    "artifactSha256": "76eea91449366a4f082f6056767d83c5e7cb250af2f58e7efb0ba3c016da4081",
+    "sourceVerifiedAt": "2026-11-22T15:45:31.958Z",
+    "previousInstalled": {
+      "status": "installed-and-verified",
+      "upstreamVersion": "6.1.19",
+      "upstreamCommit": "8e9fac038dcd998bf23716df2b08379a15854ec9",
+      "patchSha256": "35edadc7761877137c886de702323e437dede9776543f789d0a9c255d7c6aa81",
+      "lastObservedRunningBundleId": "9f66ce9d74c595500a2b361e663ad8c020c374f8c2ec21e2569d577b2cd8f7de",
+      "previousInstalled": {
+        "status": "installed-and-verified",
+        "upstreamVersion": "6.1.19",
+        "upstreamCommit": "8e9fac038dcd998bf23716df2b08379a15854ec9",
+        "patchSha256": "efbbe8cbdb7f58169d2421ba19f04297bdc878e482e108b0b4d6a39809170b2c",
+        "expectedBundleId": "a6f06bee9f0ad6d8cf4bd6aecfd41710430105a061df3e102b62a4874376c510",
+        "artifactSha256": "158b109f6cc21232f21f33c5ed23d8b2b43ca9a9bfb0070429f24268d2a957f2",
+        "lastObservedRunningBundleId": "a6f06bee9f0ad6d8cf4bd6aecfd41710430105a061df3e102b62a4874376c510",
+        "sourceVerifiedAt": "2026-11-22T08:24:03.293Z",
+        "checks": {
+          "core": {
+            "pass": 1293,
+            "skip": 2,
+            "fail": 0
+          },
+          "launcher": {
+            "pass": 447,
+            "skip": 1,
+            "fail": 0
+          },
+          "maintenance": {
+            "pass": 9,
+            "skip": 0,
+            "fail": 0
+          },
+          "skips": "Upstream macOS/Windows-only checks on Linux",
+          "relocatableRuntimeSmoke": true,
+          "packagedLauncherSmoke": true
+        },
+        "linuxLibnotify": {
+          "source": "existing official v6.1.19 AppImage",
+          "artifactSha256": "23473a9156147282b3e516e8210c386a43d41f556be674e8b62285832880180c",
+          "libraryVersion": "0.8.7",
+          "librarySha256": "fe960926dd4681a35a3ebb9b730cd29d2a50763519fa37a5f86a5ca5698c8ae4",
+          "license": "LGPL-2.1 (present in runtime LICENSES)"
+        },
+        "liveSourceHelper": {
+          "kind": "compiled-source-helper override on the existing Launcher, before final package activation",
+          "at": "2026-11-22T08:12:33.767Z",
+          "traceId": "localfix_7b876889d042",
+          "issuedHash": "03bbae912a9c",
+          "issuedLength": 37,
+          "issuedEndsUnderscore": true,
+          "registrationAttempts": 77,
+          "actualPost": {
+            "model": "gpt-6-pro",
+            "exactToken": true,
+            "contextEqual": true,
+            "tokenHash": "03bbae912a9c",
+            "chars": 762
+          },
+          "rawJsonValid": true,
+          "literalValuePreserved": true,
+          "streamedTextMatches": true,
+          "completionRevision": 2
+        },
+        "installedHelperLiveSmoke": {
+          "kind": "default installed helper",
+          "at": "2026-11-22T08:46:31.309Z",
+          "traceId": "localfix_47402431f702",
+          "issuedHash": "faf028e5f102",
+          "issuedLength": 37,
+          "issuedEndsUnderscore": true,
+          "registrationAttempts": 17,
+          "actualPost": {
+            "model": "gpt-6-pro",
+            "exactToken": true,
+            "contextEqual": true,
+            "tokenHash": "faf028e5f102",
+            "chars": 762
+          },
+          "rawJsonValid": true,
+          "literalValuePreserved": true,
+          "streamedTextMatches": true,
+          "completionRevision": 2
+        },
+        "codexReviewSmoke": {
+          "at": "2026-11-22T08:58:31.371Z",
+          "model": "chatgpt-web/gpt-6-pro",
+          "reasoning": "max",
+          "rawJsonValid": true,
+          "knownDefectFound": true,
+          "completedCommands": 2,
+          "findings": 1,
+          "rawJsonSource": "bridge Responses response.completed before Codex review rendering",
+          "cliReviewRendered": true,
+          "fixtureSourceUnchanged": true,
+          "permissions": "inherited user configuration; read-only review instructions"
+        },
+        "activation": "installed",
+        "restartPolicy": "User fully quits and reopens Launcher; the agent must not stop its own communication service.",
+        "finalizedAt": "2026-11-22T08:44:43.575Z",
+        "installedHelperIdentity": {
+          "bundleId": "a6f06bee9f0ad6d8cf4bd6aecfd41710430105a061df3e102b62a4874376c510",
+          "helperScriptSha256": "005845d63f6b12062a73a0409e51f7eee92f3f5d47c386a6de3e039b910a406b",
+          "descriptorMatchesInstalledManifest": true,
+          "configuredHelperOverride": false
+        },
+        "validatedAt": "2026-11-22T09:00:06.923963+00:00",
+        "knownValidationLimitation": "Extra read-only/workspace-write CLI sandbox overrides hit a separate trusted-network-context compatibility error; regression inherits existing user permissions and verifies read-only review behavior."
+      },
+      "incident": {
+        "reviewFindings": 5,
+        "rawFinalUtf8Bytes": 4644,
+        "rawFinalSha256": "d5b0046a2c202790b8e9205bea96697e6d17d60571bd456900f3ce043c3b6924",
+        "initialPostEndedAtTool": true,
+        "finalSource": "same-page conversation GET",
+        "originalDomReplayMatched": true,
+        "foreignUserRejected": true
+      },
+      "liveSourceHelper": {
+        "at": "2026-11-22T13:08:55.947Z",
+        "traceId": "localfix_6d945e25046d",
+        "issuedHash": "7a5dc524e29f",
+        "issuedLength": 37,
+        "issuedEndsUnderscore": true,
+        "registrationAttempts": 20,
+        "actualPost": {
+          "model": "gpt-6-pro",
+          "exactToken": true,
+          "contextEqual": true,
+          "tokenHash": "7a5dc524e29f",
+          "chars": 762
+        },
+        "rawJsonValid": true,
+        "literalValuePreserved": true,
+        "streamedTextMatches": true,
+        "completionRevision": 4
+      },
+      "sourceCliReviewSmoke": {
+        "at": "2026-11-22T13:12:35.463Z",
+        "model": "chatgpt-web/gpt-5.6-pro",
+        "reasoning": "max",
+        "rawJsonValid": true,
+        "knownDefectFound": true,
+        "completedCommands": 1,
+        "findings": 1,
+        "rawJsonSource": "bridge Responses response.completed before Codex review rendering",
+        "cliReviewRendered": true,
+        "fixtureSourceUnchanged": true,
+        "permissions": "inherited user configuration; read-only review instructions"
+      },
+      "maintenanceTests": 13,
+      "herdrUsageTests": 142,
+      "restartPolicy": "User fully quits and reopens Launcher; the agent must not stop its own communication service.",
+      "activation": "installed",
+      "expectedBundleId": "9f66ce9d74c595500a2b361e663ad8c020c374f8c2ec21e2569d577b2cd8f7de",
+      "artifactSha256": "871557558b5add9885334d1b344d0959dc308068f16494e6935b5b929e49d3a5",
+      "sourceVerifiedAt": "2026-11-22T13:25:05.370Z",
+      "checks": {
+        "core": {
+          "pass": 1316,
+          "skip": 2,
+          "fail": 0
+        },
+        "launcher": {
+          "pass": 447,
+          "skip": 1,
+          "fail": 0
+        },
+        "relocatableRuntimeSmoke": true,
+        "packagedLauncherSmoke": true
+      },
+      "finalizedAt": "2026-11-22T13:50:42.032Z",
+      "validatedAt": "2026-11-22T13:53:24.514061+00:00",
+      "installedHelperIdentity": {
+        "bundleId": "9f66ce9d74c595500a2b361e663ad8c020c374f8c2ec21e2569d577b2cd8f7de",
+        "helperScriptSha256": "3f8fa134192a7663c176f4a652257f7d2297dbc609df9e92d60849200b8394fe",
+        "descriptorMatchesInstalledManifest": true,
+        "configuredHelperOverride": false
+      },
+      "installedHelperLiveSmoke": {
+        "at": "2026-11-22T13:51:09.040Z",
+        "traceId": "localfix_36f201e0a4e2",
+        "issuedHash": "5913c5707123",
+        "issuedLength": 37,
+        "issuedEndsUnderscore": true,
+        "registrationAttempts": 8,
+        "actualPost": {
+          "model": "gpt-6-pro",
+          "exactToken": true,
+          "contextEqual": true,
+          "tokenHash": "5913c5707123",
+          "chars": 762
+        },
+        "rawJsonValid": true,
+        "literalValuePreserved": true,
+        "streamedTextMatches": true,
+        "completionRevision": 2
+      },
+      "codexReviewSmoke": {
+        "at": "2026-11-22T13:51:58.871Z",
+        "model": "chatgpt-web/gpt-6-pro",
+        "reasoning": "max",
+        "rawJsonValid": true,
+        "knownDefectFound": true,
+        "completedCommands": 1,
+        "findings": 1,
+        "rawJsonSource": "bridge Responses response.completed before Codex review rendering",
+        "cliReviewRendered": true,
+        "fixtureSourceUnchanged": true,
+        "permissions": "inherited user configuration; read-only review instructions"
+      },
+      "installedOriginalModelReviewSmoke": {
+        "at": "2026-11-22T13:52:51.147Z",
+        "model": "chatgpt-web/gpt-5.6-pro",
+        "reasoning": "max",
+        "rawJsonValid": true,
+        "knownDefectFound": true,
+        "completedCommands": 1,
+        "findings": 1,
+        "rawJsonSource": "bridge Responses response.completed before Codex review rendering",
+        "cliReviewRendered": true,
+        "fixtureSourceUnchanged": true,
+        "permissions": "inherited user configuration; read-only review instructions"
+      }
+    },
+    "incident": {
+      "issuedTokenMatchesServerUserMessage": true,
+      "length": 37,
+      "differingPositionsOneBased": [
+        [
+          37
+        ],
+        [
+          37
+        ]
+      ],
+      "rejectedClaims": 2,
+      "retiredAfterRejections": true
+    },
     "checks": {
       "core": {
-        "pass": 1293,
+        "pass": 1316,
         "skip": 2,
         "fail": 0
       },
@@ -25,63 +344,30 @@
         "fail": 0
       },
       "maintenance": {
-        "pass": 9,
-        "skip": 0,
-        "fail": 0
+        "pass": 13,
+        "fail": 0,
+        "consecutiveSuccessfulRuns": 3
       },
-      "skips": "Upstream macOS/Windows-only checks on Linux",
-      "relocatableRuntimeSmoke": true,
-      "packagedLauncherSmoke": true
+      "isolatedMcpRejectsTwoMistypedTails": true,
+      "copyCheckAlphabetAndLayoutCases": 192,
+      "packagedLauncherSmoke": true,
+      "relocatableRuntimeSmoke": true
     },
-    "linuxLibnotify": {
-      "source": "existing official v6.1.19 AppImage",
-      "artifactSha256": "23473a9156147282b3e516e8210c386a43d41f556be674e8b62285832880180c",
-      "libraryVersion": "0.8.7",
-      "librarySha256": "fe960926dd4681a35a3ebb9b730cd29d2a50763519fa37a5f86a5ca5698c8ae4",
-      "license": "LGPL-2.1 (present in runtime LICENSES)"
-    },
-    "liveSourceHelper": {
-      "kind": "compiled-source-helper override on the existing Launcher, before final package activation",
-      "at": "2026-11-22T08:12:33.767Z",
-      "traceId": "localfix_7b876889d042",
-      "issuedHash": "03bbae912a9c",
-      "issuedLength": 37,
-      "issuedEndsUnderscore": true,
-      "registrationAttempts": 77,
-      "actualPost": {
-        "model": "gpt-6-pro",
-        "exactToken": true,
-        "contextEqual": true,
-        "tokenHash": "03bbae912a9c",
-        "chars": 762
-      },
+    "sourceCliReviewSmoke": {
+      "at": "2026-11-22T15:35:31.722Z",
+      "model": "chatgpt-web/gpt-6-pro",
+      "reasoning": "max",
       "rawJsonValid": true,
-      "literalValuePreserved": true,
-      "streamedTextMatches": true,
-      "completionRevision": 2
+      "knownDefectFound": true,
+      "completedCommands": 1,
+      "findings": 1,
+      "rawJsonSource": "bridge Responses response.completed before Codex review rendering",
+      "cliReviewRendered": true,
+      "fixtureSourceUnchanged": true,
+      "permissions": "inherited user configuration; read-only review instructions"
     },
-    "installedHelperLiveSmoke": {
-      "kind": "default installed helper",
-      "at": "2026-11-22T08:46:31.309Z",
-      "traceId": "localfix_47402431f702",
-      "issuedHash": "faf028e5f102",
-      "issuedLength": 37,
-      "issuedEndsUnderscore": true,
-      "registrationAttempts": 17,
-      "actualPost": {
-        "model": "gpt-6-pro",
-        "exactToken": true,
-        "contextEqual": true,
-        "tokenHash": "faf028e5f102",
-        "chars": 762
-      },
-      "rawJsonValid": true,
-      "literalValuePreserved": true,
-      "streamedTextMatches": true,
-      "completionRevision": 2
-    },
-    "codexReviewSmoke": {
-      "at": "2026-11-22T08:58:31.371Z",
+    "sourceCliSameFinalCharacterReviewSmoke": {
+      "at": "2026-11-22T15:37:39.174Z",
       "model": "chatgpt-web/gpt-6-pro",
       "reasoning": "max",
       "rawJsonValid": true,
@@ -93,131 +379,46 @@
       "fixtureSourceUnchanged": true,
       "permissions": "inherited user configuration; read-only review instructions"
     },
-    "activation": "installed",
     "restartPolicy": "User fully quits and reopens Launcher; the agent must not stop its own communication service.",
-    "finalizedAt": "2026-11-22T08:44:43.575Z",
+    "finalizedAt": "2026-11-22T15:52:36.335Z",
+    "validatedAt": "2026-11-22T15:54:16.890319+00:00",
     "installedHelperIdentity": {
-      "bundleId": "a6f06bee9f0ad6d8cf4bd6aecfd41710430105a061df3e102b62a4874376c510",
-      "helperScriptSha256": "005845d63f6b12062a73a0409e51f7eee92f3f5d47c386a6de3e039b910a406b",
+      "bundleId": "371e97f693093f090daeee175be89a33c3e57a9fb5761ab2bf1b91595e459c8f",
+      "helperScriptSha256": "3f8fa134192a7663c176f4a652257f7d2297dbc609df9e92d60849200b8394fe",
       "descriptorMatchesInstalledManifest": true,
       "configuredHelperOverride": false
     },
-    "validatedAt": "2026-11-22T09:00:06.923963+00:00",
-    "knownValidationLimitation": "Extra read-only/workspace-write CLI sandbox overrides hit a separate trusted-network-context compatibility error; regression inherits existing user permissions and verifies read-only review behavior."
-  },
-  "incident": {
-    "reviewFindings": 5,
-    "rawFinalUtf8Bytes": 4644,
-    "rawFinalSha256": "d5b0046a2c202790b8e9205bea96697e6d17d60571bd456900f3ce043c3b6924",
-    "initialPostEndedAtTool": true,
-    "finalSource": "same-page conversation GET",
-    "originalDomReplayMatched": true,
-    "foreignUserRejected": true
-  },
-  "liveSourceHelper": {
-    "at": "2026-11-22T13:08:55.947Z",
-    "traceId": "localfix_6d945e25046d",
-    "issuedHash": "7a5dc524e29f",
-    "issuedLength": 37,
-    "issuedEndsUnderscore": true,
-    "registrationAttempts": 20,
-    "actualPost": {
-      "model": "gpt-6-pro",
-      "exactToken": true,
-      "contextEqual": true,
-      "tokenHash": "7a5dc524e29f",
-      "chars": 762
+    "installedHelperLiveSmoke": {
+      "at": "2026-11-22T15:52:59.963Z",
+      "traceId": "localfix_fa7bf39943ce",
+      "issuedHash": "67ce277b9c15",
+      "issuedLength": 37,
+      "issuedEndsUnderscore": true,
+      "registrationAttempts": 2,
+      "actualPost": {
+        "model": "gpt-6-pro",
+        "exactToken": true,
+        "contextEqual": true,
+        "tokenHash": "67ce277b9c15",
+        "chars": 762
+      },
+      "rawJsonValid": true,
+      "literalValuePreserved": true,
+      "streamedTextMatches": true,
+      "completionRevision": 2
     },
-    "rawJsonValid": true,
-    "literalValuePreserved": true,
-    "streamedTextMatches": true,
-    "completionRevision": 4
-  },
-  "sourceCliReviewSmoke": {
-    "at": "2026-11-22T13:12:35.463Z",
-    "model": "chatgpt-web/gpt-5.6-pro",
-    "reasoning": "max",
-    "rawJsonValid": true,
-    "knownDefectFound": true,
-    "completedCommands": 1,
-    "findings": 1,
-    "rawJsonSource": "bridge Responses response.completed before Codex review rendering",
-    "cliReviewRendered": true,
-    "fixtureSourceUnchanged": true,
-    "permissions": "inherited user configuration; read-only review instructions"
-  },
-  "maintenanceTests": 13,
-  "herdrUsageTests": 142,
-  "restartPolicy": "User fully quits and reopens Launcher; the agent must not stop its own communication service.",
-  "activation": "installed",
-  "expectedBundleId": "9f66ce9d74c595500a2b361e663ad8c020c374f8c2ec21e2569d577b2cd8f7de",
-  "artifactSha256": "871557558b5add9885334d1b344d0959dc308068f16494e6935b5b929e49d3a5",
-  "sourceVerifiedAt": "2026-11-22T13:25:05.370Z",
-  "checks": {
-    "core": {
-      "pass": 1316,
-      "skip": 2,
-      "fail": 0
-    },
-    "launcher": {
-      "pass": 447,
-      "skip": 1,
-      "fail": 0
-    },
-    "relocatableRuntimeSmoke": true,
-    "packagedLauncherSmoke": true
-  },
-  "finalizedAt": "2026-11-22T13:50:42.032Z",
-  "validatedAt": "2026-11-22T13:53:24.514061+00:00",
-  "installedHelperIdentity": {
-    "bundleId": "9f66ce9d74c595500a2b361e663ad8c020c374f8c2ec21e2569d577b2cd8f7de",
-    "helperScriptSha256": "3f8fa134192a7663c176f4a652257f7d2297dbc609df9e92d60849200b8394fe",
-    "descriptorMatchesInstalledManifest": true,
-    "configuredHelperOverride": false
-  },
-  "installedHelperLiveSmoke": {
-    "at": "2026-11-22T13:51:09.040Z",
-    "traceId": "localfix_36f201e0a4e2",
-    "issuedHash": "5913c5707123",
-    "issuedLength": 37,
-    "issuedEndsUnderscore": true,
-    "registrationAttempts": 8,
-    "actualPost": {
-      "model": "gpt-6-pro",
-      "exactToken": true,
-      "contextEqual": true,
-      "tokenHash": "5913c5707123",
-      "chars": 762
-    },
-    "rawJsonValid": true,
-    "literalValuePreserved": true,
-    "streamedTextMatches": true,
-    "completionRevision": 2
-  },
-  "codexReviewSmoke": {
-    "at": "2026-11-22T13:51:58.871Z",
-    "model": "chatgpt-web/gpt-6-pro",
-    "reasoning": "max",
-    "rawJsonValid": true,
-    "knownDefectFound": true,
-    "completedCommands": 1,
-    "findings": 1,
-    "rawJsonSource": "bridge Responses response.completed before Codex review rendering",
-    "cliReviewRendered": true,
-    "fixtureSourceUnchanged": true,
-    "permissions": "inherited user configuration; read-only review instructions"
-  },
-  "installedOriginalModelReviewSmoke": {
-    "at": "2026-11-22T13:52:51.147Z",
-    "model": "chatgpt-web/gpt-5.6-pro",
-    "reasoning": "max",
-    "rawJsonValid": true,
-    "knownDefectFound": true,
-    "completedCommands": 1,
-    "findings": 1,
-    "rawJsonSource": "bridge Responses response.completed before Codex review rendering",
-    "cliReviewRendered": true,
-    "fixtureSourceUnchanged": true,
-    "permissions": "inherited user configuration; read-only review instructions"
+    "codexReviewSmoke": {
+      "at": "2026-11-22T15:53:46.595Z",
+      "model": "chatgpt-web/gpt-6-pro",
+      "reasoning": "max",
+      "rawJsonValid": true,
+      "knownDefectFound": true,
+      "completedCommands": 2,
+      "findings": 1,
+      "rawJsonSource": "bridge Responses response.completed before Codex review rendering",
+      "cliReviewRendered": true,
+      "fixtureSourceUnchanged": true,
+      "permissions": "inherited user configuration; read-only review instructions"
+    }
   }
 }

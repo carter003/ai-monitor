@@ -28,7 +28,8 @@ await git(['-c', 'user.name=Local Regression', '-c', 'user.email=local-regressio
   'commit', '-qm', 'review fixture baseline']);
 await writeFile(join(fixture, 'price.mjs'), 'export const total = (price, quantity) => price + quantity;\n');
 const output = join(fixture, 'result.txt');
-const model = 'chatgpt-web/gpt-6-pro';
+const model = process.env.CODEX_REVIEW_MODEL || 'chatgpt-web/gpt-6-sol-instant';
+const reasoning = process.env.CODEX_REVIEW_REASONING || (/pro/i.test(model) ? 'max' : 'low');
 const core = process.env.CODEX_CHATGPT_WEB_HOME || join(process.env.HOME, '.codex-chatgpt-web');
 const config = JSON.parse(await readFile(join(core, 'config.json'), 'utf8'));
 if (!['127.0.0.1', 'localhost', '::1'].includes(config.host)) throw new Error('Expected a loopback bridge');
@@ -101,7 +102,7 @@ const child = spawn(process.env.CODEX_BIN || 'codex', [
   // commands; this regression does not change global or per-process permissions.
   'exec', '--json', '-C', fixture, '-o', output, '-m', model,
   '-c', `openai_base_url=${JSON.stringify(proxyBase)}`,
-  '-c', `review_model="${model}"`, '-c', 'model_reasoning_effort="max"', '-c', 'features.hooks=false',
+  '-c', `review_model="${model}"`, '-c', `model_reasoning_effort="${reasoning}"`, '-c', 'features.hooks=false',
   'review', '--uncommitted',
 ], { shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
 const lines = createInterface({ input: child.stdout });
@@ -146,7 +147,7 @@ if (!Array.isArray(result.findings) || !result.findings.some(finding =>
 if (await readFile(join(fixture, 'price.mjs'), 'utf8') !== 'export const total = (price, quantity) => price + quantity;\n') {
   throw new Error(`Review unexpectedly changed the fixture; diagnostics: ${fixture}`);
 }
-const evidence = { at: new Date().toISOString(), model, reasoning: 'max', rawJsonValid: true,
+const evidence = { at: new Date().toISOString(), model, reasoning, rawJsonValid: true,
   knownDefectFound: true, completedCommands, findings: result.findings.length,
   rawJsonSource: 'bridge Responses response.completed before Codex review rendering',
   cliReviewRendered: true, fixtureSourceUnchanged: true,
