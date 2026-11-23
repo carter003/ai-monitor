@@ -1,6 +1,6 @@
 # OMP 原生认证与 opencode-go session 粘性
 
-OMP 19.1.0 的认证、额度报告、reserve、block、rotation 和 429 恢复继续使用原生 AuthStorage。
+OMP 19.1.1 的认证、额度报告、reserve、block、rotation 和 429 恢复继续使用原生 AuthStorage。
 扩展只补齐 opencode-go API Key 的 session 粘性，不固定 Antigravity credential、不执行跨
 provider fallback，也不覆盖原生 `health.model`。
 
@@ -25,7 +25,7 @@ credential ID 作为 `herdr-api-key-sticky-v1` custom entry 写入所属 session
 选择写入器，不能复用最后激活的扩展 API。`session_branch` 会重新绑定新 session 的写入器，
 只恢复该 ID 自己的记录，不复制父 session 的 pin。恢复同一子 session 会替换写入器，旧实例退出不会移除新实例。
 
-OMP 19.1.0 的 `/reset` 与 `/fresh` 会生成不同于日志 session ID 的内部 provider routing ID。
+OMP 19.1.1 的 `/reset` 与 `/fresh` 会生成不同于日志 session ID 的内部 provider routing ID。
 公开 ExtensionContext 和请求事件没有提供这一映射，因此这些请求仍可在进程内保持粘性，
 但对应 pin 无法可靠写入所属日志，也不能承诺跨进程恢复或 collector 的精确账户归因。
 不从请求 payload 的 `prompt_cache_key` 猜测映射；修复需要上游公开有效 routing ID 或认证 hook。
@@ -35,7 +35,7 @@ OMP 19.1.0 的 `/reset` 与 `/fresh` 会生成不同于日志 session ID 的内�
 `store-replaced` release、清理旧存储的选择缓存。新存储即使复用相同 credential ID，也会
 重新记录 pin；旧存储尚未完成的异步调用不会覆盖新存储的观察状态。
 
-OMP 19.1.0 仍然只写 API key 的 session affinity，API-key 选择路径（`CredentialSelector.selectApiKey`）
+OMP 19.1.1 仍然只写 API key 的 session affinity，API-key 选择路径（`CredentialSelector.selectApiKey`）
 不读这份 affinity；只有 OAuth 路径（`resolveOAuth`）读。因此本地路由补丁依旧必要，继续位于公开的
 `keys.getWithCredential`、`sessions.release` 和 reset boundary 接口，不修改 Bun runtime。
 普通 request 不再因额度样本刷新或排序分数变化而换号。
@@ -74,7 +74,7 @@ credential ID 捕获（peer 重排行不再错位）。本扩展的粘性 pin �
 generator 管理。
 
 ## OMP 升级
-路由器不依赖 bundle 字节偏移或 minified 私有方法名，只依赖 OMP 19.1.0 的：
+路由器不依赖 bundle 字节偏移或 minified 私有方法名，只依赖 OMP 19.1.1 的：
 
 
 - `keys.getWithCredential`、`keys.source`、`sessions.release`、`sessions.isRestricted`、`sessions.permits`、`limits.markReached`、`limits.rotate`；
@@ -102,6 +102,53 @@ sibling 恢复，随后返回 `switched: false`——此时账号没变，按旧
 ```bash
 npm run herdr:tps:test
 ```
+
+### 19.1.1
+
+upstream [`v19.1.0...v19.1.1`](https://github.com/can1357/oh-my-pi/compare/v19.1.0...v19.1.1)
+
+官方 release 日期：v19.1.1 2026-11-23 05:37 UTC（github-actions 发布，release commit `31ffee5` / `31ffee513f27a01bba7d4dfbe12bae239cdc646a`，can1357 GPG 签名验证，key ID `78CE190854FB4A0A`；build `20261123-053756-31ffee5`，05:40:11 UTC 发布），单版本 patch 升级，改动涵盖 `@oh-my-pi/pi-agent-core`、`pi-ai`、`browser-relay`、`pi-catalog`、`pi-coding-agent`、`pi-natives`、`snapcompact`、`omp-stats`、`pi-tui`（GitHub compare API 报 ahead_by=575、files 返回 300 为分页上限）。**无 auth 选号、`rotation.ts`、`TokenRateMeter` 公开契约变更**；对 v19.1.0 与 v19.1.1 的原始源文件逐字节比对确认 `packages/ai/src/auth/{rotation,select,affinity,blocks,store,types}.ts`（SHA 前缀 `d2f62ebe3fd6`、`3cd2b4adebc3`、`e97ab4af31fd`、`de2dc342dce6`、`03433554292b`、`68d943a8aa47`）、`auth-storage.ts`（`72925d1f0569`）、`provider-session-state.ts`（`962bcfd88a91`）、`packages/coding-agent/src/utils/token-rate.ts`（`717cbc17d539`）、`session/session-context.ts`（`e45553203ae7`）、`extensibility/shared-events.ts`（`a6dfc322170f`）全部 SAME。唯一相关的变化是 `session/session-manager.ts` 新增 `sameTreePosition()` / `treePosition()` / `getTreePosition()` 与 `AgentSession` 的 tree 状态段支持，未触及 `getSessionId`、`getBranch`、`appendResetBoundary`、`appendCustomEntry` 或消息事件契约。
+
+- **模型适配、推理网关与结构化输出**：
+  - **Auth Gateway / 模型发现**：`omp auth-gateway` 新增 `GET /v1/pi/models`，把 catalog（额度、thinking level、定价）交给 pi-native 客户端；`transport: pi-native` 的 provider 现在列出 gateway 运行时发现的模型（例如新 Codex 模型），gateway 无法路由的模型被隐藏，无需在 `models.yml` 声明；新增 `@oh-my-pi/pi-catalog/discovery/pi-native` 与 `piNativeModelManagerOptions()`，以及 `getUpstreamPin()` / `routedModelsAreEqual()` 区分聚合同模型的上游；Z.AI 自动发现 GLM Coding Plan key 可用模型，GitHub Copilot 仅列账号可选模型；
+  - **选号、轮换与凭据恢复**：Devin 选号优先有剩余日/周额度的 login、其次 on-demand 余额，跳过无容量账号，并记录 email / user ID / organization 供 `omp usage` 与 `auth.accountPolicies` 区分组织（存量 login 需重新登录）；402 billing error 按 usage limit 处理以触发换号与模型回退；provider usage-endpoint 探测结果跨进程持久化；stall 的请求按 timeout 分类以自动回退；`agent.db` 损坏时尽量恢复可读凭据并保持 disabled 凭据为 disabled；
+  - **结构化输出 / 推理**：strict tool schema 转换不再把可接受任意字段的对象误收紧成空对象（裸 object schema 回退非 strict）；修复 OpenAI/Codex 对 MCP schema 未转义字符的请求失败；thinking-loop 守卫不再把长 Markdown 表格或 JSON 记录当成最终答案重复重试；Portkey/认证网关下的 Gemini `thought_signature` 与 openai-completions 路径的 `function.thought_signature` 得以保留；OpenRouter 未计费的加密 reasoning 停止改报底层错误；speech-only / transcription-only 模型归类为 TTS / STT；`AssistantMessage.requestId` 从 Anthropic `request-id` 响应头记录，便于定位拒绝请求；
+  - **图像预算与定价**：Devin 其余按量计费的 Gemini 图像模型统一按官方 1,089 tokens/图记账；Cursor 的 GPT-5.6 Sol/Terra/Luna 在输入超过 272K 时输出按 1.5× 计费；Devin 同档 Fast lane 与长上下文价格修正；GPT-6.1 Terra 关闭 thinking 改发 `none` effort；GPT-6.2+ Responses 模型在剪枝后保留 reasoning context；Z.AI / Bedrock Kimi K3.1 等 effort 选项修正。
+
+- **任务规划、工具审批与子代理控制**：
+  - **审批、Prewalk 与恢复**：本版未改审批三态、Prewalk 或 `/seance` 的行为；相关改动是模型配置一致性：startup thinking 从选中 scope 初始化、model scopes 遵循 `modelProviderOrder`、模型切换/循环/恢复/plan mode/metadata 刷新后保持 thinking level、模型顺序、enabled-model 白名单和上游 pinned route 一致，plan 恢复回退到 pre-plan model，`--plan` 不再吞掉后面的 CLI flag；`ask` 对 fieldset 中不同 name 的 radio 不再把预选项和用户选择一起提交；
+  - **子代理与任务控制**：`wait()` 接受显示出来的 subagent ID（含 `agent://id` 形式），仍拒绝其它 session 的 handle；被父代理停止的子代理记录 stopped-by-parent；`/tan` fork 不再因 assignment 仍 blocked 而提前结束 idle wait；丢弃 interrupt 回复时保留排队 follow-up，修复 TTSR 中断后无法继续；`/wt` 运行新 worktree 的 `post-checkout` hook、在 TUI 显示进度并加载 hook 创建的 skills/commands（hook 失败保留 worktree 并告警）；collab prompt 启动的会话自动生成标题；
+  - **todo 与工具控制**：新增 `pi.registerTodoBackend()` 与 `todo.backend`，扩展可把完整 todo 镜像到外部存储并从 `/settings` → Tools → Todos 选择；`computer.takeover` 取代 `computer.backgroundFallback`，提供 `fallback` / `foreground` / `always` 三种前台接管模式，默认行为不变。
+
+- **工具链、LSP 与系统性能优化**：
+  - **检索、LSP 与读取**：修复 `grep()`、`glob()`、`fuzzyFind()`、`astGrep()`、`astEdit()` 和递归 shell search 在多 CPU 机器上偶发挂起，以及相关取消/超时竞态导致的崩溃或 use-after-free；`grep()` 带 match limit 时目录遍历失败改为拒绝而非返回不完整结果；Linux LSP 文件监听自适应 inotify 上限，避免拖垮其它 watcher 与系统服务；shell 前置 `cd` 支持 glob、brace 与具名用户 home 展开；`read` 在 speculative execution 与 `beforeToolCall` 钩子开启时读取图像/非文本文件不再挂起；`format-on-write` 与 symlink 编辑的快照、预览和 journal 修复；
+  - **原生与构建安全**：二进制补丁现在拒绝应用到与补丁基线版本不匹配的目标文件（本扩展不直接调用该 API）；修复从 Bun 缓存安装或交叉构建 extract 的 native addon 加载；选择性 commit 对 binary、非文本、超大和 Git LFS 文件保留草稿内容与 clean-filter 结果，并避免覆盖 draft 之后被改动的文件；Windows 空 stdin 管道上的 in-process 工具中止/超时不再阻塞等待；移除源码 checkout 加载跨 release addon 的启动告警；
+  - **内存与进程回收**：prompt perturbation pool 仅在请求真正启用改写时加载，降低 idle 内存；embedded relay extension 延迟到安装时才进堆；RPC shutdown 等待 MCP host teardown 后才退出，避免 MCP 子进程残留；provider error 日志补充 request ID。
+
+- **TUI 终端与排版显示**：
+  - **状态与滚动**：active-turn 状态行按 0.1 秒平滑刷新，`time_spent` 在 spinner 帧间保持新鲜；`/usage` 活动日历刷新失败时保留历史并标记未同步；ask 表单中超长问题下的 SVG 不再闪烁或每帧重新栅格化；启动期扩展通知不再被后续通知或 MCP 启动状态覆盖；ask 长问题与 browser scrolling 参数校验给出可操作的签名说明；
+  - **SIXEL / SVG / 路径单元**：Tern 与 TUI 分机运行或缺少 Tern 共享目录时，图像和其它路径文件不再误报不可用；Kitty 键盘协议下 NumLock 关闭时的数字键盘导航修复，必要时把小键盘键临时映射为 caret control；Wayland 截图等待 screen-share picker 到调用 deadline；
+  - **选择器与状态段**：`Alt+P` 快速模型选择器纳入 session 启动后新增的目录模型（`--models` / `enabledModels` 限制下同样生效），后台刷新过期 catalog；在已选中的模型行重复按 Enter 不再移除 role；新增可选 `tree` 状态段，显示 rewind 或分支后 session 在会话树中的位置，Tern 点击打开 `/tree`（本扩展已观察 `session_tree` 事件，无需改动）；`/omfg` 保存规则后关闭面板并显示路径（上游移除 `OmfgPanelComponent.markSaved` 与 `saved` 状态，本扩展不调用）。
+
+上游 breaking changes 影响评估：v19.1.1 唯一的 breaking 是 pi-coding-agent 的原生 shell Rust API 把 indexed 变量从 `Vec` 改为 `IndexedArray`，构造 `VarValue::Indexed` 需改用 `items.into()`。本仓库的 Rust crates（`ai-monitor`、`herdr-usage`）不依赖 OMP 的 native shell Rust API，代码中无 `VarValue` / `IndexedArray` 引用；`computer.backgroundFallback` → `computer.takeover`、`OmfgPanelComponent.markSaved` 移除同样没有调用点。认证选号、rotation 返回结构与 `TokenRateMeter` 算法源文件逐字节相同，包装层（`lib/omp-api-key-observer.mjs`、`omp-extension.mjs`、`omp-with-tps.mjs`）无需修改；daemon 共享与 live-daemon 保护经 dry-run 和契约测试确认仍工作。
+
+bundle 接口出现次数 19.1.0 → 19.1.1（`grep -ao` 对两份二进制分别计数）：
+`getWithCredential` 12 → 12、`markReached` 10 → 10、`onGeneration` 14 → 14、`appendResetBoundary` 3 → 3、
+`appendEntry` 19 → 19、`session_shutdown` 9 → 10、`session_start` 10 → 10、`message_update` 45 → 41、
+`message_end` 70 → 68、`TokenRateMeter` 2 → 2、`willContinue` 16 → 16、`awaitingAsyncWork` 7 → 7。
+9 个符号零变动；`session_shutdown` +1 与 `message_update` -4、`message_end` -2 属于 bundle 内部调用点增删（Magic Edit、compaction 回退、标题生成与 tree 状态段重构），不是事件定义删除：`shared-events.ts` 与 `session-context.ts` 源文件逐字节未变，本机契约测试仍覆盖 `session_start` / `session_tree` / `message_update` / `message_end` / `session_shutdown` 的投递与订阅，160/160 通过；`TokenRateMeter` 仍为 2 次且上游算法未变。无 upstream breaking changes 影响包装层。
+
+实机验证与增量补丁升级（旧 `omp-linux-x64` SHA256
+`be2b45c437b623e15c29b1f8c98aacb842f92118196454b5e9eed884359e9a01`，体积 304097456 bytes / 304.1 MB / 290.0 MiB，
+`--version` → `omp/19.1.0`）：
+
+- 本次升级命中 Stencil 增量二进制补丁机制：`.runtime/omp update --check` 报 `19.1.0` → `19.1.1`，`update` 自动下载针对 `19.1.0` 的增量补丁 `omp-linux-x64.patch`（输出 `Downloading patch from 19.1.0 (76.5MB)…`，manifest 实测 80209966 bytes / 80.21 MB / 76.49 MiB，相比目标完整二进制 301050032 bytes / 301.05 MB / 287.10 MiB 仅占 26.64%，节省约 73.36% 带宽）；补丁文件 SHA256 `c81a385b76daff14fee8f19c63fbdc772e7112250984aa42ecc6215aae19e3a5`、`from_sha256` 与旧二进制一致；通过原生 `applyBinaryPatch`（HDiffPatch + zstd）就地应用并校验生成目标二进制 sha256 `04e9490f9394da6d6804474cc2e41eb3d18f8e26215df4b34bdd4ad4c0d8a401`（输出 `Patched and verified sha256:…` 与 `sha256sum` 实测一致）后原子替换，输出 `✔ Updated to 19.1.1 at …/.runtime/omp`；
+- 经 `omp --version` 与 `omp-with-tps.mjs --version` 双重核对，分别输出 `omp/19.1.1` 与 `19.1.1`，版本一致且与目标匹配，复查 `update --check` 报 `✔ Already up to date`；
+- `npm run herdr:tps:test`：160 passed、0 fail（含本机 19.1.1 的原生认证与事件契约检查）；
+  `cargo test --offline --locked`：ai-monitor 174 passed（169+1+4，1 ignored）、herdr-usage 142 passed（114+25+3），0 failed；
+  `npm run herdr:tps:install -- --dry-run`：config、shell、links 均已就绪；
+  `share-omp-daemons.mjs --dry-run` → `status: already-shared`；本次升级 4 个文件的 `git diff --check` 通过（仓库中用户已有的
+  `integrations/codex-chatgpt-web-local/local-fixes.patch:1572` trailing whitespace 为预先存在的改动，未触碰）。
 
 ### 19.1.0
 
