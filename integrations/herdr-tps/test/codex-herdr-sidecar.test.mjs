@@ -35,6 +35,7 @@ test('proc parsing tolerates parentheses and nearest batch Codex blocks outer TU
 test('detached sidecar switches sessions, ignores stale end and exits with host', { timeout: 15000 }, async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'herdr-sidecar-'));
   const socket = path.join(root, 'daemon.sock'), messages = [];
+  let holdClear = false, releaseClear;
   const server = net.createServer(client => {
     let input = '';
     client.on('data', chunk => {
@@ -42,7 +43,11 @@ test('detached sidecar switches sessions, ignores stale end and exits with host'
       if (!input.includes('\n')) return;
       const request = JSON.parse(input.slice(0, input.indexOf('\n')));
       messages.push(request.params);
-      client.end(JSON.stringify({ id: request.id, result: {} }) + '\n');
+      const reply = () => client.end(JSON.stringify({ id: request.id, result: {} }) + '\n');
+      if (holdClear && request.params.source === 'herdr:tps' && request.params.tokens?.tps === null) {
+        holdClear = false;
+        releaseClear = reply;
+      } else reply();
     });
   });
   await new Promise(resolve => server.listen(socket, resolve));
@@ -86,7 +91,16 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   await until(() => messages.some(m => m.tokens?.model === 'switched'));
   assert.equal(JSON.parse(fs.readFileSync(stateFile)).sidecarPid, first.sidecarPid);
   send('end',input); await pause(100); assert.ok(fs.existsSync(stateFile));
+  holdClear = true;
   send('end',{...input,session_id:'two'});
+  await until(() => releaseClear);
+  send('start',{...input,session_id:'replacement',model:'after-clear'});
+  await until(() => messages.some(m => m.tokens?.model === 'after-clear'));
+  assert.notEqual(JSON.parse(fs.readFileSync(stateFile)).sidecarPid, first.sidecarPid);
+  releaseClear();
+  await until(() => !processIdentity(first.sidecarPid));
+  assert.equal(JSON.parse(fs.readFileSync(stateFile)).sessionId, 'replacement');
+  send('end',{...input,session_id:'replacement'});
   await until(() => !fs.existsSync(stateFile));
   assert.ok(processIdentity(host.pid), 'normal SessionEnd leaves the native host running');
   send('start',{...input,session_id:'three',model:'last'});
@@ -150,4 +164,37 @@ test('PID-valued OMP marker blocks Hook before inspecting any transcript', async
     delete process.env.CODEX_THREAD_ID;delete process.env.OMPCODE;
     runHook({session_id:'session',get transcript_path(){assert.fail('nested Hook must exit before transcript access');}},'start');
   } finally { for(const name of names){if(saved[name]===undefined)delete process.env[name];else process.env[name]=saved[name];} }
+});
+
+test('first observer waits for the spawning hook to commit ownership', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'herdr-start-barrier-'));
+  const file = path.join(root, 'state.json'), transcript = path.join(root, 'transcript.jsonl');
+  const state = {codexPid:process.pid, codexStartTime:processIdentity(process.pid).startTime,
+    model:'committed', sessionId:'first', transcriptPath:transcript};
+  fs.writeFileSync(transcript, '');
+  fs.writeFileSync(file, JSON.stringify(state));
+  const fd = fs.openSync(file + '.flock', 'a', 0o600);
+  const lock = spawnSync('flock', ['-x', '3'], {stdio:['ignore', 'ignore', 'ignore', fd]});
+  assert.equal(lock.status, 0);
+  const module = new URL('../codex-herdr-sidecar.js', import.meta.url).href;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
+    import {startSidecar} from ${JSON.stringify(module)};
+    startSidecar(process.argv[1], {publisher:{
+      resetForAgent() {}, clearAll() {}, publishSnapshot({model}) { console.log(model); }
+    }});
+  `, file]);
+  let output = '', released = false;
+  child.stdout.on('data', chunk => { output += chunk; });
+  t.after(() => {
+    if (!released) fs.closeSync(fd);
+    child.kill('SIGKILL');
+    fs.rmSync(root, {recursive:true, force:true});
+  });
+  // The child has reached its first read while its PID is still absent.
+  await until(() => fs.readFileSync(`/proc/${child.pid}/task/${child.pid}/children`, 'utf8').trim());
+  assert.equal(output, '');
+  fs.writeFileSync(file, JSON.stringify({...state, sidecarPid:child.pid}));
+  fs.closeSync(fd);
+  released = true;
+  await until(() => output.includes('committed'));
 });

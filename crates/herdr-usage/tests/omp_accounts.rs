@@ -201,3 +201,66 @@ fn single_credential_survives_reconcile_but_sticky_cache_is_not_evidence() {
     );
     assert_eq!(accounts(&f.usage), vec![("request".to_owned(), None, None)]);
 }
+
+#[test]
+fn live_single_key_window_excludes_replayed_requests_and_resets_on_change() {
+    let mut f = Fixture::new();
+    f.auth
+        .execute_batch("ALTER TABLE auth_credentials ADD COLUMN disabled_cause TEXT")
+        .unwrap();
+    let mut collector = sources::Collector::new(f.paths.clone());
+    collector.run_round(&mut f.usage, 100).unwrap();
+    f.auth
+        .execute(
+            "UPDATE auth_credentials SET disabled_cause='disabled' WHERE id=8",
+            [],
+        )
+        .unwrap();
+    collector.run_round(&mut f.usage, 200).unwrap();
+
+    let old = f.file("pinned.jsonl");
+    append(
+        &old,
+        &[
+            header("pinned"),
+            pin("pinned", 8, 110),
+            request("old-pin", 120),
+        ],
+    );
+    let unpinned = f.file("unpinned.jsonl");
+    append(
+        &unpinned,
+        &[
+            header("unpinned"),
+            request("old", 130),
+            request("crosses-change", 195),
+            request("live", 210),
+        ],
+    );
+    collector.run_round(&mut f.usage, 300).unwrap();
+    let rows = accounts(&f.usage);
+    assert_eq!(rows[0].2.as_deref(), Some("session_pin"));
+    assert_eq!(rows[1].1, None);
+    assert_eq!(rows[2].1, None);
+    assert_eq!(rows[3].2.as_deref(), Some("single_credential"));
+    assert_ne!(rows[0].1, rows[3].1);
+
+    // A collector that starts with a backlog has no observations for the gap.
+    append(&unpinned, &[request("offline", 310)]);
+    let mut restarted = sources::Collector::new(f.paths.clone());
+    restarted.run_round(&mut f.usage, 400).unwrap();
+    assert_eq!(accounts(&f.usage)[4].1, None);
+
+    // Reconcile an installation that previously skipped the disabled row.
+    f.usage
+        .execute(
+            "UPDATE usage_event SET account_key=NULL,account_source=NULL WHERE event_id='old-pin'",
+            [],
+        )
+        .unwrap();
+    let changed =
+        sources::backfill_omp_api_key_timeline(&mut f.usage, std::slice::from_ref(&f.paths.omp))
+            .unwrap();
+    assert_eq!(changed, 1);
+    assert_eq!(accounts(&f.usage)[..4], rows);
+}

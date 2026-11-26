@@ -6,7 +6,7 @@ use std::{
 };
 /// 配置文件里出现的键。声明为常量而不是结构体字段：解析器是手写的平面
 /// reader（见 `parse_config`），这个表既驱动解析也充当未知键守卫。
-const KEYS: [&str; 15] = [
+const KEYS: [&str; 16] = [
     "refresh_seconds",
     "network_enabled",
     "network_interval_seconds",
@@ -15,6 +15,7 @@ const KEYS: [&str; 15] = [
     "omp_home",
     "grok_home",
     "openrouter_key_file",
+    "go2_key_file",
     "usage_db",
     "usage_start",
     "web_port",
@@ -107,6 +108,7 @@ fn parse_config(text: &str) -> Result<FileConfig, String> {
                 config.cloudflare_billing_day = Some(day);
             }
             _ if is_quoted => match key {
+                "go2_key_file" => {} // Retired; accept the old path without opening it.
                 "openrouter_key_file" => config.openrouter_key_file = Some(unquoted.to_owned()),
                 "codex_home" => config.codex_home = Some(unquoted.to_owned()),
                 "opencode_home" => config.opencode_home = Some(unquoted.to_owned()),
@@ -255,6 +257,7 @@ codex_home = "/tmp/codex"
 opencode_home = "/tmp/opencode"
 omp_home = "/tmp/omp"
 grok_home = "/tmp/grok"
+go2_key_file = "/missing/retired.key"
 openrouter_key_file = "/tmp/key"
 usage_db = "/tmp/usage.db"
 cloudflare_account_id = "test_acc"

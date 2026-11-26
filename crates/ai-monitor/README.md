@@ -71,8 +71,7 @@ Token 数据来自 `~/.local/share/herdr/usage.db`，由 Herdr 侧的 `herdr-usa
 
 ## 0.7.1 更新
 
-去除已停用的 OpenCode GO-2 订阅额度：第二把 Go Key 不再读取，`go2_key_file` 配置项和
-`~/.config/ai-monitor/go2.key` 也不再使用，额度面板恢复为 Codex / OpenCode Go /
+去除已停用的 OpenCode GO-2 订阅额度：旧配置可以保留 `go2_key_file` 字符串，启动时直接忽略该路径，额度面板恢复为 Codex / OpenCode Go /
 SuperGrok / OpenRouter 四项。
 
 ## 0.7.0 更新

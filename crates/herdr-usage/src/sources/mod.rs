@@ -75,6 +75,7 @@ impl SourcePaths {
 pub struct Collector {
     paths: SourcePaths,
     omp: omp::OmpState,
+    omp_catalogs: Vec<(PathBuf, omp::AccountCatalog)>,
     codex: codex::CodexState,
     grok: grok::GrokState,
     /// `config.toml` mtime of the last successful read, so the fallback model is
@@ -96,6 +97,7 @@ impl Collector {
         Self {
             paths,
             omp: omp::OmpState::new(),
+            omp_catalogs: Vec::new(),
             codex: codex::CodexState::new(),
             grok: grok::GrokState::new(None),
             grok_config_mtime: None,
@@ -130,13 +132,17 @@ impl Collector {
     ) -> rusqlite::Result<usize> {
         let kind = "omp";
         let roots = self.paths.omp_session_roots();
-        let catalogs: Vec<_> = roots
+        self.omp_catalogs = roots
             .iter()
             .map(|root| {
                 let database = root.parent().unwrap_or(root).join("agent.db");
-                (root.clone(), omp::AccountCatalog::load(&database))
+                let mut catalog = omp::AccountCatalog::load(&database);
+                let previous = self.omp_catalogs.iter().find(|(path, _)| path == root);
+                catalog.observe(previous.map(|(_, catalog)| catalog), now);
+                (root.clone(), catalog)
             })
             .collect();
+        let catalogs = &self.omp_catalogs;
         let mut files = Vec::new();
         for root in &roots {
             files.extend(omp::session_files(root));
@@ -182,7 +188,7 @@ impl Collector {
         }
         inserted += db::insert_events(connection, kind, &batch, now)?;
         self.omp
-            .reconcile_api_key_accounts(connection, &catalogs, false)?;
+            .reconcile_api_key_accounts(connection, catalogs, false)?;
         db::save_offset(connection, kind, &store.cursor())?;
         Ok(inserted)
     }

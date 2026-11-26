@@ -10,7 +10,8 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 const home = process.env.HERDR_TPS_HOME || homedir();
 const bin = process.env.HERDR_TPS_BIN_DIR || path.join(home, '.local/bin');
 const runtime = process.env.HERDR_TPS_RUNTIME_DIR || path.join(root, '.runtime');
-const shell = process.env.HERDR_TPS_SHELL_RC || path.join(home, '.bashrc');
+const loginShell = path.basename(process.env.SHELL || 'bash');
+const shell = process.env.HERDR_TPS_SHELL_RC || path.join(home, loginShell === 'zsh' ? '.zshrc' : '.bashrc');
 const config = path.join(home, '.codex/config.toml');
 const herdr = process.env.HERDR_TPS_CONFIG || path.join(home, '.config/herdr/config.toml');
 const extensions = path.join(home, '.omp/agent/extensions');
@@ -38,9 +39,10 @@ function plan(file, value, kind = 'file') {
   if (kind === 'remove' && !exists(file)) return;
   changes.push({ file, value, kind });
 }
-function removeManagedLink(file, allowed) {
+function removeManagedLink(file, allowed, { keepUnmanaged = false } = {}) {
   if (!exists(file)) return;
   if (!fs.lstatSync(file).isSymbolicLink() || !allowed.some(x => fs.readlinkSync(file).includes(x))) {
+    if (keepUnmanaged) return;
     throw new Error(`Refusing to remove an unmanaged entry: ${file}`);
   }
   plan(file, undefined, 'remove');
@@ -49,9 +51,47 @@ function check(command, args) {
   const result = spawnSync(command, args, { encoding: 'utf8' });
   if (result.status !== 0) throw new Error(`${command} validation failed: ${result.stderr || result.error || result.stdout}`);
 }
-function toml(content) {
-  const result = spawnSync('python3', ['-c', 'import sys,tomllib; tomllib.loads(sys.stdin.read())'], { input: content, encoding: 'utf8' });
+function toml(content, readRows = false) {
+  const parse = 'import sys,tomllib,json; config = tomllib.loads(sys.stdin.read())';
+  const rows = "print(json.dumps(config.get('ui', {}).get('sidebar', {}).get('agents', {}).get('rows')))";
+  const result = spawnSync('python3', ['-c', readRows ? `${parse}; ${rows}` : parse], { input: content, encoding: 'utf8' });
   if (result.status !== 0) throw new Error(`TOML validation failed: ${result.stderr}`);
+  if (readRows) return JSON.parse(result.stdout);
+}
+
+const defaultRows = [['workspace', 'tab'], ['state_icon', 'agent', '$tps'], ['$model']];
+const legacyRows = [
+  [['state_icon', 'agent', '$model', '$tps'], ['workspace', 'tab']],
+  [['workspace', 'tab'], ['agent', '$tps'], ['$model']],
+];
+
+function configureSidebar(content) {
+  const rows = toml(content, true);
+  const assignment = `rows = ${JSON.stringify(defaultRows)}`;
+  const header = /^[ \t]*\[ui\.sidebar\.agents\][ \t]*(?:#[^\n]*)?$/m.exec(content);
+  const start = header && header.index + header[0].length;
+  let updated;
+  if (rows === null) {
+    updated = header
+      ? content.slice(0, start) + '\n' + assignment + content.slice(start)
+      : `${content}\n[ui.sidebar.agents]\n${assignment}\n`;
+  } else if (header && legacyRows.some(layout => JSON.stringify(layout) === JSON.stringify(rows))) {
+    // Only replace the simple nested string arrays emitted by earlier installers.
+    const tail = content.slice(start);
+    const end = tail.search(/^[ \t]*\[+[ \t]*[\w.-]+[ \t]*\]+[ \t]*(?:#.*)?$/m);
+    const section = end < 0 ? tail : tail.slice(0, end);
+    const migrated = section.replace(/^[ \t]*rows[ \t]*=[ \t]*\[\s*(?:\[[^\[\]#]*\]\s*,?\s*)+\]/m, () => assignment);
+    if (section === migrated) return content; // A reformatted legacy layout already shows both fields.
+    updated = content.slice(0, start) + migrated + tail.slice(section.length);
+  } else {
+    if (Array.isArray(rows) && rows.every(Array.isArray) &&
+        ['$model', '$tps'].every(token => rows.flat().includes(token))) return content;
+    throw new Error(`${herdr}: custom ui.sidebar.agents.rows must include $model and $tps`);
+  }
+  if (JSON.stringify(toml(updated, true)) !== JSON.stringify(defaultRows)) {
+    throw new Error(`Cannot safely update ui.sidebar.agents.rows in ${herdr}`);
+  }
+  return updated;
 }
 function save(file) {
   if (!exists(file)) { undo.push(() => { if (exists(file)) fs.unlinkSync(file); }); return; }
@@ -82,9 +122,8 @@ function main() {
   }
   toml(codexContent); plan(config, codexContent);
   if (!uninstall) {
-    let h = read(herdr);
-    if (!h.includes('[ui.sidebar.agents]')) h += '\n[ui.sidebar.agents]\nrows = [["workspace", "tab"], ["state_icon", "agent", "$tps"], ["$model"]]\n';
-    toml(h); plan(herdr, h);
+    check('flock', ['--version']);
+    plan(herdr, configureSidebar(read(herdr)));
     // Validate native binary before removing any wrapper or stable runtime link.
     const omp = path.join(bin, 'omp');
     const managed = exists(omp) && fs.lstatSync(omp).isSymbolicLink() && fs.readlinkSync(omp).includes('omp-with-tps.mjs');
@@ -106,7 +145,7 @@ function main() {
     for (const name of ['herdr-omp-subagent-model.js', 'herdr-omp-tps.js']) removeManagedLink(path.join(extensions, name), ['herdr-tps/']);
   }
   for (const name of ['.herdr-omp-original', 'omp-tps', '.herdr-codex-original', 'codex-tps']) {
-    removeManagedLink(path.join(bin, name), ['herdr-tps/', '.codex/packages/standalone/']);
+    removeManagedLink(path.join(bin, name), ['herdr-tps/', '.codex/packages/standalone/'], { keepUnmanaged: true });
   }
   removeManagedLink(path.join(home, '.local/share/herdr-tps/bin/codex'), ['codex-with-tps.mjs']);
   removeManagedLink(path.join(home, '.omp/profiles/pro2/agent/extensions/herdr-omp-agent-state.ts'), ['herdr']);
@@ -143,7 +182,12 @@ function main() {
       fs.renameSync(temp, file);
       if (kind === 'binary') check(file, ['--version']);
     }
-    check('bash', ['-n', shell]);
+    if (exists(shell)) {
+      const rcName = path.basename(shell);
+      const usesZsh = rcName === '.zshrc' || (rcName !== '.bashrc' && loginShell === 'zsh');
+      const zsh = loginShell === 'zsh' ? process.env.SHELL : 'zsh';
+      check(usesZsh ? zsh : 'bash', ['-n', shell]);
+    }
     toml(read(config)); toml(read(herdr));
     if (!uninstall) check(path.join(bin, 'omp'), ['--no-tools', '--version']);
   } catch (error) { for (const restore of undo.reverse()) restore(); throw error; }

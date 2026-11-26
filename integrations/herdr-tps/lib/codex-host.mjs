@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 
@@ -50,6 +51,20 @@ export function paneStateFile(paneId) {
   const root = process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid()}`;
   return path.join(root, 'herdr-tps', `codex-${createHash('sha256').update(paneId).digest('hex').slice(0, 16)}.json`);
 }
+// flock locks the shared open file description (fd 3 in the helper). Keep
+// the inode in place so concurrent hooks and sidecars serialize on one lock.
+export function withPaneLock(file, action) {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const fd = fs.openSync(`${file}.flock`, 'a', 0o600);
+  try {
+    const lock = spawnSync('flock', ['-x', '3'], { stdio: ['ignore', 'ignore', 'ignore', fd] });
+    if (lock.status !== 0) throw lock.error ?? new Error('Cannot lock pane state');
+    return action();
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 export function writeState(file, state) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const temp = `${file}.${process.pid}.tmp`;

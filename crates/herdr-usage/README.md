@@ -98,9 +98,9 @@ JSON 接口：`GET /api/usage?start=2026-09-01&end=2026-09-12&model=vendor%2Fmod
 
 JSON 接口：`GET /api/plans`，返回 `ledger_found`、`accounts`、`plans`（每个套餐含当前周期 `period`、已用量 `used_*`、推算上限 `max_*` 与历史 `weekly` 点）和 `notes`。
 
-JSON 接口：`GET /api/requests`，返回账户解析覆盖率、平均耗时、跨账户 session 和最近 3000 条 request；`client` 来自 SQLite 的 `usage_event.source`。OpenCode Go 只用 `herdr-api-key-sticky-v1` pin/release 的逻辑 `sessionId` 和时间线归因；请求开始早于取 Key 时，以响应完成时间确定本次选择。恢复子任务时会被覆盖的 `agent.db` sticky 值以及当前 credential 数量都不能证明历史请求账号。
+JSON 接口：`GET /api/requests`，返回账户解析覆盖率、平均耗时、跨账户 session 和最近 3000 条 request；`client` 来自 SQLite 的 `usage_event.source`。OpenCode Go 历史回放使用 `herdr-api-key-sticky-v1` pin/release 的逻辑 `sessionId` 和时间线归因；请求开始早于取 Key 时，以响应完成时间确定本次选择。恢复子任务时会被覆盖的 `agent.db` sticky 值以及当前 credential 数量都不能证明历史请求账号。
 
-collector 在读取 request 前收集所有 session 文件的 pin，能恢复旧版观察器写进兄弟日志的记录；迟到的 pin 会修正已采集行。启动时的 `omp-api-key-attribution-backfill-v3` 会重新匹配有 pin 证据的旧记录，并清除缺少证据的 `sticky_cache` / `single_credential` 账号归因，保留未知。修正只涉及账号字段，不改 token、金额、模型和时间。跨账户区统计全库历史，不等同于最近 3000 条 request；父、子 session 独立统计，不因同一 pane 使用不同 Key 判为同一 session 换 Key。
+collector 在读取 request 前收集所有 session 文件的 pin，能恢复旧版观察器写进兄弟日志的记录；迟到的 pin 会修正已采集行。启动时的 `omp-api-key-attribution-backfill-v4` 会重新匹配有 pin 证据的旧记录，包括已禁用凭据的 ID，并清除缺少证据的 `sticky_cache` 归因。实时采集只对开始时间落在已观察单 Key 时段的请求使用 `single_credential`，重启采集器或观察到凭据切换会重置该时段。已有单 Key 归因可由明确的历史 pin 修正。修正只涉及账号字段，不改 token、金额、模型和时间。跨账户区统计全库历史，不等同于最近 3000 条 request；父、子 session 独立统计，不因同一 pane 使用不同 Key 判为同一 session 换 Key。
 
 ### 套餐额度的口径
 

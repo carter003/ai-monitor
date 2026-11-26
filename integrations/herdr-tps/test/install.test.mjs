@@ -6,7 +6,7 @@ import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 const installer = fileURLToPath(new URL('../install.mjs',import.meta.url));
-function setup(t) {
+function setup(t, env = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(),'herdr-install-'));
   t.after(()=>fs.rmSync(home,{recursive:true,force:true}));
   for (const p of ['.local/bin','.codex','.config/herdr']) fs.mkdirSync(path.join(home,p),{recursive:true});
@@ -15,7 +15,7 @@ function setup(t) {
   fs.writeFileSync(path.join(home,'.codex/config.toml'),`model = "native"\n[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\ntype = "command"\ncommand = "official-hook"\n[hooks.state."config:session_start:0:0"]\ntrusted = true\n`);
   fs.writeFileSync(path.join(home,'.config/herdr/config.toml'),'[ui.sidebar.agents]\nrows = [["agent", "$model", "$tps"]]\n');
   fs.writeFileSync(path.join(home,'.bashrc'),'export KEEP=1\n# >>> omp profile alias: omp2 >>>\nold\n# <<< omp profile alias: omp2 <<<\n');
-  const run = (...args) => spawnSync(process.execPath,[installer,...args],{env:{...process.env,HERDR_TPS_HOME:home},encoding:'utf8'});
+  const run = (...args) => spawnSync(process.execPath,[installer,...args],{env:{...process.env,SHELL:"/bin/bash",HERDR_TPS_HOME:home,...env},encoding:'utf8'});
   return {home,run};
 }
 test('installer dry-run is read only, appends trusted groups in order, and uninstalls idempotently',t=>{
@@ -68,4 +68,66 @@ test('archives only managed dangling wrapper backups outside PATH and removes em
   assert.ok(fs.lstatSync(path.join(bin,'user.bak-herdr-tps-test')).isSymbolicLink());
   const archive=path.join(home,'.local/state/herdr-tps/backups');
   assert.equal(fs.readdirSync(archive,{recursive:true}).filter(name=>name.endsWith('.bak-herdr-tps-test')).length,2);
+});
+
+test('preserves official original links while restoring the native OMP and removing wrappers', t => {
+  const env = {};
+  const {home, run} = setup(t, env);
+  const bin = path.join(home, '.local/bin');
+  const original = path.join(bin, '.herdr-codex-original');
+  fs.symlinkSync(path.join(bin, 'codex'), original);
+  const runtime = path.join(home, 'herdr-tps/.runtime');
+  fs.mkdirSync(runtime, {recursive:true});
+  fs.renameSync(path.join(bin, 'omp'), path.join(runtime, 'omp'));
+  fs.symlinkSync('/retired/herdr-tps/omp-with-tps.mjs', path.join(bin, 'omp'));
+  const alias = path.join(bin, 'codex-tps');
+  fs.symlinkSync('/retired/herdr-tps/codex-with-tps.mjs', alias);
+  env.HERDR_TPS_RUNTIME_DIR = runtime;
+  for (const args of [[], ['--uninstall']]) {
+    const result = run(...args);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(fs.readlinkSync(original), path.join(bin, 'codex'));
+    assert.ok(fs.lstatSync(path.join(bin, 'omp')).isFile());
+    assert.ok(!fs.readdirSync(bin).includes('codex-tps'));
+  }
+});
+
+test('migrates managed sidebar layouts, inserts missing rows, and rejects incompatible custom rows', t => {
+  const {home, run} = setup(t);
+  const file = path.join(home, '.config/herdr/config.toml');
+  const header = '[ui.sidebar.agents] # sidebar\n';
+  const extra = '[custom]\nrows = [["keep"]]\n';
+  for (const previous of ['', 'rows = [\n  ["state_icon", "agent", "$model", "$tps"],\n  ["workspace", "tab"],\n]\n',
+    'rows = [["workspace", "tab"], ["agent", "$tps"], ["$model"]]\n']) {
+    fs.writeFileSync(file, header + previous + extra);
+    const result = run();
+    assert.equal(result.status, 0, result.stderr);
+    const next = fs.readFileSync(file, 'utf8');
+    assert.ok(next.startsWith(header));
+    assert.ok(next.endsWith(extra));
+    assert.match(next, /"state_icon",\s*"agent",\s*"\$tps"/);
+    assert.equal(run().status, 0);
+    assert.equal(fs.readFileSync(file, 'utf8'), next);
+  }
+  const custom = header + 'rows = [["state_icon", "agent"]] # "$tps" "$model"\n' + extra;
+  fs.writeFileSync(file, custom);
+  const result = run();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /custom ui.sidebar.agents.rows/);
+  assert.equal(fs.readFileSync(file, 'utf8'), custom);
+});
+
+test('uses the zsh rc and its matching syntax checker for a zsh login shell', t => {
+  const env = {};
+  const {home, run} = setup(t, env);
+  env.SHELL = path.join(home, 'zsh');
+  fs.writeFileSync(env.SHELL, '#!/bin/sh\nprintf "%s\\n" "$@" > "$HERDR_TPS_HOME/check-args"\n', {mode:0o755});
+  const bash = path.join(home, '.bashrc'), zsh = path.join(home, '.zshrc');
+  const original = fs.readFileSync(bash, 'utf8');
+  fs.writeFileSync(zsh, original);
+  const result = run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.readFileSync(zsh, 'utf8'), 'export KEEP=1\n');
+  assert.equal(fs.readFileSync(bash, 'utf8'), original);
+  assert.equal(fs.readFileSync(path.join(home, 'check-args'), 'utf8'), `-n\n${zsh}\n`);
 });

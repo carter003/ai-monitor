@@ -72,7 +72,8 @@ pub struct AccountCatalog {
     by_pin: HashMap<(String, String), AccountIdentity>,
     by_id: HashMap<(String, String), AccountIdentity>,
     sticky: HashMap<(String, String), AccountIdentity>,
-    single: HashMap<String, AccountIdentity>,
+    single: Option<AccountIdentity>,
+    observed: Option<std::ops::RangeInclusive<i64>>,
 }
 
 const API_KEY_STICKY_ENTRY: &str = "herdr-api-key-sticky-v1";
@@ -89,27 +90,25 @@ impl AccountCatalog {
         ) else {
             return catalog;
         };
-        let mut by_provider = HashMap::<String, Vec<AccountIdentity>>::new();
+        let mut active_count = 0;
         // Older OMP databases predate disabled_cause; all their stored rows are active.
-        let has_disabled_cause = connection
-            .prepare("PRAGMA table_info(auth_credentials)")
-            .ok()
-            .and_then(|mut statement| {
-                statement
-                    .query_map([], |row| row.get::<_, String>(1))
-                    .ok()
-                    .map(|rows| {
-                        rows.filter_map(Result::ok)
-                            .any(|name| name == "disabled_cause")
-                    })
-            })
-            .unwrap_or(false);
-        let query = if has_disabled_cause {
-            "SELECT id, provider, credential_type, data FROM auth_credentials WHERE provider = 'opencode-go' AND (disabled_cause IS NULL OR disabled_cause = '') ORDER BY id"
-        } else {
-            "SELECT id, provider, credential_type, data FROM auth_credentials WHERE provider = 'opencode-go' ORDER BY id"
+        let Ok(has_disabled_cause) = connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('auth_credentials') WHERE name='disabled_cause')",
+            [],
+            |row| row.get::<_, bool>(0),
+        ) else {
+            return catalog;
         };
-        let Ok(mut statement) = connection.prepare(query) else {
+        let active = if has_disabled_cause {
+            "(disabled_cause IS NULL OR disabled_cause = '')"
+        } else {
+            "1"
+        };
+        let query = format!(
+            "SELECT id, provider, credential_type, data, {active}
+             FROM auth_credentials WHERE provider = 'opencode-go'"
+        );
+        let Ok(mut statement) = connection.prepare(&query) else {
             return catalog;
         };
         let Ok(rows) = statement.query_map([], |row| {
@@ -118,11 +117,19 @@ impl AccountCatalog {
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
+                row.get::<_, bool>(4)?,
             ))
         }) else {
             return catalog;
         };
-        for (id, provider, kind, text) in rows.filter_map(Result::ok) {
+        for row in rows {
+            let Ok((id, provider, kind, text, active)) = row else {
+                catalog.single = None;
+                return catalog;
+            };
+            if active {
+                active_count += 1;
+            }
             let Ok(data) = serde_json::from_str::<Value>(&text) else {
                 continue;
             };
@@ -165,20 +172,35 @@ impl AccountCatalog {
             } else {
                 continue;
             };
-            by_provider
-                .entry(provider.clone())
-                .or_default()
-                .push(identity.clone());
+            if active {
+                catalog.single = Some(AccountIdentity {
+                    source: "single_credential",
+                    ..identity.clone()
+                });
+            }
             catalog.by_id.insert((provider, id.to_string()), identity);
         }
-        for (provider, identities) in by_provider {
-            if identities.len() == 1 {
-                let mut identity = identities[0].clone();
-                identity.source = "single_credential";
-                catalog.single.insert(provider, identity);
-            }
+        if active_count != 1 {
+            catalog.single = None;
         }
         catalog
+    }
+
+    // Only live rounds establish an observation window. Standalone replay and
+    // backfill catalogs can still resolve explicit pins of any age.
+    pub(super) fn observe(&mut self, previous: Option<&Self>, now: i64) {
+        if let Some(single) = &self.single {
+            let since = previous
+                .filter(|old| {
+                    old.namespace == self.namespace
+                        && old.single.as_ref() == Some(single)
+                        && old.by_id == self.by_id
+                })
+                .and_then(|old| old.observed.as_ref())
+                .filter(|window| *window.end() <= now)
+                .map_or(now, |window| *window.start());
+            self.observed = Some(since..=now);
+        }
     }
 
     fn resolve(
@@ -186,6 +208,7 @@ impl AccountCatalog {
         provider: &str,
         session: Option<&str>,
         pin: Option<&str>,
+        started_at: i64,
     ) -> Option<AccountIdentity> {
         if let Some(pin) = pin {
             if let Some(identity) = self.by_pin.get(&(provider.to_owned(), pin.to_owned())) {
@@ -197,7 +220,15 @@ impl AccountCatalog {
                 return Some(identity.clone());
             }
         }
-        self.single.get(provider).cloned()
+        if provider == "opencode-go"
+            && self
+                .observed
+                .as_ref()
+                .is_some_and(|window| window.contains(&started_at))
+        {
+            return self.single.clone();
+        }
+        None
     }
 
     pub(super) fn resolve_credential_id(
@@ -323,6 +354,7 @@ impl OmpState {
         path: &Path,
         provider: Option<&str>,
         session: Option<&str>,
+        started_at: i64,
         at: i64,
         accounts: &AccountCatalog,
     ) -> (Option<AccountIdentity>, Option<String>) {
@@ -343,7 +375,12 @@ impl OmpState {
                 .get(&key)
                 .and_then(|id| accounts.resolve_credential_id(provider, id))
         } else {
-            accounts.resolve(provider, session, self.pins.get(&key).map(String::as_str))
+            accounts.resolve(
+                provider,
+                session,
+                self.pins.get(&key).map(String::as_str),
+                started_at,
+            )
         };
         (account, self.api_key_route_reasons.get(&key).cloned())
     }
@@ -371,6 +408,7 @@ impl OmpState {
             path,
             pending.provider.as_deref(),
             pending.session_id.as_deref(),
+            pending.started_at.unwrap_or(pending.occurred_at),
             pending.completed_at.unwrap_or(pending.occurred_at),
             accounts,
         );
@@ -639,6 +677,7 @@ impl OmpState {
                     path,
                     provider.as_deref(),
                     session_id.as_deref(),
+                    occurred_at,
                     completed_at.unwrap_or(occurred_at),
                     accounts,
                 );
@@ -723,6 +762,7 @@ impl OmpState {
                 path,
                 provider.as_deref(),
                 session_id.as_deref(),
+                occurred_at,
                 completed_at.unwrap_or(occurred_at),
                 accounts,
             );
@@ -889,17 +929,18 @@ mod tests {
             INSERT INTO auth_credentials VALUES (1, 'opencode-go', 'api_key', '{\"key\":\"test-active\"}', NULL);
             INSERT INTO auth_credentials VALUES (2, 'opencode-go', 'api_key', '{\"key\":\"test-disabled\"}', 'disabled');").unwrap();
         // There is deliberately no cache table: attribution depends only on healthy auth rows.
-        let catalog = AccountCatalog::load(&path);
+        let mut catalog = AccountCatalog::load(&path);
+        catalog.observe(None, 100);
         let identity = catalog
-            .resolve("opencode-go", Some("native-session"), None)
+            .resolve("opencode-go", Some("native-session"), None, 100)
             .unwrap();
         assert_eq!(identity.source, "single_credential");
         assert!(identity.key.ends_with(&sha256("test-active")));
-        assert_eq!(catalog.by_id.len(), 1);
+        assert_eq!(catalog.by_id.len(), 2);
         db.execute("INSERT INTO auth_credentials VALUES (3, 'opencode-go', 'api_key', '{\"key\":\"second-active\"}', '')", []).unwrap();
-        assert!(AccountCatalog::load(&path)
-            .resolve("opencode-go", None, None)
-            .is_none());
+        let mut multiple = AccountCatalog::load(&path);
+        multiple.observe(Some(&catalog), 101);
+        assert!(multiple.resolve("opencode-go", None, None, 101).is_none());
         drop(db);
         std::fs::remove_dir_all(dir).unwrap();
     }

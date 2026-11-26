@@ -17,9 +17,8 @@ static STOPPED: AtomicBool = AtomicBool::new(false);
 /// restarts exactly like a watermark does.
 const BACKFILL_KIND: &str = "omp-provider-backfill";
 const REQUEST_BACKFILL_KIND: &str = "omp-request-metadata-backfill-v1";
-// v3 recovers sibling-file pins and clears cache-only account guesses left by
-// earlier account/timeline migrations; usage and price fields are unchanged.
-const API_KEY_TIMELINE_BACKFILL_KIND: &str = "omp-api-key-attribution-backfill-v3";
+// Revisit historical pins that v3 could not resolve after a key was disabled.
+const API_KEY_TIMELINE_BACKFILL_KIND: &str = "omp-api-key-attribution-backfill-v4";
 const OMP_MODEL_USAGE_BACKFILL_KIND: &str = "omp-model-usage-backfill-v1";
 const CODEX_RECONCILE_BACKFILL_KIND: &str = "codex-reconcile-backfill-v1";
 

@@ -16,11 +16,11 @@ node integrations/herdr-tps/install.mjs --uninstall
 
 OMP 的 `omp-subagent-model.js` 让未配置的 task 角色继承当前父模型；eval 则核对实际发现的 Agent 定义，仅默认角色匹配时继承，保留无默认角色的 m1、不同默认值的显式角色以及用户配置。OMP 派发事件不提供显式参数来源：对同一个 reviewer 显式指定与其默认值相同的 `@slow`，事件无法区分，也会按默认角色继承。内部模块变更时记录警告并退回原生行为。`omp-herdr-tps.js` 独立使用宿主公开 Tokenizer 与原生用量校正，保持 OMP 工作行速率口径。`--no-tools` 使用原生扩展跳过规则。
 
-Codex Hook 只接收 Herdr 根交互会话：检查环境、会话标识、真实 transcript 和 `/proc` 宿主身份，排除 exec/review/mcp 与嵌套 OMP。每面板一个只读观察器，不监听端口，不拦截模型请求。会话切换更新同一个观察器；退出清理 metadata，异常宿主退出后约 1 秒清理。Herdr metadata TTL 为 5 秒。
+Codex Hook 只接收 Herdr 根交互会话：检查环境、会话标识、真实 transcript 和 `/proc` 宿主身份，排除 exec/review/mcp 与嵌套 OMP。每面板一个只读观察器，不监听端口，不拦截模型请求。Hook 和观察器通过 Linux util-linux 的 `flock` 协调状态更新。会话切换更新同一个观察器；退出清理 metadata，异常宿主退出后约 1 秒清理。Herdr metadata TTL 为 5 秒。
 
 `$model` 从 Hook 或顶层配置初始化，随后跟随 Rollout 的模型变更。`$tps` 使用服务端 `token_usage_record.usage.output_tokens`（含隐藏推理），按每个推理步/工具步刷新，保留一位小数。优先使用生成项时间戳，缺失时回退请求间隔或任务时长；不估算文本 token。长回复中途的速率更新频率取决于原生日志刷盘。
 
-单 `opencode-go` Key 由 Rust 采集器直接归因为 `single_credential`。历史 `herdr-api-key-sticky-v1` 日志仍可读取，已停用旧凭据不参与新请求自动归因，不再读取 `agent.db` 的 cache 表。pro2 历史会话保留。
+Rust 采集器在持续观察到同一把 `opencode-go` Key 单独启用的时段内，将新请求归因为 `single_credential`。历史 `herdr-api-key-sticky-v1` 日志仍可读取，已停用旧凭据不参与新请求自动归因，不再读取 `agent.db` 的 cache 表。pro2 历史会话保留。
 
 详见 [维护指南](MAINTENANCE.md) 与 [实施计划](../../docs/custom-extensions-optimization-plan.md)。
 

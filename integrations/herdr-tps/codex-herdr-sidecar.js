@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { HerdrMetadataPublisher } from './lib/herdr-metadata-publisher.mjs';
 import { TokenRateMeter } from './lib/token-rate-meter.mjs';
 import { CodexRolloutFollower } from './lib/codex-rollout-follower.mjs';
-import { processIdentity, initialModel } from './lib/codex-host.mjs';
+import { processIdentity, initialModel, withPaneLock, writeState } from './lib/codex-host.mjs';
 
 export function startSidecar(file, { publisher = new HerdrMetadataPublisher({ agent: 'codex' }), autoStart = true } = {}) {
   let state, follower, inode, offset = 0, model, rate = 0, stopping = false, dirty = false;
@@ -21,26 +21,37 @@ export function startSidecar(file, { publisher = new HerdrMetadataPublisher({ ag
       dirty = true;
     },
   });
+  const readState = () => JSON.parse(fs.readFileSync(file, 'utf8'));
   const shutdown = async () => {
     if (stopping) return;
     stopping = true;
     clearInterval(poll);
     clearInterval(heartbeat);
-    process.removeListener('SIGUSR1', tick);
+    process.removeListener('SIGWINCH', tick);
     process.removeListener('SIGTERM', shutdown);
     process.removeListener('SIGINT', shutdown);
     try {
-      const current = JSON.parse(fs.readFileSync(file, 'utf8'));
-      // Never clear metadata or state belonging to a replacement observer.
-      if (current.sidecarPid !== process.pid) return;
-      await publisher.clearAll();
-      fs.unlinkSync(file);
+      const clearing = withPaneLock(file, () => {
+        const current = readState();
+        if (current.sidecarPid !== process.pid) return;
+        writeState(file, { ...current, stopping: true });
+        return { sessionId: current.sessionId, done: publisher.clearAll() };
+      });
+      if (!clearing) return;
+      await clearing.done;
+      withPaneLock(file, () => {
+        const current = readState();
+        if (current.sidecarPid === process.pid && current.stopping && current.sessionId === clearing.sessionId) {
+          fs.unlinkSync(file);
+        }
+      });
     } catch { /* Already removed. */ }
   };
   const tick = () => {
     if (stopping) return;
     try {
-      const next = JSON.parse(fs.readFileSync(file, 'utf8'));
+      // The spawning hook holds this lock until it commits the child's PID.
+      const next = state ? readState() : withPaneLock(file, readState);
       if (next.sidecarPid !== process.pid) return void shutdown();
       if (next.ending || processIdentity(next.codexPid)?.startTime !== next.codexStartTime) return void shutdown();
       if (!state || next.sessionId !== state.sessionId || next.transcriptPath !== state.transcriptPath) {
@@ -76,7 +87,7 @@ export function startSidecar(file, { publisher = new HerdrMetadataPublisher({ ag
   };
   const poll = autoStart ? setInterval(tick, 1000) : undefined;
   const heartbeat = autoStart ? setInterval(() => { if (!stopping) void snapshot(); }, 2000) : undefined;
-  process.on('SIGUSR1', tick);
+  process.on('SIGWINCH', tick);
   process.once('SIGTERM', shutdown);
   process.once('SIGINT', shutdown);
   tick();
