@@ -60,6 +60,20 @@ pub fn initialize(connection: &Connection) -> rusqlite::Result<()> {
             }
         }
     }
+    // Upgrade the partial index when the supported source list grows;
+    // `CREATE INDEX IF NOT EXISTS` keeps an older WHERE predicate unchanged.
+    let recent_index_sql: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_usage_recent_request'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    if let Some(sql) = recent_index_sql {
+        if !sql.contains("'agy'") {
+            connection.execute("DROP INDEX idx_usage_recent_request", [])?;
+        }
+    }
     connection.execute_batch(SCHEMA)
 }
 
@@ -475,6 +489,29 @@ mod tests {
         let connection = memory();
         initialize(&connection).expect("second apply");
         initialize(&connection).expect("third apply");
+    }
+
+    #[test]
+    fn initialize_upgrades_older_recent_request_partial_index() {
+        let connection = memory();
+        connection
+            .execute_batch(
+                "DROP INDEX idx_usage_recent_request;
+                 CREATE INDEX idx_usage_recent_request
+                   ON usage_event(COALESCE(started_at, occurred_at) DESC)
+                   WHERE source IN ('omp', 'codex', 'grok', 'opencode')
+                     AND session_id IS NOT NULL AND session_id <> '';",
+            )
+            .expect("old index");
+        initialize(&connection).expect("upgrade");
+        let sql: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_usage_recent_request'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("upgraded sql");
+        assert!(sql.contains("'agy'"), "expected upgraded index, got: {sql}");
     }
 
     #[test]

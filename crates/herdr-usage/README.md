@@ -1,6 +1,6 @@
 # herdr-usage
 
-Herdr 内四个 agent 客户端（`omp`、`codex`、`grok`、`opencode`）的 token 用量 collector。
+Herdr 内五个 agent 客户端（`omp`、`codex`、`grok`、`opencode`、`agy`/`agy2`）的 token 用量 collector。
 常驻进程，60 秒一轮，**只读**源日志与只读价格表，**不联网**。
 
 口径、去重键、水位语义、价格表维护方式与回归清单见

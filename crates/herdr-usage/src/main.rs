@@ -21,6 +21,7 @@ const REQUEST_BACKFILL_KIND: &str = "omp-request-metadata-backfill-v1";
 const API_KEY_TIMELINE_BACKFILL_KIND: &str = "omp-api-key-attribution-backfill-v4";
 const OMP_MODEL_USAGE_BACKFILL_KIND: &str = "omp-model-usage-backfill-v1";
 const CODEX_RECONCILE_BACKFILL_KIND: &str = "codex-reconcile-backfill-v1";
+const AGY_HISTORY_BACKFILL_KIND: &str = "agy-history-backfill-v1";
 
 fn main() {
     let database = db_path();
@@ -36,12 +37,14 @@ fn main() {
     install_signal_handlers();
 
     println!(
-        "herdr-usage 启动：db={} omp={} codex={} grok={} opencode={}",
+        "herdr-usage 启动：db={} omp={} codex={} grok={} opencode={} agy={} agy2={}",
         database.display(),
         paths.omp.display(),
         paths.codex.display(),
         paths.grok_log.display(),
-        paths.opencode_db.display()
+        paths.opencode_db.display(),
+        paths.agy.display(),
+        paths.agy2.display()
     );
 
     let roots = paths.omp_session_roots();
@@ -83,6 +86,16 @@ fn main() {
         }
         Ok(None) => {}
         Err(error) => eprintln!("[warn] codex 对账回填失败：{error}（下次启动重试）"),
+    }
+    match agy_history_backfill_once(&mut connection, &paths) {
+        Ok(Some(rows)) => {
+            println!("agy/agy2 历史回填：{rows} 行");
+            if rows > 0 {
+                needs_hourly_reset = true;
+            }
+        }
+        Ok(None) => {}
+        Err(error) => eprintln!("[warn] agy/agy2 历史回填失败：{error}（下次启动重试）"),
     }
     if needs_hourly_reset {
         println!("正在重建 usage_hourly 小时归档缓存...");
@@ -207,6 +220,18 @@ fn codex_reconcile_backfill_once(
     let result = sources::backfill_codex_records(connection, codex_dir)?;
     db::save_offset(connection, CODEX_RECONCILE_BACKFILL_KIND, "1")?;
     Ok(Some(result))
+}
+
+fn agy_history_backfill_once(
+    connection: &mut rusqlite::Connection,
+    paths: &sources::SourcePaths,
+) -> rusqlite::Result<Option<usize>> {
+    if db::offset(connection, AGY_HISTORY_BACKFILL_KIND)?.is_some() {
+        return Ok(None);
+    }
+    let rows = sources::backfill_agy_history(connection, paths)?;
+    db::save_offset(connection, AGY_HISTORY_BACKFILL_KIND, "1")?;
+    Ok(Some(rows))
 }
 
 /// Sleep in short slices so a signal is honoured promptly.

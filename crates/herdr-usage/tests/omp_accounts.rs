@@ -24,6 +24,8 @@ impl Fixture {
             grok_log: root.join(".grok/logs/unified.jsonl"),
             grok_config: root.join(".grok/config.toml"),
             opencode_db: root.join("opencode/opencode.db"),
+            agy: root.join(".gemini/antigravity-cli/brain"),
+            agy2: root.join(".gemini2/antigravity-cli/brain"),
         };
         fs::create_dir_all(&paths.omp).unwrap();
         let auth = Connection::open(paths.omp.parent().unwrap().join("agent.db")).unwrap();

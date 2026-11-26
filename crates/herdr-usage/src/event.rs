@@ -224,6 +224,35 @@ pub fn normalize_opencode(tokens: &OcTokens) -> UsageEvent {
     }
 }
 
+// ---------------------------------------------------------------------------
+// agy (Antigravity CLI: ~/.gemini & ~/.gemini2)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct AgyUsage {
+    pub input_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
+    pub output_tokens: i64,
+    pub thinking_tokens: i64,
+}
+
+/// Antigravity CLI `transcript.jsonl` reports `input_tokens` net of
+/// `cache_read_tokens` (measured across both Gemini and Claude turns:
+/// `next.cache_read_tokens == prev.input_tokens + prev.cache_read_tokens`),
+/// and `output_tokens` already gross (including thinking/reasoning tokens,
+/// verified against `conversations/*.db` `gen_metadata` protobuf fields).
+pub fn normalize_agy(usage: &AgyUsage) -> UsageEvent {
+    UsageEvent {
+        input_total: usage.input_tokens.saturating_add(usage.cache_read_tokens),
+        cache_read: usage.cache_read_tokens,
+        cache_write: usage.cache_write_tokens,
+        output_total: usage.output_tokens,
+        reasoning: usage.thinking_tokens,
+    }
+}
+
 /// Wire form persisted to `collect_offset.cursor`.
 ///
 /// The trailing partial line is persisted too: without it, a restart that lands
@@ -308,6 +337,22 @@ mod tests {
         assert_eq!(event.input_total, 89446);
         assert_eq!(event.output_total, 1000);
         assert_eq!(event.reasoning, 900);
+    }
+
+    #[test]
+    fn agy_adds_cache_read_into_gross_input_and_keeps_output_gross() {
+        let event = normalize_agy(&AgyUsage {
+            input_tokens: 8766,
+            cache_read_tokens: 11681,
+            cache_write_tokens: 0,
+            output_tokens: 466,
+            thinking_tokens: 0,
+        });
+        assert_eq!(event.input_total, 20447);
+        assert_eq!(event.cache_read, 11681);
+        assert_eq!(event.cache_write, 0);
+        assert_eq!(event.output_total, 466);
+        assert_eq!(event.reasoning, 0);
     }
 
     #[test]

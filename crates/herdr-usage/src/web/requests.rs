@@ -82,7 +82,7 @@ fn report(connection: &Connection) -> Result<RequestReport, String> {
         .query_row(
             "SELECT COUNT(*), COUNT(account_key), CAST(AVG(duration_ms) AS INTEGER)
              FROM usage_event
-             WHERE source IN ('omp', 'codex', 'grok', 'opencode')
+             WHERE source IN ('omp', 'codex', 'grok', 'opencode', 'agy')
                AND session_id IS NOT NULL AND session_id <> ''",
             [],
             |row| {
@@ -101,7 +101,7 @@ fn report(connection: &Connection) -> Result<RequestReport, String> {
                 account_key, account_label, account_source, {route_reason},
                 COALESCE(started_at, occurred_at), completed_at, duration_ms
          FROM usage_event INDEXED BY idx_usage_recent_request
-         WHERE source IN ('omp', 'codex', 'grok', 'opencode')
+         WHERE source IN ('omp', 'codex', 'grok', 'opencode', 'agy')
            AND session_id IS NOT NULL AND session_id <> ''
          ORDER BY COALESCE(started_at, occurred_at) DESC
          LIMIT ?1"
@@ -110,10 +110,12 @@ fn report(connection: &Connection) -> Result<RequestReport, String> {
         .prepare(&recent_sql)
         .or_else(|error| {
             // usage-web can start against a database that the updated collector
-            // has not migrated yet. Preserve the page until the index exists.
-            if error
-                .to_string()
-                .contains("no such index: idx_usage_recent_request")
+            // has not migrated yet (missing or older partial index predicate).
+            // Preserve the page until the index is upgraded.
+            let message = error.to_string();
+            if message.contains("no such index: idx_usage_recent_request")
+                || message.contains("cannot use index: idx_usage_recent_request")
+                || message.contains("no query solution")
             {
                 connection.prepare(&recent_sql.replace(" INDEXED BY idx_usage_recent_request", ""))
             } else {
@@ -286,7 +288,7 @@ mod tests {
             .unwrap();
         let plan: String = connection.query_row(
             "EXPLAIN QUERY PLAN SELECT event_id FROM usage_event INDEXED BY idx_usage_recent_request
-             WHERE source IN ('omp', 'codex', 'grok', 'opencode')
+             WHERE source IN ('omp', 'codex', 'grok', 'opencode', 'agy')
                AND session_id IS NOT NULL AND session_id <> ''
              ORDER BY COALESCE(started_at, occurred_at) DESC LIMIT 3000",
             [], |row| row.get(3),
@@ -298,6 +300,19 @@ mod tests {
         assert!(
             report(&connection).is_ok(),
             "older databases remain readable before migration"
+        );
+        // An older partial index lacking 'agy' must also fall back safely.
+        connection
+            .execute_batch(
+                "CREATE INDEX idx_usage_recent_request
+                   ON usage_event(COALESCE(started_at, occurred_at) DESC)
+                   WHERE source IN ('omp', 'codex', 'grok', 'opencode')
+                     AND session_id IS NOT NULL AND session_id <> '';",
+            )
+            .unwrap();
+        assert!(
+            report(&connection).is_ok(),
+            "older partial index predicate must fall back cleanly"
         );
     }
 

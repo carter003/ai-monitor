@@ -5,7 +5,7 @@ PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 
 CREATE TABLE IF NOT EXISTS usage_event(
-  source       TEXT NOT NULL,    -- omp|codex|grok|opencode
+  source       TEXT NOT NULL,    -- omp|codex|grok|opencode|agy
   event_id     TEXT NOT NULL,    -- dedup key, see plan §2.3
   model        TEXT,             -- providerID/modelID join string; NULL when unresolved
   model_source TEXT,             -- event|context|config_fallback|NULL
@@ -39,7 +39,7 @@ CREATE INDEX IF NOT EXISTS idx_usage_account_time ON usage_event(provider, accou
 -- Match the recent-request ORDER BY and predicate so LIMIT can stop after 3000 rows.
 CREATE INDEX IF NOT EXISTS idx_usage_recent_request
   ON usage_event(COALESCE(started_at, occurred_at) DESC)
-  WHERE source IN ('omp', 'codex', 'grok', 'opencode')
+  WHERE source IN ('omp', 'codex', 'grok', 'opencode', 'agy')
     AND session_id IS NOT NULL AND session_id <> '';
 -- One ordered index feeds the account rollup used by /api/requests. The
 -- partial predicate excludes rows that can never participate in the report.

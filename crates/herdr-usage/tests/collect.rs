@@ -30,12 +30,16 @@ impl Fixture {
             grok_log: root.join(".grok/logs/unified.jsonl"),
             grok_config: root.join(".grok/config.toml"),
             opencode_db: root.join("opencode/opencode.db"),
+            agy: root.join(".gemini/antigravity-cli/brain"),
+            agy2: root.join(".gemini2/antigravity-cli/brain"),
         };
         let dirs: Vec<&Path> = vec![
             &paths.omp,
             &paths.codex,
             paths.grok_log.parent().expect("parent"),
             paths.opencode_db.parent().expect("parent"),
+            &paths.agy,
+            &paths.agy2,
         ];
         for dir in dirs {
             fs::create_dir_all(dir).expect("fixture dir");
@@ -1115,4 +1119,104 @@ fn codex_token_usage_record_is_collected_and_ignores_duplicate_token_count() {
     assert_eq!(model, "gpt-6.1-sol");
     assert_eq!(input, 5000);
     assert_eq!(output, 300);
+}
+
+#[test]
+fn agy_and_agy2_transcripts_are_collected_priced_and_backfilled() {
+    let fixture = Fixture::new("agy-both");
+    let agy_logs = fixture.paths.agy.join("conv-agy-1/.system_generated/logs");
+    let agy2_logs = fixture.paths.agy2.join("conv-agy2-1/.system_generated/logs");
+    fs::create_dir_all(&agy_logs).unwrap();
+    fs::create_dir_all(&agy2_logs).unwrap();
+
+    let agy_file = agy_logs.join("transcript.jsonl");
+    let agy_full = agy_logs.join("transcript_full.jsonl");
+    let agy2_file = agy2_logs.join("transcript.jsonl");
+
+    let turn_agy = r#"{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-26T10:00:00Z","model":"gemini-3.8-flash-high","input_tokens":2000,"cache_read_tokens":10000,"output_tokens":500}"#;
+    let turn_agy2 = r#"{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-26T10:01:00Z","model":"gemini-4-neon-high","input_tokens":3000,"cache_read_tokens":20000,"output_tokens":400}"#;
+    let turn_claude = r#"{"step_index":4,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-26T10:02:00Z","model":"claude-opus-5-5-high","input_tokens":1000,"cache_read_tokens":5000,"output_tokens":200}"#;
+    let checkpoint = r#"{"step_index":9,"source":"SYSTEM","type":"CHECKPOINT","status":"DONE","created_at":"2026-11-26T10:03:00Z","input_tokens":500,"cache_read_tokens":25000,"output_tokens":300}"#;
+
+    fs::write(&agy_file, format!("{turn_agy}\n")).unwrap();
+    // transcript_full.jsonl duplicates the same lines and must be ignored.
+    fs::write(&agy_full, format!("{turn_agy}\n")).unwrap();
+    fs::write(&agy2_file, format!("{turn_agy2}\n")).unwrap();
+
+    let mut connection = fixture.connection();
+    connection
+        .execute_batch(
+            "INSERT INTO model_price(model_id, prompt, completion, cache_read, cache_write, remark, updated_at) VALUES
+             ('google/gemini-3.8-flash', 8.25e-7, 4.125e-6, 8.25e-8, NULL, NULL, 0),
+             ('google/gemini-4-neon', 3e-6, 1.5e-5, 1.5e-7, NULL, NULL, 0),
+             ('anthropic/claude-opus-5.5', 4e-6, 2e-5, 2e-7, NULL, NULL, 0);",
+        )
+        .unwrap();
+
+    // Historical backfill imports both profiles, ignores transcript_full.jsonl,
+    // and seeds the `agy` watermark so subsequent rounds have zero gap and zero duplicates.
+    let backfilled = sources::backfill_agy_history(&mut connection, &fixture.paths).unwrap();
+    assert_eq!(backfilled, 2);
+    assert_eq!(count(&connection, "agy"), 2);
+
+    // Subsequent live round sees no duplicate inserts, then picks up appended
+    // Claude + Checkpoint lines and a brand-new live conversation file.
+    let mut collector = sources::Collector::new(fixture.paths.clone());
+    assert_eq!(collector.run_round(&mut connection, 1_000).unwrap().inserted, 0);
+
+    fixture.append(&agy2_file, &format!("{turn_claude}\n{checkpoint}\n"));
+    let new_conv_logs = fixture.paths.agy.join("conv-agy-2/.system_generated/logs");
+    fs::create_dir_all(&new_conv_logs).unwrap();
+    fs::write(new_conv_logs.join("transcript.jsonl"), format!("{turn_agy}\n")).unwrap();
+
+    let report = collector.run_round(&mut connection, 2_000).unwrap();
+    assert_eq!(report.inserted, 3);
+    assert_eq!(count(&connection, "agy"), 5);
+
+    let rows: Vec<(String, String, String, i64, i64, i64, Option<f64>)> = {
+        let mut stmt = connection
+            .prepare(
+                "SELECT account_label, session_id, model, input_total, cache_read, output_total, cost_usd
+                 FROM usage_event
+                 WHERE source = 'agy'
+                 ORDER BY occurred_at, session_id",
+            )
+            .unwrap();
+        stmt.query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+    };
+
+    assert_eq!(rows.len(), 5);
+    assert_eq!(rows[0].0, "AGY");
+    assert_eq!(rows[0].2, "gemini-3.8-flash");
+    assert_eq!((rows[0].3, rows[0].4, rows[0].5), (12000, 10000, 500));
+    assert!(rows[0].6.unwrap() > 0.0);
+
+    assert_eq!(rows[2].0, "AGY2");
+    assert_eq!(rows[2].2, "gemini-4-neon");
+    assert_eq!((rows[2].3, rows[2].4, rows[2].5), (23000, 20000, 400));
+    assert!(rows[2].6.unwrap() > 0.0);
+
+    assert_eq!(rows[3].0, "AGY2");
+    assert_eq!(rows[3].2, "claude-opus-5.5");
+    assert_eq!((rows[3].3, rows[3].4, rows[3].5), (6000, 5000, 200));
+    assert!(rows[3].6.unwrap() > 0.0);
+
+    // Checkpoint inherited `claude-opus-5.5` from the preceding turn in conv-agy2-1.
+    assert_eq!(rows[4].0, "AGY2");
+    assert_eq!(rows[4].2, "claude-opus-5.5");
+    assert_eq!((rows[4].3, rows[4].4, rows[4].5), (25500, 25000, 300));
+    assert!(rows[4].6.unwrap() > 0.0);
 }

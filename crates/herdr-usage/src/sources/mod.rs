@@ -4,6 +4,7 @@
 //! resumes exactly where the previous process stopped (plan §7.2 "启动水位": the
 //! first ever run records the current position and backfills nothing).
 
+pub mod agy;
 pub mod codex;
 pub mod grok;
 pub mod omp;
@@ -22,7 +23,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-/// Where the four sources live. Every field is overridable so tests can point at
+/// Where the sources live. Every field is overridable so tests can point at
 /// a fixture directory instead of the live logs.
 #[derive(Clone, Debug)]
 pub struct SourcePaths {
@@ -34,6 +35,10 @@ pub struct SourcePaths {
     pub grok_log: PathBuf,
     pub grok_config: PathBuf,
     pub opencode_db: PathBuf,
+    /// `~/.gemini/antigravity-cli/brain` (`agy` primary profile).
+    pub agy: PathBuf,
+    /// `~/.gemini2/antigravity-cli/brain` (`agy2` secondary profile).
+    pub agy2: PathBuf,
 }
 
 impl SourcePaths {
@@ -48,7 +53,16 @@ impl SourcePaths {
             grok_log: home.join(".grok/logs/unified.jsonl"),
             grok_config: home.join(".grok/config.toml"),
             opencode_db: data.join("opencode/opencode.db"),
+            agy: home.join(".gemini/antigravity-cli/brain"),
+            agy2: home.join(".gemini2/antigravity-cli/brain"),
         }
+    }
+
+    pub fn agy_roots(&self) -> [(&Path, agy::AgyProfile); 2] {
+        [
+            (self.agy.as_path(), agy::AGY_PRIMARY),
+            (self.agy2.as_path(), agy::AGY_SECONDARY),
+        ]
     }
 
     /// Every omp session root: the primary one plus each profile that has a
@@ -78,6 +92,7 @@ pub struct Collector {
     omp_catalogs: Vec<(PathBuf, omp::AccountCatalog)>,
     codex: codex::CodexState,
     grok: grok::GrokState,
+    agy: agy::AgyState,
     /// `config.toml` mtime of the last successful read, so the fallback model is
     /// re-read only when the file actually changed (plan §2.5).
     grok_config_mtime: Option<SystemTime>,
@@ -100,6 +115,7 @@ impl Collector {
             omp_catalogs: Vec::new(),
             codex: codex::CodexState::new(),
             grok: grok::GrokState::new(None),
+            agy: agy::AgyState::new(),
             grok_config_mtime: None,
             scanned_files: 0,
         }
@@ -120,6 +136,7 @@ impl Collector {
         report.inserted += self.round_codex(connection, &prices, now)?;
         report.inserted += self.round_grok(connection, &prices, now)?;
         report.inserted += self.round_opencode(connection, &prices, now)?;
+        report.inserted += self.round_agy(connection, &prices, now)?;
         report.scanned_files = self.scanned_files;
         Ok(report)
     }
@@ -322,6 +339,48 @@ impl Collector {
         // The baseline never moves; rewriting it here is idempotent and keeps
         // the cursor write in the same round as the inserts.
         db::save_offset(connection, kind, &format!("{{\"max_rowid\":{baseline}}}"))?;
+        Ok(inserted)
+    }
+
+    fn round_agy(
+        &mut self,
+        connection: &mut Connection,
+        prices: &PriceTable,
+        now: i64,
+    ) -> rusqlite::Result<usize> {
+        let kind = "agy";
+        let mut store = OffsetStore::from_cursor(db::offset(connection, kind)?.as_deref());
+        let mut batch = Vec::new();
+        let mut inserted = 0;
+        let roots: Vec<(PathBuf, agy::AgyProfile)> = self
+            .paths
+            .agy_roots()
+            .into_iter()
+            .map(|(root, profile)| (root.to_path_buf(), profile))
+            .collect();
+        for (root, profile) in roots {
+            let files = agy::transcript_files(&root);
+            for file in &files {
+                read_new_chunks(&mut store, file, |lines, rotated| {
+                    if rotated {
+                        self.agy.forget(file);
+                    }
+                    for line in lines {
+                        for event in self.agy.parse_line(file, &line, profile) {
+                            let priced = price(prices, &event);
+                            batch.push((event, priced));
+                        }
+                    }
+                    if batch.len() >= 1000 {
+                        inserted += db::insert_events(connection, kind, &batch, now)?;
+                        batch.clear();
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+        inserted += db::insert_events(connection, kind, &batch, now)?;
+        db::save_offset(connection, kind, &store.cursor())?;
         Ok(inserted)
     }
 
@@ -919,4 +978,52 @@ pub fn backfill_codex_records(
     }
 
     Ok((inserted_compactions, deleted_duplicates))
+}
+
+/// One-off backfill for existing Antigravity CLI (`agy` / `agy2`) transcripts
+/// that were missed before `agy` collection existed.
+///
+/// Reads every existing `transcript.jsonl` from byte 0, inserts idempotently,
+/// and seeds `collect_offset(kind = 'agy')` at the consumed offsets if no `agy`
+/// watermark exists yet so live tailing resumes with zero gap.
+pub fn backfill_agy_history(
+    connection: &mut Connection,
+    paths: &SourcePaths,
+) -> rusqlite::Result<usize> {
+    let kind = "agy";
+    let prices = PriceTable::load(connection)?;
+    let now = now_ms();
+    let mut state = agy::AgyState::new();
+    let mut store = OffsetStore::default();
+    let mut batch = Vec::new();
+    let mut total_inserted = 0;
+
+    for (root, profile) in paths.agy_roots() {
+        for file in agy::transcript_files(root) {
+            store.baseline(&file, 0);
+            read_new_chunks(&mut store, &file, |lines, rotated| {
+                if rotated {
+                    state.forget(&file);
+                }
+                for line in lines {
+                    for event in state.parse_line(&file, &line, profile) {
+                        let priced = price(&prices, &event);
+                        batch.push((event, priced));
+                    }
+                }
+                if batch.len() >= 1000 {
+                    total_inserted += db::insert_events(connection, kind, &batch, now)?;
+                    batch.clear();
+                }
+                Ok(())
+            })?;
+        }
+    }
+    if !batch.is_empty() {
+        total_inserted += db::insert_events(connection, kind, &batch, now)?;
+    }
+    if db::offset(connection, kind)?.is_none() {
+        db::save_offset(connection, kind, &store.cursor())?;
+    }
+    Ok(total_inserted)
 }
