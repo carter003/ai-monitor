@@ -3,6 +3,7 @@ pub mod http;
 pub mod model;
 pub mod network;
 pub mod providers;
+mod subprocess;
 pub mod system;
 pub mod ui;
 pub mod usage;

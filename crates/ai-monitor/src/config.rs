@@ -6,11 +6,13 @@ use std::{
 };
 /// 配置文件里出现的键。声明为常量而不是结构体字段：解析器是手写的平面
 /// reader（见 `parse_config`），这个表既驱动解析也充当未知键守卫。
-const KEYS: [&str; 16] = [
+const KEYS: [&str; 18] = [
     "refresh_seconds",
     "network_enabled",
     "network_interval_seconds",
     "codex_home",
+    "agy_home",
+    "agy2_home",
     "opencode_home",
     "omp_home",
     "grok_home",
@@ -32,6 +34,8 @@ struct FileConfig {
     network_interval_seconds: Option<u64>,
     web_port: Option<u16>,
     codex_home: Option<String>,
+    agy_home: Option<String>,
+    agy2_home: Option<String>,
     opencode_home: Option<String>,
     omp_home: Option<String>,
     grok_home: Option<String>,
@@ -110,6 +114,8 @@ fn parse_config(text: &str) -> Result<FileConfig, String> {
             _ if is_quoted => match key {
                 "go2_key_file" => {} // Retired; accept the old path without opening it.
                 "openrouter_key_file" => config.openrouter_key_file = Some(unquoted.to_owned()),
+                "agy_home" => config.agy_home = Some(unquoted.to_owned()),
+                "agy2_home" => config.agy2_home = Some(unquoted.to_owned()),
                 "codex_home" => config.codex_home = Some(unquoted.to_owned()),
                 "opencode_home" => config.opencode_home = Some(unquoted.to_owned()),
                 "omp_home" => config.omp_home = Some(unquoted.to_owned()),
@@ -134,6 +140,8 @@ pub struct Config {
     pub network_interval: Duration,
     pub home: PathBuf,
     pub codex: PathBuf,
+    pub agy: PathBuf,
+    pub agy2: PathBuf,
     pub opencode: PathBuf,
     pub omp: PathBuf,
     pub grok: PathBuf,
@@ -181,6 +189,8 @@ impl Config {
                     .map(PathBuf::from)
                     .unwrap_or_else(|| home.join(".codex")),
             ),
+            agy: expand(file.agy_home, home.join(".gemini")),
+            agy2: expand(file.agy2_home, home.join(".gemini2")),
             opencode: expand(
                 file.opencode_home,
                 env::var_os("XDG_DATA_HOME")
@@ -254,6 +264,8 @@ mod tests {
 refresh_seconds = 120
 web_port = 8788
 codex_home = "/tmp/codex"
+agy_home = "/tmp/agy"
+agy2_home = "/tmp/agy2"
 opencode_home = "/tmp/opencode"
 omp_home = "/tmp/omp"
 grok_home = "/tmp/grok"
@@ -266,6 +278,8 @@ cloudflare_plan = "paid"
 cloudflare_billing_day = 8
 "#;
         let parsed = parse_config(text).expect("all keys declared");
+        assert_eq!(parsed.agy_home.as_deref(), Some("/tmp/agy"));
+        assert_eq!(parsed.agy2_home.as_deref(), Some("/tmp/agy2"));
         assert_eq!(parsed.refresh_seconds, Some(120));
         assert_eq!(parsed.web_port, Some(8788));
         assert_eq!(parsed.usage_db.as_deref(), Some("/tmp/usage.db"));

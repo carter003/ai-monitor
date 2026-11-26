@@ -1,3 +1,4 @@
+mod agy;
 mod grok;
 mod parse;
 
@@ -13,6 +14,7 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
     io::Read,
     path::{Path, PathBuf},
+    sync::{Arc, atomic::AtomicBool},
 };
 
 // Deliberately no Debug: this object contains authentication material.
@@ -47,6 +49,16 @@ pub fn prepare(source: Source, config: &Config) -> Result<Prepared, FetchError> 
             if input.token.is_empty() {
                 return Err(FetchError::auth("请先登录 Codex 订阅账户"));
             }
+        }
+        Source::Agy | Source::Agy2 => {
+            let profile = if source == Source::Agy {
+                &config.agy
+            } else {
+                &config.agy2
+            };
+            input.identity = agy::profile_identity(profile, source.title())?;
+            input.profile = Some(profile.clone());
+            return Ok(input);
         }
         Source::Go => {
             input.token = opencode_go_key(&config.omp, &config.opencode)?;
@@ -104,21 +116,20 @@ pub fn prepare(source: Source, config: &Config) -> Result<Prepared, FetchError> 
     }
     // Account ID when available, credential fingerprint otherwise.
     input.identity = fingerprint(input.account.as_deref().unwrap_or(&input.token));
-    if input.profile.is_some() {
-        input.identity.push_str(&fingerprint(&input.token));
-    }
     Ok(input)
 }
 
 #[derive(Default)]
-pub struct Session;
+pub struct Session {
+    pub(crate) stop: Arc<AtomicBool>,
+}
 
 pub fn fetch(
     source: Source,
     input: &Prepared,
     http: &Http,
-    _config: &Config,
-    _session: &mut Session,
+    config: &Config,
+    session: &mut Session,
 ) -> Result<Vec<Card>, FetchError> {
     match source {
         Source::Codex => parse::codex(&http.get(
@@ -126,6 +137,12 @@ pub fn fetch(
             &input.token,
             input.account.as_deref(),
         )?),
+        Source::Agy | Source::Agy2 => agy::fetch(
+            input.profile.as_deref().ok_or_else(FetchError::format)?,
+            source.title(),
+            &config.home,
+            &session.stop,
+        ),
         Source::Go => parse::go(
             &http.get("https://opencode.ai/zen/go/v1/usage", &input.token, None)?,
             source.title(),

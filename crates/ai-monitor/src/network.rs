@@ -2,8 +2,7 @@
 use crate::worker::Update;
 use std::{
     collections::VecDeque,
-    io::Read,
-    process::{Command, Stdio},
+    process::Command,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -13,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub const ROUTES: [(&str, &str); 3] = [
+pub const ROUTES: [(&str, &str); 4] = [
     ("Codex", "https://chatgpt.com/backend-api/codex/responses"),
     (
         "OpenCode Go",
@@ -23,6 +22,7 @@ pub const ROUTES: [(&str, &str); 3] = [
         "SuperGrok",
         "https://cli-chat-proxy.grok.com/v1/chat/completions",
     ),
+    ("AGY", "https://antigravity.google/"),
 ];
 const WINDOW: Duration = Duration::from_secs(300);
 const MIN_INTERVAL: Duration = Duration::from_secs(5);
@@ -82,7 +82,7 @@ impl RouteState {
 pub struct NetworkState {
     pub enabled: bool,
     pub interval: Duration,
-    pub routes: [RouteState; 3],
+    pub routes: [RouteState; ROUTES.len()],
 }
 impl NetworkState {
     pub fn new(enabled: bool, interval: Duration) -> Self {
@@ -181,82 +181,19 @@ fn command(url: &str) -> Command {
         url,
     ]);
     command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::process::CommandExt;
-        let parent = std::process::id() as libc::pid_t;
-        // Covers watchdog process::exit and SIGKILL, which do not run Drop.
-        unsafe {
-            command.pre_exec(move || {
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::getppid() != parent {
-                    libc::_exit(1);
-                }
-                Ok(())
-            });
-        }
-    }
-    command
 }
 
-fn execute(mut command: Command, stop: &AtomicBool, timeout: Duration) -> Option<Probe> {
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(e) => {
-            return Some(Probe::failed(if e.kind() == std::io::ErrorKind::NotFound {
-                "缺少curl"
-            } else {
-                "无法启动curl"
-            }));
-        }
+fn execute(command: Command, stop: &AtomicBool, timeout: Duration) -> Option<Probe> {
+    let probe = match crate::subprocess::output(command, stop, timeout) {
+        Ok((status, body)) => parse(&body, status.code(), chrono::Utc::now().timestamp()),
+        Err(e) => match e.kind() {
+            std::io::ErrorKind::Interrupted => return None,
+            std::io::ErrorKind::TimedOut => Probe::failed("超时"),
+            std::io::ErrorKind::NotFound => Probe::failed("缺少curl"),
+            _ => Probe::failed("无法启动curl"),
+        },
     };
-    let mut stdout = child.stdout.take().expect("piped stdout");
-    // Drain continuously, retaining only a bounded tail (headers can be large).
-    let reader = thread::spawn(move || {
-        let mut output = Vec::new();
-        let mut chunk = [0; 4096];
-        while let Ok(n) = stdout.read(&mut chunk) {
-            if n == 0 {
-                break;
-            }
-            output.extend_from_slice(&chunk[..n]);
-            if output.len() > 65536 {
-                output.drain(..output.len() - 65536);
-            }
-        }
-        String::from_utf8_lossy(&output).into_owned()
-    });
-    let started = Instant::now();
-    let (code, timed_out) = loop {
-        if stop.load(Ordering::Relaxed) || started.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            break (None, true);
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break (status.code(), false),
-            Ok(None) => thread::sleep(Duration::from_millis(20)),
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break (None, false);
-            }
-        }
-    };
-    let output = reader.join().unwrap_or_default();
-    if stop.load(Ordering::Relaxed) {
-        return None;
-    }
-    Some(if timed_out {
-        Probe::failed("超时")
-    } else {
-        parse(&output, code, chrono::Utc::now().timestamp())
-    })
+    Some(probe)
 }
 
 fn wait_for_next(

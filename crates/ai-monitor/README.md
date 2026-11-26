@@ -12,7 +12,7 @@ ai-monitor
 
 一页两栏，同时展示系统资源和本机 token 消耗：
 
-- **左栏**：上半是系统资源，下半是 Codex 常规 GPT、OpenCode Go、SuperGrok 和 OpenRouter 的
+- **左栏**：上半是系统资源，下半是 Codex 常规 GPT、AGY、AGY2、OpenCode Go、SuperGrok 和 OpenRouter 的
   **云端剩余配额**。额度列表在系统数字下方独立滚动，不会把系统指标顶出画面。
 - **右栏**：本机实际烧掉的 token —— 上半左侧（占宽 70%）是按模型排行的一行一模型表格
   （输入含缓存命中率／输出／思考／合计／金额），右侧（30%）是当日、本周、当月三个区间的
@@ -71,8 +71,8 @@ Token 数据来自 `~/.local/share/herdr/usage.db`，由 Herdr 侧的 `herdr-usa
 
 ## 0.7.1 更新
 
-去除已停用的 OpenCode GO-2 订阅额度：旧配置可以保留 `go2_key_file` 字符串，启动时直接忽略该路径，额度面板恢复为 Codex / OpenCode Go /
-SuperGrok / OpenRouter 四项。
+去除已停用的 OpenCode GO-2 订阅额度：旧配置可以保留 `go2_key_file` 字符串，启动时直接忽略该路径。
+额度面板已恢复 AGY 和 AGY2 的 Gemini 5 小时及周额度。
 
 ## 0.7.0 更新
 
@@ -234,6 +234,7 @@ OpenCode Go 固定最少显示 1 位小数（`98.0%`／`99.0%`／`100.0%`，0.1.
 ## 账户与数据来源
 
 - **Codex**：读取 `~/.codex/auth.json` 中的现有 ChatGPT 登录凭据，查询账户 usage。常规额度按返回的窗口显示，账户返回的其他独立额度池一并列出；已停用的 GPT-5.3-Codex-Spark 不再统计。此接口属于 Codex 客户端内部接口，可能随服务更新而变化。不会启动 Codex 模型推理或刷新／改写其登录文件。
+- **AGY / AGY2** 分别使用 `~/.gemini`、`~/.gemini2` 中已登录的 Antigravity CLI 配置。看板调用官方 CLI 的 `/usage`，显示各账号 Gemini 共享池的 5 小时和周剩余额度及重置时间。
 - **OpenCode Go**：优先从 omp（`~/.omp/agent/agent.db` 及各 profile）读取当前生效的 Go API Key，未找到时回退至 OpenCode 已保存的凭据（`~/.local/share/opencode/auth.json`），查询 `/zen/go/v1/usage`，显示 5H／周／月剩余比例，不抓取浏览器 Cookie。
 - **SuperGrok**：使用 `~/.grok/auth.json` 中的订阅登录信息，查询 Grok Build 的订阅 credits 接口，按实际返回的周期解码。登录过期时提示重新登录 Grok。账号的实时接口仍受登录状态、服务端权限及内部协议版本影响，不能保证每个账号都有可查询额度。
 - **OpenRouter**：使用具有余额查询权限的 Key 查询 `/api/v1/credits`，显示账户总 credits 减总 usage。读取顺序为下述 Key 文件、`OPENROUTER_MANAGEMENT_KEY`、`OPENROUTER_API_KEY`，最后尝试 OpenCode 保存的 OpenRouter Key。普通模型调用 Key 不保证具有余额查询权限。
@@ -251,6 +252,7 @@ OpenRouter 专用 Key 可保存在 `~/.config/ai-monitor/openrouter.key`，文�
 | Codex | `https://chatgpt.com/backend-api/codex/responses` |
 | OpenCode Go | `https://opencode.ai/zen/go/v1/chat/completions` |
 | SuperGrok | `https://cli-chat-proxy.grok.com/v1/chat/completions` |
+| AGY（两个账号共用公开站点） | `https://antigravity.google/` |
 
 每条线路启动立即探测，默认每 10 秒一次，超时 5 秒，独立运行。通过 Rust Command 直接启动 curl，禁用 `.curlrc`，发送无凭据 HEAD，不发送提示词、不调用模型、不消耗模型 token；不跟随重定向，保留证书验证。每次建立新连接，继承监控进程的代理环境变量和系统路由。Codex 选择 ChatGPT 订阅入口，但探测不读取或发送订阅凭据。
 
@@ -275,6 +277,8 @@ network_interval_seconds = 10 # 5–300 秒
 web_port = 19999 # 本地网页端口；0 自动分配
 usage_db = "~/.local/share/herdr/usage.db"
 codex_home = "~/.codex"
+agy_home = "~/.gemini"
+agy2_home = "~/.gemini2"
 opencode_home = "~/.local/share/opencode"
 omp_home = "~/.omp"
 grok_home = "~/.grok"

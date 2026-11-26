@@ -1,4 +1,5 @@
 use super::*;
+use std::process::Stdio;
 fn reply(status: u16) -> Probe {
     parse(
         &format!(

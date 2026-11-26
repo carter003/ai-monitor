@@ -106,7 +106,7 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend, widgets::Paragraph};
     fn sample() -> NetworkState {
         let mut state = NetworkState::new(true, Duration::from_secs(10));
-        for route in 0..3 {
+        for route in 0..ROUTES.len() {
             for _ in 0..3 {
                 state.apply(NetworkUpdate {
                     route,
@@ -174,6 +174,7 @@ mod tests {
             assert!(text.contains("AI 线路"), "{width}x{height}: {text}");
             if fixed {
                 assert!(text.contains("SuperGrok"));
+                assert!(text.contains("AGY"));
                 assert!(text.contains("4580ms"));
             } else {
                 assert!(view.max_scroll > 0);

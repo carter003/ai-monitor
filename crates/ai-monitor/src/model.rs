@@ -3,17 +3,28 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
     Codex,
+    Agy,
+    Agy2,
     Go,
     Grok,
     OpenRouter,
 }
 
 impl Source {
-    pub const ALL: [Self; 4] = [Self::Codex, Self::Go, Self::Grok, Self::OpenRouter];
+    pub const ALL: [Self; 6] = [
+        Self::Codex,
+        Self::Agy,
+        Self::Agy2,
+        Self::Go,
+        Self::Grok,
+        Self::OpenRouter,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
             Self::Codex => "Codex · GPT",
+            Self::Agy => "AGY",
+            Self::Agy2 => "AGY2",
             Self::Go => "OpenCode Go",
             Self::Grok => "SuperGrok",
             Self::OpenRouter => "OpenRouter",

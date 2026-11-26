@@ -36,7 +36,7 @@ pub struct Workers {
     pub updates: Receiver<Update>,
     senders: Vec<SyncSender<()>>,
     stop: Arc<AtomicBool>,
-    network_handles: Vec<thread::JoinHandle<()>>,
+    child_handles: Vec<thread::JoinHandle<()>>,
 }
 
 impl Workers {
@@ -47,6 +47,7 @@ impl Workers {
         // Client clones share their pools and blocking runtimes. Credentials and
         // OAuth sessions remain per worker; authentication is request-specific.
         let http = Http::new();
+        let mut child_handles = Vec::new();
         for source in Source::ALL {
             let (trigger, receiver) = mpsc::sync_channel(1);
             senders.push(trigger);
@@ -54,7 +55,7 @@ impl Workers {
             let tx = tx.clone();
             let stop = stop.clone();
             let http = http.clone();
-            thread::spawn(move || {
+            let handle = thread::spawn(move || {
                 let http = match http {
                     Ok(http) => http,
                     Err(e) => {
@@ -68,7 +69,7 @@ impl Workers {
                     }
                 };
                 let mut failures = 0u32;
-                let mut session = providers::Session::default();
+                let mut session = providers::Session { stop: stop.clone() };
                 loop {
                     if stop.load(Ordering::Relaxed) {
                         break;
@@ -130,6 +131,9 @@ impl Workers {
                     }
                 }
             });
+            if matches!(source, Source::Agy | Source::Agy2) {
+                child_handles.push(handle);
+            }
         }
         // The usage reader runs on its own thread so a slow or missing database
         // cannot delay the quota polls, and vice versa. It reuses the existing
@@ -197,16 +201,14 @@ impl Workers {
                 }
             });
         }
-        let network_handles = if config.network_enabled {
+        if config.network_enabled {
             let (triggers, handles) =
                 crate::network::start(config.network_interval, tx, stop.clone());
             senders.extend(triggers);
-            handles
-        } else {
-            vec![]
-        };
+            child_handles.extend(handles);
+        }
         Self {
-            network_handles,
+            child_handles,
             updates,
             senders,
             stop,
@@ -223,7 +225,8 @@ impl Workers {
 impl Drop for Workers {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        for handle in self.network_handles.drain(..) {
+        self.senders.clear();
+        for handle in self.child_handles.drain(..) {
             let _ = handle.join();
         }
     }

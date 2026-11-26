@@ -67,6 +67,61 @@ fn codex_card(title: &str, value: &Value) -> Result<Card, FetchError> {
     Ok(card)
 }
 
+/// Read only the Gemini subscription pool. The CLI also returns unrelated
+/// Claude/GPT buckets with the same window names.
+pub fn agy(value: &Value, title: &str) -> Result<Vec<Card>, FetchError> {
+    if value.get("status").and_then(Value::as_str) != Some("SUCCESS")
+        || value.pointer("/command/name").and_then(Value::as_str) != Some("usage")
+    {
+        return Err(FetchError::format());
+    }
+    let groups = value
+        .pointer("/command/data/groups")
+        .and_then(Value::as_array)
+        .ok_or_else(FetchError::format)?;
+    let buckets = groups
+        .iter()
+        .find(|group| group.get("name").and_then(Value::as_str) == Some("Gemini Models"))
+        .ok_or_else(|| FetchError::new("未返回 Gemini 共享额度"))?
+        .get("buckets")
+        .and_then(Value::as_array)
+        .ok_or_else(FetchError::format)?;
+    let mut card = Card::empty(title);
+    for (window, label) in [("5h", "5H"), ("weekly", "周")] {
+        let Some(bucket) = buckets.iter().find(|bucket| {
+            bucket.get("window").and_then(Value::as_str) == Some(window)
+                && bucket.get("disabled").and_then(Value::as_bool) != Some(true)
+        }) else {
+            continue;
+        };
+        let raw = &bucket["remaining_fraction"];
+        let fraction = if raw.is_null() {
+            None
+        } else {
+            Some(
+                raw.as_f64()
+                    .filter(|f| (0.0..=1.0).contains(f))
+                    .ok_or_else(FetchError::format)?,
+            )
+        };
+        let resets_at = bucket
+            .get("reset_time")
+            .and_then(timestamp)
+            .filter(|at| *at > 0);
+        card.meters.push(Meter {
+            label: label.into(),
+            remaining: fraction.map(|f| f * 100.0),
+            decimals: decimals(raw).saturating_sub(2).min(2),
+            resets_at,
+            available: fraction == Some(1.) && resets_at.is_none(),
+        });
+    }
+    if !card.meters.iter().any(|meter| meter.remaining.is_some()) {
+        return Err(FetchError::format());
+    }
+    Ok(vec![card])
+}
+
 pub fn go(value: &Value, title: &str) -> Result<Vec<Card>, FetchError> {
     let usage = value.get("usage").ok_or_else(FetchError::format)?;
     let mut card = Card::empty(title);
@@ -130,6 +185,40 @@ fn decimals(value: &Value) -> u8 {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn agy_uses_the_cli_gemini_pool_and_keeps_each_window_separate() {
+        let mut response = json!({"status":"SUCCESS","command":{"name":"usage","data":{"groups":[
+            {"name":"Claude and GPT models","buckets":[{"window":"weekly","remaining_fraction":0}]},
+            {"name":"Gemini Models","buckets":[
+                {"window":"weekly","remaining_fraction":0.722253,"reset_time":"2030-01-01T00:00:00Z"},
+                {"window":"5h","remaining_fraction":1,"reset_time":"1970-01-01T00:00:00Z"}
+            ]}
+        ]}}});
+        let cards = agy(&response, "AGY2").unwrap();
+        assert_eq!(cards[0].title, "AGY2");
+        let meters = &cards[0].meters;
+        assert_eq!(meters.len(), 2);
+        assert_eq!(meters[0].label, "5H");
+        assert_eq!(meters[0].remaining, Some(100.));
+        assert!(meters[0].available);
+        assert_eq!(meters[1].label, "周");
+        assert_eq!(meters[1].decimals, 2);
+        assert!((meters[1].remaining.unwrap() - 72.2253).abs() < 1e-8);
+        assert_eq!(meters[1].resets_at, Some(1893456000));
+        let frac = "/command/data/groups/1/buckets/1/remaining_fraction";
+        *response.pointer_mut(frac).unwrap() = Value::Null;
+        assert_eq!(agy(&response, "AGY").unwrap()[0].meters[0].remaining, None);
+        *response.pointer_mut(frac).unwrap() = json!(1.1);
+        assert!(agy(&response, "AGY").is_err());
+        response
+            .pointer_mut("/command/data/groups")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert!(agy(&response, "AGY").is_err());
+    }
+
     #[test]
     fn retired_spark_pool_is_never_reported() {
         let w = |seconds, used| json!({"limit_window_seconds":seconds,"used_percent":used,"reset_at":1800000000});
