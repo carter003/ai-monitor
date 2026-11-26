@@ -1,4 +1,3 @@
-import { tokenCounterForModel } from './model-token-counter.mjs';
 import { TokenRateMeter } from './token-rate-meter.mjs';
 
 const DEFAULT_SAMPLE_INTERVAL_MS = 250;
@@ -16,7 +15,7 @@ export class LiveTpsReporter {
     displayIntervalMs = DEFAULT_DISPLAY_INTERVAL_MS,
     metadataRefreshMs = DEFAULT_METADATA_REFRESH_MS,
     metadataTtlMs = DEFAULT_METADATA_TTL_MS,
-    tokenCounterFactory = tokenCounterForModel,
+    tokenCounterFactory = () => () => 0,
     streamingOnly = false,
     autoStart = true,
   } = {}) {
@@ -34,7 +33,6 @@ export class LiveTpsReporter {
     });
     this.tokenCounterFactory = tokenCounterFactory;
     this.currentModel = undefined;
-    this.displayAgent = undefined;
     this.lastRate = 0;
     this.timer = undefined;
     this.metadataTimer = undefined;
@@ -63,15 +61,6 @@ export class LiveTpsReporter {
     this.sampler.configure({ countTokens: this.tokenCounterFactory(model) }, now);
   }
 
-  setDisplayAgent(displayAgent) {
-    if (this.closed) return;
-    if (!displayAgent || displayAgent === this.displayAgent) {
-      return;
-    }
-    this.displayAgent = displayAgent;
-    void this.publisher.publishDisplayAgent(displayAgent, this.metadataTtlMs);
-  }
-
   resetSession(now = Date.now()) {
     if (this.closed) return;
     this.currentModel = undefined;
@@ -81,19 +70,10 @@ export class LiveTpsReporter {
     void this.publisher.clearModel();
   }
 
-  refreshDisplayAgent() {
-    if (this.closed) return;
-    if (!this.displayAgent) {
-      return;
-    }
-    void this.publisher.publishDisplayAgent(this.displayAgent, this.metadataTtlMs);
-  }
-
   refreshMetadata() {
     if (this.closed) return;
     const snapshot = {
       model: this.currentModel,
-      displayAgent: this.displayAgent,
       rate: this.lastRate,
     };
     const ttlMs =
@@ -249,7 +229,6 @@ export class LiveTpsReporter {
     }
     this.lastRate = undefined;
     this.currentModel = undefined;
-    this.displayAgent = undefined;
     this.closePromise = this.publisher.clearAll();
     return this.closePromise;
   }

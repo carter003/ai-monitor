@@ -1,516 +1,154 @@
 #!/usr/bin/env node
-
-import { spawnSync } from 'node:child_process';
-import { constants } from 'node:fs';
-import {
-  access,
-  chmod,
-  copyFile,
-  lstat,
-  mkdir,
-  open,
-  readFile,
-  readlink,
-  realpath,
-  symlink,
-  unlink,
-  writeFile,
-} from 'node:fs/promises';
-import { homedir } from 'node:os';
+import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
+import { homedir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const dryRun = process.argv.includes('--dry-run');
+const root = path.dirname(fileURLToPath(import.meta.url));
 const home = process.env.HERDR_TPS_HOME || homedir();
-const configPath =
-  process.env.HERDR_TPS_CONFIG || path.join(home, '.config', 'herdr', 'config.toml');
-const binDirectory = process.env.HERDR_TPS_BIN_DIR || path.join(home, '.local', 'bin');
-const commandDirectory =
-  process.env.HERDR_TPS_COMMAND_DIR || path.join(home, '.local', 'share', 'herdr-tps', 'bin');
-const shellRcPath =
-  process.env.HERDR_TPS_SHELL_RC ||
-  path.join(home, path.basename(process.env.SHELL ?? '') === 'zsh' ? '.zshrc' : '.bashrc');
-const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
-const ompRuntimeDirectory =
-  process.env.HERDR_TPS_RUNTIME_DIR || path.join(scriptDirectory, '.runtime');
-const managedOmpTarget = path.join(ompRuntimeDirectory, 'omp');
-const originalAgentRows = `rows = [
-  ["state_icon", "agent", "$model", "$tps"],
-  ["workspace", "tab"],
-]`;
-const legacyAgentRowsWithoutStateIcon = `rows = [
-  ["workspace", "tab"],
-  ["agent", "$tps"],
-  ["$model"],
-]`;
-const agentRows = `rows = [
-  ["workspace", "tab"],
-  ["state_icon", "agent", "$tps"],
-  ["$model"],
-]`;
-const shellBlockStart = '# >>> herdr-tps Herdr-only PATH >>>';
-const shellBlockEnd = '# <<< herdr-tps Herdr-only PATH <<<';
-const legacyShellBlockStart = '# >>> herdr-tps stable Codex dispatcher PATH >>>';
-const legacyShellBlockEnd = '# <<< herdr-tps stable Codex dispatcher PATH <<<';
-
-function shellSingleQuote(value) {
-  return `'${String(value).replaceAll("'", `'"'"'`)}'`;
+const bin = process.env.HERDR_TPS_BIN_DIR || path.join(home, '.local/bin');
+const runtime = process.env.HERDR_TPS_RUNTIME_DIR || path.join(root, '.runtime');
+const shell = process.env.HERDR_TPS_SHELL_RC || path.join(home, '.bashrc');
+const config = path.join(home, '.codex/config.toml');
+const herdr = process.env.HERDR_TPS_CONFIG || path.join(home, '.config/herdr/config.toml');
+const extensions = path.join(home, '.omp/agent/extensions');
+const dry = process.argv.includes('--dry-run');
+const uninstall = process.argv.includes('--uninstall');
+const stamp = `${Date.now()}-${process.pid}`;
+const begin = '# >>> herdr-tps native hooks >>>';
+const end = '# <<< herdr-tps native hooks <<<';
+const archive = path.join(home, '.local/state/herdr-tps/backups', stamp);
+const changes = [];
+const undo = [];
+const exists = (file) => { try { fs.lstatSync(file); return true; } catch (e) { if (e.code !== 'ENOENT') throw e; return false; } };
+const read = (file) => exists(file) ? fs.readFileSync(file, 'utf8') : '';
+const quote = (value) => `'${value.replaceAll("'", `'"'"'`)}'`;
+function strip(content, start, finish) {
+  const a = content.indexOf(start), b = content.indexOf(finish);
+  if ((a < 0) !== (b < 0) || b < a) throw new Error(`Incomplete managed block: ${start}`);
+  if (a < 0) return content;
+  if (content.indexOf(start, a + start.length) >= 0) throw new Error(`Duplicate managed block: ${start}`);
+  return content.slice(0, a) + content.slice(b + finish.length).replace(/^\n/, '');
 }
-
-function managedShellBlock() {
-  return `${shellBlockStart}
-if [ "\${HERDR_ENV:-}" = "1" ]; then
-  export PATH=${shellSingleQuote(commandDirectory)}:"\${PATH:-}"
-fi
-${shellBlockEnd}`;
+function plan(file, value, kind = 'file') {
+  if (kind === 'file' && read(file) === value) return;
+  if (kind === 'link' && exists(file) && fs.lstatSync(file).isSymbolicLink() && fs.readlinkSync(file) === value) return;
+  if (kind === 'remove' && !exists(file)) return;
+  changes.push({ file, value, kind });
 }
-
-async function configuredShellRc() {
-  let content = '';
-  let exists = true;
-  try {
-    content = await readFile(shellRcPath, 'utf8');
-  } catch (error) {
-    if (error.code !== 'ENOENT') {
-      throw error;
-    }
-    exists = false;
+function removeManagedLink(file, allowed) {
+  if (!exists(file)) return;
+  if (!fs.lstatSync(file).isSymbolicLink() || !allowed.some(x => fs.readlinkSync(file).includes(x))) {
+    throw new Error(`Refusing to remove an unmanaged entry: ${file}`);
   }
-
-  const legacyStart = content.indexOf(legacyShellBlockStart);
-  const legacyEnd = content.indexOf(legacyShellBlockEnd);
-  if (legacyStart >= 0 !== legacyEnd >= 0 || (legacyStart >= 0 && legacyEnd < legacyStart)) {
-    throw new Error(`${shellRcPath} 中的旧 herdr-tps dispatcher PATH 标记不完整，拒绝自动修改`);
-  }
-  let legacyRemoved = false;
-  if (legacyStart >= 0) {
-    content = `${content.slice(0, legacyStart)}${content.slice(legacyEnd + legacyShellBlockEnd.length)}`;
-    legacyRemoved = true;
-  }
-
-  const block = managedShellBlock();
-  const start = content.indexOf(shellBlockStart);
-  const end = content.indexOf(shellBlockEnd);
-  const hasStart = start >= 0;
-  const hasEnd = end >= 0;
-  if (hasStart !== hasEnd || (hasStart && end < start)) {
-    throw new Error(`${shellRcPath} 中的 herdr-tps PATH 标记不完整，拒绝自动修改`);
-  }
-  if (start < 0) {
-    return {
-      content: `${content.trimEnd()}\n\n${block}\n`,
-      changed: true,
-      exists,
-      legacyRemoved,
-    };
-  }
-
-  const blockEnd = end + shellBlockEnd.length;
-  const next = `${content.slice(0, start)}${block}${content.slice(blockEnd)}`;
-  return {
-    content: next,
-    changed: next !== content || legacyRemoved,
-    exists,
-    legacyRemoved,
-  };
+  plan(file, undefined, 'remove');
 }
-
-function unmanagedHerdrPathLines(content) {
-  const findings = [];
-  let insideManaged = false;
-  let insideLegacy = false;
-  content.split('\n').forEach((line, index) => {
-    if (line.includes(shellBlockStart)) insideManaged = true;
-    if (line.includes(shellBlockEnd)) insideManaged = false;
-    if (line.includes(legacyShellBlockStart)) insideLegacy = true;
-    if (line.includes(legacyShellBlockEnd)) insideLegacy = false;
-    if (insideManaged || insideLegacy) return;
-    if (/^\s*export PATH=.*herdr-tps\/bin/.test(line)) {
-      findings.push(index + 1);
-    }
-  });
-  return findings;
+function check(command, args) {
+  const result = spawnSync(command, args, { encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(`${command} validation failed: ${result.stderr || result.error || result.stdout}`);
 }
-
-async function isNodeWrapper(target) {
-  const handle = await open(target, 'r');
-  try {
-    const buffer = Buffer.alloc(64);
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    return buffer.toString('utf8', 0, bytesRead).startsWith('#!/usr/bin/env node\n');
-  } finally {
-    await handle.close();
-  }
+function toml(content) {
+  const result = spawnSync('python3', ['-c', 'import sys,tomllib; tomllib.loads(sys.stdin.read())'], { input: content, encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(`TOML validation failed: ${result.stderr}`);
 }
-
-async function assertNodeWrapper(target) {
-  if (!(await isNodeWrapper(target))) {
-    throw new Error(`${target} 不是有效的 Node wrapper，拒绝安装命令链接`);
-  }
-}
-
-async function configuredContent() {
-  const content = await readFile(configPath, 'utf8');
-  const sectionPattern = /^\[ui\.sidebar\.agents\]\s*$/m;
-  const match = sectionPattern.exec(content);
-  if (!match) {
-    return {
-      content: `${content.trimEnd()}\n\n[ui.sidebar.agents]\n${agentRows}\n`,
-      changed: true,
-    };
-  }
-
-  const sectionStart = match.index + match[0].length;
-  const nextSection = /^\[/m.exec(content.slice(sectionStart));
-  const sectionEnd = nextSection ? sectionStart + nextSection.index : content.length;
-  const section = content.slice(sectionStart, sectionEnd);
-  if (section.includes(agentRows)) {
-    return { content, changed: false };
-  }
-  const managedRows = section.includes(originalAgentRows)
-    ? originalAgentRows
-    : section.includes(legacyAgentRowsWithoutStateIcon)
-      ? legacyAgentRowsWithoutStateIcon
-      : undefined;
-  if (managedRows) {
-    return {
-      content: `${content.slice(0, sectionStart)}${section.replace(managedRows, agentRows)}${content.slice(sectionEnd)}`,
-      changed: true,
-    };
-  }
-  if (/^\s*rows\s*=/m.test(section)) {
-    const requiredTokens = ['"state_icon"', '"$tps"', '"$model"'];
-    if (requiredTokens.every((token) => section.includes(token))) {
-      return { content, changed: false };
-    }
-    throw new Error(`${configPath} 已定义自定义 ui.sidebar.agents.rows，拒绝自动覆盖`);
-  }
-
-  return {
-    content: `${content.slice(0, sectionStart)}\n${agentRows}${content.slice(sectionStart)}`,
-    changed: true,
-  };
-}
-
-async function installLink(name, target, directory = binDirectory) {
-  const linkPath = path.join(directory, name);
-  try {
-    const stats = await lstat(linkPath);
-    if (!stats.isSymbolicLink()) {
-      throw new Error(`${linkPath} 已存在且不是本工具创建的链接`);
-    }
-    const currentTarget = await linkTarget(linkPath);
-    if (currentTarget === target) return false;
-
-    let dangling = false;
-    try {
-      await access(currentTarget);
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-      dangling = true;
-    }
-    if (!dangling || path.basename(currentTarget) !== path.basename(target)) {
-      throw new Error(`${linkPath} 已存在且不是本工具创建的链接`);
-    }
-    if (!dryRun) await unlink(linkPath);
-  } catch (error) {
-    if (error.code !== 'ENOENT') {
-      throw error;
-    }
-  }
-
-  if (!dryRun) {
-    await mkdir(directory, { recursive: true });
-    await chmod(target, 0o755);
-    await symlink(target, linkPath);
-  }
-  return true;
-}
-
-async function executableOnPath(name, wrapperTarget) {
-  const excludedDirectory = path.resolve(binDirectory);
-  for (const directory of process.env.PATH?.split(path.delimiter) ?? []) {
-    if (!directory || path.resolve(directory) === excludedDirectory) {
-      continue;
-    }
-    const candidate = path.join(directory, name);
-    try {
-      await access(candidate, constants.X_OK);
-      if (wrapperTarget && (await realpath(candidate)) === (await realpath(wrapperTarget)))
-        continue;
-      return candidate;
-    } catch {
-      // Continue searching PATH.
-    }
-  }
-  return undefined;
-}
-
-async function usableOriginalOmp(candidate, rejectedTarget) {
-  if (!candidate || candidate === rejectedTarget || candidate === managedOmpTarget) {
-    return undefined;
-  }
-  try {
-    await access(candidate, constants.X_OK);
-  } catch {
-    return undefined;
-  }
-  if (await isNodeWrapper(candidate)) {
-    return undefined;
-  }
-  return candidate;
-}
-
-async function executableTarget(linkPath, rejectedTarget) {
-  try {
-    const stats = await lstat(linkPath);
-    if (!stats.isSymbolicLink()) {
-      return undefined;
-    }
-    return usableOriginalOmp(await linkTarget(linkPath), rejectedTarget);
-  } catch {
-    return undefined;
-  }
-}
-
-async function ensureManagedOmpBinary(wrapperTarget) {
-  try {
-    await access(managedOmpTarget, constants.X_OK);
-    if (!(await isNodeWrapper(managedOmpTarget))) {
-      return false;
-    }
-    // A previous install copied a Node wrapper; re-seed from a real original.
-  } catch {
-    // Seed the stable runtime target below.
-  }
-
-  const commandPath = path.join(binDirectory, 'omp');
-  const originalPath = path.join(binDirectory, '.herdr-omp-original');
-  const source =
-    (await executableTarget(commandPath, wrapperTarget)) ??
-    (await executableTarget(originalPath, wrapperTarget)) ??
-    (await usableOriginalOmp(await executableOnPath('omp', wrapperTarget), wrapperTarget));
-  if (!source) {
-    throw new Error('找不到可用于初始化稳定 runtime 的原始 omp 可执行文件');
-  }
-
-  if (!dryRun) {
-    await mkdir(ompRuntimeDirectory, { recursive: true });
-    try {
-      await unlink(managedOmpTarget);
-    } catch (error) {
-      if (error.code !== 'ENOENT') {
-        throw error;
-      }
-    }
-    await copyFile(source, managedOmpTarget);
-    await chmod(managedOmpTarget, 0o755);
-  }
-  return true;
-}
-
-async function linkTarget(linkPath) {
-  const rawTarget = await readlink(linkPath);
-  return path.isAbsolute(rawTarget) ? rawTarget : path.resolve(path.dirname(linkPath), rawTarget);
-}
-
-async function replaceSymlink(linkPath, target) {
-  try {
-    const stats = await lstat(linkPath);
-    if (!stats.isSymbolicLink()) {
-      throw new Error(`${linkPath} 已存在且不是符号链接，拒绝覆盖`);
-    }
-    if ((await linkTarget(linkPath)) === target) {
-      return false;
-    }
-    if (!dryRun) {
-      await unlink(linkPath);
-    }
-  } catch (error) {
-    if (error.code !== 'ENOENT') {
-      throw error;
-    }
-  }
-
-  if (!dryRun) {
-    await symlink(target, linkPath);
-  }
-  return true;
-}
-
-async function installManagedOmpCommand(wrapperTarget) {
-  if (!dryRun) await mkdir(binDirectory, { recursive: true });
-  const originalChanged = await replaceSymlink(
-    path.join(binDirectory, '.herdr-omp-original'),
-    managedOmpTarget,
-  );
-  const commandChanged = await replaceSymlink(path.join(binDirectory, 'omp'), wrapperTarget);
-  return originalChanged || commandChanged;
-}
-
-async function installUpdaterSafeCodexCommand(wrapperTarget) {
-  const commandPath = path.join(binDirectory, 'codex');
-  const originalPath = path.join(binDirectory, '.herdr-codex-original');
-  let originalTarget;
-
-  try {
-    const stats = await lstat(commandPath);
-    if (!stats.isSymbolicLink()) {
-      throw new Error(`${commandPath} 已存在且不是符号链接，拒绝记录 Codex 原始命令`);
-    }
-    const currentTarget = await linkTarget(commandPath);
-    if (currentTarget !== wrapperTarget) {
-      originalTarget = currentTarget;
-    }
-  } catch (error) {
-    if (error.code !== 'ENOENT') {
-      throw error;
-    }
-  }
-
-  if (!originalTarget) {
-    try {
-      const stats = await lstat(originalPath);
-      if (!stats.isSymbolicLink()) {
-        throw new Error(`${originalPath} 已存在且不是符号链接，拒绝覆盖`);
-      }
-      originalTarget = await linkTarget(originalPath);
-    } catch (error) {
-      if (error.code !== 'ENOENT') {
-        throw error;
-      }
-    }
-  }
-
-  originalTarget ??= await executableOnPath('codex', wrapperTarget);
-  if (!originalTarget || (await realpath(originalTarget)) === (await realpath(wrapperTarget))) {
-    throw new Error('找不到原始 codex 可执行文件');
-  }
-
-  const originalChanged = await replaceSymlink(originalPath, originalTarget);
-  let releasedLegacyCommand = false;
-  try {
-    if ((await linkTarget(commandPath)) === wrapperTarget) {
-      releasedLegacyCommand = await replaceSymlink(commandPath, originalTarget);
-    }
-  } catch (error) {
-    if (error.code !== 'ENOENT') {
-      throw error;
-    }
-  }
-  const shimChanged = await installLink('codex', wrapperTarget, commandDirectory);
-  return originalChanged || releasedLegacyCommand || shimChanged;
-}
-
-function runHerdr(...args) {
-  const result = spawnSync('herdr', args, {
-    encoding: 'utf8',
-    env: { ...process.env, HERDR_CONFIG_PATH: configPath },
-  });
-  if (result.status !== 0) {
-    throw new Error(
-      `herdr ${args.join(' ')} 失败\n${result.stderr || result.stdout || '无错误输出'}`,
-    );
-  }
-}
-
-function verifyHerdrCodexShellRoute() {
-  const shell = process.env.SHELL || '/bin/bash';
-  const probe = spawnSync(shell, ['-ic', `. ${shellSingleQuote(shellRcPath)}; command -v codex`], {
-    encoding: 'utf8',
-    env: { ...process.env, HERDR_ENV: '1' },
-  });
-  const output = `${probe.stdout || ''}\n${probe.stderr || ''}`;
-  const expected = path.join(commandDirectory, 'codex');
-  if (probe.status !== 0 || probe.stdout.trim() !== expected) {
-    throw new Error(
-      `Herdr shell 未稳定接管 codex（期望 ${expected}）\n${output.trim() || '无探测输出'}`,
-    );
-  }
-}
-
-async function main() {
-  const next = await configuredContent();
-  const shellRc = await configuredShellRc();
-  const codexTarget = path.join(scriptDirectory, 'codex-with-tps.mjs');
-  const ompTarget = path.join(scriptDirectory, 'omp-with-tps.mjs');
-  await Promise.all([assertNodeWrapper(codexTarget), assertNodeWrapper(ompTarget)]);
-  const managedOmpChanged = await ensureManagedOmpBinary(ompTarget);
-  const linksChanged = [
-    managedOmpChanged,
-    await installLink('codex-tps', codexTarget),
-    await installLink('omp-tps', ompTarget),
-    await installUpdaterSafeCodexCommand(codexTarget),
-    await installManagedOmpCommand(ompTarget),
-  ].some(Boolean);
-
-  const unmanagedPathLines = unmanagedHerdrPathLines(shellRc.content);
-  if (dryRun) {
-    const shellState = shellRc.legacyRemoved
-      ? '需迁移旧 dispatcher PATH'
-      : shellRc.changed
-        ? '需更新'
-        : '已就绪';
-    console.log(
-      `[herdr-tps] dry-run: config=${next.changed ? '需更新' : '已就绪'}, shell=${shellState}, links=${linksChanged ? '需创建' : '已就绪'}`,
-    );
-    if (unmanagedPathLines.length > 0) {
-      console.log(
-        `[herdr-tps] dry-run 警告：${shellRcPath} 存在受管标记之外的 herdr-tps PATH 导出（第 ${unmanagedPathLines.join('、')} 行），请先核对用途`,
-      );
-    }
-    return;
-  }
-  if (shellRc.changed) {
-    await mkdir(path.dirname(shellRcPath), { recursive: true });
-    let backupPath;
-    if (shellRc.exists) {
-      backupPath = `${shellRcPath}.bak-herdr-tps-${Date.now()}`;
-      await copyFile(shellRcPath, backupPath);
-    }
-    await writeFile(shellRcPath, shellRc.content, 'utf8');
-    const parts = [];
-    if (shellRc.legacyRemoved) {
-      parts.push('已移除旧全局 Codex dispatcher PATH（保留 Herdr 内条件接管与外部直通）');
-    } else {
-      parts.push('已更新 Herdr 专用 PATH');
-    }
-    console.log(
-      `[herdr-tps] ${parts.join('；')}：${shellRcPath}${backupPath ? `；备份：${backupPath}` : ''}`,
-    );
-  }
-
-  if (next.changed) {
-    const backupPath = `${configPath}.bak-herdr-tps-${Date.now()}`;
-    await copyFile(configPath, backupPath);
-    await writeFile(configPath, next.content, 'utf8');
-    try {
-      runHerdr('config', 'check');
-    } catch (error) {
-      await copyFile(backupPath, configPath);
-      throw error;
-    }
-    console.log(`[herdr-tps] 已更新 Agents 行；备份：${backupPath}`);
+function save(file) {
+  if (!exists(file)) { undo.push(() => { if (exists(file)) fs.unlinkSync(file); }); return; }
+  const stat = fs.lstatSync(file);
+  if (stat.isSymbolicLink()) {
+    const target = fs.readlinkSync(file);
+    fs.mkdirSync(archive, { recursive: true, mode: 0o700 });
+    const name = `${createHash('sha256').update(file).digest('hex').slice(0,12)}-${path.basename(file)}`;
+    fs.symlinkSync(target, path.join(archive, name));
+    undo.push(() => { if (exists(file)) fs.unlinkSync(file); fs.symlinkSync(target, file); });
   } else {
-    runHerdr('config', 'check');
-  }
-
-  verifyHerdrCodexShellRoute();
-  runHerdr('server', 'reload-config');
-  console.log(`[herdr-tps] 安装完成。重新打开 Herdr pane 后直接使用 codex 或 omp 即可。`);
-  if (next.changed) {
-    // 0.9.0 起 UI 渲染在客户端本地：侧栏布局属于客户端本地配置，
-    // `server reload-config` 不刷新已连接客户端的侧栏。
-    console.log(
-      `[herdr-tps] 侧栏行已变更：在 Herdr 客户端全局菜单执行 reload config（或重启客户端）后生效。`,
-    );
-  }
-  if (!process.env.PATH?.split(path.delimiter).includes(binDirectory)) {
-    console.log(`[herdr-tps] 请把 ${binDirectory} 加入 PATH。`);
+    const backup = `${file}.bak-herdr-tps-${stamp}`;
+    fs.copyFileSync(file, backup); fs.chmodSync(backup, stat.mode & 0o777);
+    undo.push(() => { if (exists(file)) fs.unlinkSync(file); fs.copyFileSync(backup, file); fs.chmodSync(file, stat.mode & 0o777); });
   }
 }
-
-main().catch((error) => {
-  console.error(`[herdr-tps] ${error.message}`);
-  process.exitCode = 1;
-});
+function main() {
+  let shellContent = read(shell);
+  for (const name of ['omp profile alias: omp2', 'herdr-tps Herdr-only PATH', 'herdr-tps stable Codex dispatcher PATH']) {
+    shellContent = strip(shellContent, `# >>> ${name} >>>`, `# <<< ${name} <<<`);
+  }
+  plan(shell, shellContent);
+  let codexContent = strip(read(config), begin, end);
+  if (!uninstall) {
+    const command = `${quote(process.execPath)} ${quote(path.join(root, 'codex-herdr-hook.js'))}`;
+    codexContent = `${codexContent.trimEnd()}\n\n${begin}\n` + ['SessionStart', 'SessionEnd'].map((event) =>
+      `[[hooks.${event}]]\n[[hooks.${event}.hooks]]\ntype = "command"\ncommand = ${JSON.stringify(`${command} ${event === 'SessionStart' ? 'start' : 'end'}`)}\ntimeout = 3\n`).join('\n') + `${end}\n`;
+  }
+  toml(codexContent); plan(config, codexContent);
+  if (!uninstall) {
+    let h = read(herdr);
+    if (!h.includes('[ui.sidebar.agents]')) h += '\n[ui.sidebar.agents]\nrows = [["workspace", "tab"], ["state_icon", "agent", "$tps"], ["$model"]]\n';
+    toml(h); plan(herdr, h);
+    // Validate native binary before removing any wrapper or stable runtime link.
+    const omp = path.join(bin, 'omp');
+    const managed = exists(omp) && fs.lstatSync(omp).isSymbolicLink() && fs.readlinkSync(omp).includes('omp-with-tps.mjs');
+    if (managed || !exists(omp)) {
+      const source = path.join(runtime, 'omp');
+      const fd = fs.openSync(source, 'r'); const magic = Buffer.alloc(4);
+      try { fs.readSync(fd, magic, 0, 4, 0); } finally { fs.closeSync(fd); }
+      if (!magic.equals(Buffer.from([127, 69, 76, 70]))) throw new Error('OMP source is not an ELF binary');
+      fs.accessSync(source, fs.constants.X_OK);
+      check(source, ['--version']);
+      plan(omp, source, 'binary');
+    } else check(omp, ['--version']);
+    for (const [name, target] of [['herdr-omp-subagent-model.js', 'omp-subagent-model.js'], ['herdr-omp-tps.js', 'omp-herdr-tps.js']]) {
+      const file = path.join(extensions, name);
+      if (exists(file) && (!fs.lstatSync(file).isSymbolicLink() || !fs.readlinkSync(file).includes('herdr-tps/'))) throw new Error(`Unmanaged extension: ${file}`);
+      plan(file, path.join(root, target), 'link');
+    }
+  } else {
+    for (const name of ['herdr-omp-subagent-model.js', 'herdr-omp-tps.js']) removeManagedLink(path.join(extensions, name), ['herdr-tps/']);
+  }
+  for (const name of ['.herdr-omp-original', 'omp-tps', '.herdr-codex-original', 'codex-tps']) {
+    removeManagedLink(path.join(bin, name), ['herdr-tps/', '.codex/packages/standalone/']);
+  }
+  removeManagedLink(path.join(home, '.local/share/herdr-tps/bin/codex'), ['codex-with-tps.mjs']);
+  removeManagedLink(path.join(home, '.omp/profiles/pro2/agent/extensions/herdr-omp-agent-state.ts'), ['herdr']);
+  // Retired symlink backups belong outside PATH; keep the original targets for audit.
+  const commandBin = path.join(home, '.local/share/herdr-tps/bin');
+  for (const directory of [bin, commandBin]) {
+    if (!exists(directory)) continue;
+    for (const name of fs.readdirSync(directory)) {
+      if (!name.includes('.bak-herdr-tps-')) continue;
+      const file = path.join(directory, name);
+      if (!fs.lstatSync(file).isSymbolicLink() || fs.existsSync(file)) continue;
+      const target = fs.readlinkSync(file);
+      if (!/herdr-tps\/(?:[^/]*-with-tps\.mjs|\.runtime\/omp)$/.test(target)) continue;
+      const key = createHash('sha256').update(file).digest('hex').slice(0,12);
+      plan(file, path.join(archive, `${key}-${name}`), 'archive');
+    }
+  }
+  for (const change of changes) console.log(`[herdr-tps] ${dry ? 'dry-run ' : ''}${change.kind}: ${change.file}`);
+  if (dry) return;
+  try {
+    for (const { file, kind, value } of changes) {
+      if (kind === 'archive') {
+        fs.mkdirSync(path.dirname(value), { recursive: true, mode: 0o700 });
+        fs.renameSync(file, value);
+        undo.push(() => fs.renameSync(value, file));
+        continue;
+      }
+      fs.mkdirSync(path.dirname(file), { recursive: true }); save(file);
+      if (kind === 'remove') { fs.unlinkSync(file); continue; }
+      const temp = `${file}.tmp-herdr-tps-${stamp}`;
+      if (kind === 'link') fs.symlinkSync(value, temp);
+      else if (kind === 'binary') { fs.copyFileSync(value, temp); fs.chmodSync(temp, 0o755); }
+      else { fs.writeFileSync(temp, value, { mode: exists(file) ? fs.statSync(file).mode & 0o777 : 0o600 }); }
+      fs.renameSync(temp, file);
+      if (kind === 'binary') check(file, ['--version']);
+    }
+    check('bash', ['-n', shell]);
+    toml(read(config)); toml(read(herdr));
+    if (!uninstall) check(path.join(bin, 'omp'), ['--no-tools', '--version']);
+  } catch (error) { for (const restore of undo.reverse()) restore(); throw error; }
+  try { fs.rmdirSync(commandBin); } catch (error) { if (!['ENOENT', 'ENOTEMPTY'].includes(error.code)) throw error; }
+  console.log(`[herdr-tps] ${uninstall ? 'Uninstalled' : 'Installed'}. Backups: files .bak-herdr-tps-${stamp}; links ${archive}`);
+  if (!uninstall) console.log('[herdr-tps] Open a new Codex TUI and approve the native hook trust prompt. Existing sessions stay running.');
+}
+try { main(); } catch (error) { console.error(`[herdr-tps] ${error.message}`); process.exitCode = 1; }

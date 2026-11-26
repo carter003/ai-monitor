@@ -4,25 +4,17 @@ use std::time::{Duration, Instant};
 pub enum Source {
     Codex,
     Go,
-    Go2,
     Grok,
     OpenRouter,
 }
 
 impl Source {
-    pub const ALL: [Self; 5] = [
-        Self::Codex,
-        Self::Go,
-        Self::Go2,
-        Self::Grok,
-        Self::OpenRouter,
-    ];
+    pub const ALL: [Self; 4] = [Self::Codex, Self::Go, Self::Grok, Self::OpenRouter];
 
     pub fn title(self) -> &'static str {
         match self {
             Self::Codex => "Codex · GPT",
             Self::Go => "OpenCode Go",
-            Self::Go2 => "OpenCode GO-2",
             Self::Grok => "SuperGrok",
             Self::OpenRouter => "OpenRouter",
         }

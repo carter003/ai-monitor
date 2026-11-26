@@ -6,7 +6,7 @@
 
 ## 修复内容与源码基线
 
-首次修复基于 [miuuyy/codex-chatgpt-web v6.1.19](https://github.com/miuuyy/codex-chatgpt-web/tree/v6.1.19)，提交 `8e9fac038dcd998bf23716df2b08379a15854ec9`。本机工作区为 `~/.local/src/codex-chatgpt-web`，本地分支 `carter/native2-literal-transport-v6.1.19`。升级时以目标 tag 和升级凭据为准，不能继续假定这个提交是最新版本。
+首次修复基于 [miuuyy/codex-chatgpt-web v6.1.19](https://github.com/miuuyy/codex-chatgpt-web/tree/v6.1.19)，提交 `8e9fac038dcd998bf23716df2b08379a15854ec9`。当前维护版本为 [v6.2.0](https://github.com/miuuyy/codex-chatgpt-web/releases/tag/v6.2.0)，提交 `fc701f6fbcff9fb65f679445389aca0c60410271`，补丁 SHA-256 `930c48063ff56e4ef9c95a8336a68a8231df0532e0da7e35ea5ea8cb5de9dd91`；目标源码使用 `.state/sources/6.2.0-930c48063ff5-qZgs5V` 的独立 clone。本机工作区 `~/.local/src/codex-chatgpt-web` 的 `carter/native2-literal-transport-v6.1.19` 分支及其既有修改保持原样；升级时以目标 tag 和升级凭据为准，不能继续假定旧提交是最新版本。
 
 - 输入：`browser-worker.ts` 在 Native2 mention 后插入 `<p><br></p>` 边界与真正的语义代码块，使用 `textContent` 转义内容，并校验完整文本与节点。`browser-user-message.ts` 精确匹配真实前端渲染出的 mention 段落内尾随空格 `<span>`、mention 段落与 `PRE` 之间的单个 `blank-lines` 节点及唯一代码块正文；前导/尾随空行、额外文本、错误 mention 和多块内容仍拒绝。
 - 工具参数：Native2 的请求末尾单列 token 的末四字符供复制核对。Broker 拒绝未知 token 后只提示调用方自己提交的末四字符；只有完整签发值可以进入原有鉴权流程。
@@ -52,7 +52,7 @@ node integrations/codex-chatgpt-web-local/upgrade.mjs rollback \
 `build` 要求已成功 verify 且源码/补丁没有变化；重新 frozen install，执行上游 `app:package`，解包实际生成的 AppImage，以上游 `validateRuntimeBundle` 核验文件哈希和 manifest，再执行上游隔离的 `app:smoke`。产物路径当前为：
 
 ```text
-~/.local/src/codex-chatgpt-web/launcher/artifacts/codex-web-gpt-6.1.19-linux-x64.AppImage
+/home/carter003/project/ai-monitor/integrations/codex-chatgpt-web-local/.state/sources/6.2.0-930c48063ff5-qZgs5V/launcher/artifacts/codex-web-gpt-6.2.0-linux-x64.AppImage
 ```
 
 Linux 打包还需要上游 CI 的兼容 `libnotify` 准备步骤；直接使用 electron-builder 下载工具集中的旧库会被最终 ABI smoke 拒绝。脚本先检查已有库的 SHA-256、原生 ELF 架构及所需符号，再运行上游 `prepare-linux-appimage-tools.cjs`，只修改工作区自有工具副本。最终安装包仍必须通过 `smoke-linux-appimage-symbols.sh`，不跳过符号或依赖检查。
@@ -66,7 +66,7 @@ Linux 打包还需要上游 CI 的兼容 `libnotify` 准备步骤；直接使用
 ```bash
 # 使用已有的上游源码 clone；没有时先用 git clone 取得。
 # --version 必填，示例版本需由维护者明确选定。
-node integrations/codex-chatgpt-web-local/upgrade.mjs prepare --version 6.1.20
+node integrations/codex-chatgpt-web-local/upgrade.mjs prepare --version 6.2.0
 node integrations/codex-chatgpt-web-local/upgrade.mjs verify \
   --browser /absolute/path/to/chromium --electron /absolute/path/to/electron
 node integrations/codex-chatgpt-web-local/upgrade.mjs build
@@ -82,14 +82,14 @@ node integrations/codex-chatgpt-web-local/upgrade.mjs finalize
 
 ```bash
 # 在外部 source 中执行；导出到 ai-monitor 的绝对补丁路径。
-git diff --binary --no-ext-diff --no-textconv v6.1.19 -- > /absolute/path/to/ai-monitor/integrations/codex-chatgpt-web-local/local-fixes.patch
+git diff --binary --no-ext-diff --no-textconv v6.2.0 -- > /absolute/path/to/ai-monitor/integrations/codex-chatgpt-web-local/local-fixes.patch
 ```
 
 更新补丁或源码后，重新 `verify --source PATH` 再 `build`。prepare/verify/build 的版本、upstream commit、source HEAD/diff 摘要、patch SHA-256、Bun、验证结果及 AppImage 哈希保存在 `.state/current.json`。失败的 verify/build 会清除旧成功标记，防止误用旧产物。
 
 ## 安装、停服务与凭据
 
-`stage` 验证已构建产物和当前运行身份，备份入口、配置与完整 Runtime，仅原子切换下次启动使用的 AppImage wrapper 及动态 CLI；它不 drain、不调用 systemctl、不杀进程、不写运行中的 Runtime，允许当前有请求。凭据状态为 `staged`，`status` 明确返回 `awaiting-user-restart`。上游 v6.1.19 的 `main.cjs` 在 Runtime 安装前取得单实例锁，因此旧 GUI 还开着时再启动只会唤起旧 GUI；**必须正常退出，再重新打开**，仅关闭窗口、最小化或重复点图标不等于完成切换。迁移上游版本时重新核实此顺序。
+上游 v6.2.0 的 `main.cjs` 在 Runtime 安装前取得单实例锁（已核实 `main.cjs:1136` 的 `requestSingleInstanceLock()` 先于 `runtimeRootProvider()`），因此旧 GUI 还开着时再启动只会唤起旧 GUI；**必须正常退出，再重新打开**，仅关闭窗口、最小化或重复点图标不等于完成切换。
 
 重开后，上游 Launcher 从新 AppImage 安装合法 Runtime。`finalize` 只核对实际进程、目标 `bundleId`、完整 manifest 文件哈希、AppImage 和 wrapper 摘要，保存安装完成凭据；它也不停止或启动服务。若还在运行旧包，明确拒绝确认。`status` 显示 `awaiting-finalize` 时再执行该命令。未激活阶段的 `rollback` 只恢复旧入口并取消预置，保留当前进程与配置。
 
@@ -141,7 +141,7 @@ node --test integrations/codex-chatgpt-web-local/upgrade.test.mjs
 <已安装runtime/bun> run integrations/codex-chatgpt-web-local/live-smoke.ts [sourcepath]
 ```
 
-例如使用 `~/.codex-chatgpt-web/versions/6.1.19-linux-x64/runtime/bun`；省略 sourcepath 时使用外部源码 checkout。它使用安装中的 helper，默认以 GPT-6 Sol Instant（`low`）真实调用一次 inventory（不执行 shell），检查真实尾 `_` token 的 POST 字节和 raw JSON，将脱敏证据写入 `.state/live-smoke.json`。需要 Pro 时用 `CHATGPT_WEB_SMOKE_REASONING=max` 显式指定。**这一步会真实调用模型，在已授权的升级任务中执行；它不是单元测试。**
+例如使用 `~/.codex-chatgpt-web/versions/6.2.0-linux-x64/runtime/bun`；省略 sourcepath 时使用外部源码 checkout。它使用安装中的 helper，默认以 GPT-6 Sol Instant（`low`）真实调用一次 inventory（不执行 shell），检查真实尾 `_` token 的 POST 字节和 raw JSON，将脱敏证据写入 `.state/live-smoke.json`。需要 Pro 时用 `CHATGPT_WEB_SMOKE_REASONING=max` 显式指定。**这一步会真实调用模型，在已授权的升级任务中执行；它不是单元测试。**
 
 再运行真实 Codex CLI 审查回归：
 
@@ -156,5 +156,6 @@ node integrations/codex-chatgpt-web-local/review-smoke.mjs
 **Codex CLI 会把合法 review JSON 渲染成审查文本，`-o` 文件不应按 JSON 检验。** 脚本为这一次子进程建立临时 loopback 转发，保持 HTTP 字节和认证头不变，只在 bridge 的 `response.completed` 中读取最终 assistant 文本，验证原始 JSON 及 `overall_correctness` 字段；不记录请求或认证内容，也不改全局路由。验收还要求至少一次成功的命令读取、审查发现该文件的已知缺陷、CLI 正常展示审查，以及夹具源码未被审查过程改写。转发仅用于测试，关闭时不影响真实服务。
 
 脱敏结果写入 `.state/review-smoke.json`；失败时仅打印私有诊断目录，原始输出和 CLI 事件不进入仓库。可用 `CODEX_BIN` 指定 CLI 可执行文件，`CODEX_REVIEW_MODEL` / `CODEX_REVIEW_REASONING` 指定模型与推理档位。
+Herdr TPS 已迁移为原生 Hooks 与只读 Rollout 观察器；`codex` 使用官方原生入口。`review-smoke.mjs` 默认运行标准 `codex`，仍可用 `CODEX_BIN` 覆盖。
 
-**官方内置自动更新不会携带本地 patch，可能替换 AppImage、wrapper 或同版本 runtime。** 更新后必须运行 `status` 检查 bundleId 漂移；以后通过本流程迁移补丁、验证并重新安装。不要仅凭 `/healthz` 返回 6.1.19 就认定本地修复仍在运行。
+**官方内置自动更新不会携带本地 patch，可能替换 AppImage、wrapper 或同版本 runtime。** 更新后必须运行 `status` 检查 bundleId 漂移；以后通过本流程迁移补丁、验证并重新安装。不要仅凭 `/healthz` 返回 6.2.0 就认定本地修复仍在运行。

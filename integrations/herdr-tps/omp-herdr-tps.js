@@ -1,7 +1,5 @@
-import { HerdrMetadataPublisher } from './lib/herdr-metadata-publisher.mjs';
+import { HerdrMetadataPublisher, isNestedOmpProcess } from './lib/herdr-metadata-publisher.mjs';
 import { OmpTpsReporter } from './lib/omp-tps-reporter.mjs';
-import { registerOmpApiKeyObserver } from './lib/omp-api-key-observer.mjs';
-import { argumentValue, profileFromSessionPath } from './lib/omp-profile.mjs';
 
 function messageKey(message) {
   return String(message?.id ?? message?.timestamp ?? 'assistant');
@@ -26,15 +24,6 @@ function sessionId(context) {
   } catch {
     return undefined;
   }
-}
-
-export function ompDisplayAgent(context, argv = process.argv) {
-  const configured = process.env.HERDR_TPS_OMP_DISPLAY_AGENT;
-  if (configured) {
-    return configured;
-  }
-  const profile = argumentValue(argv, '--profile') ?? profileFromSessionPath(sessionFile(context));
-  return profile === 'pro2' ? 'omp2' : 'omp';
 }
 
 function trackedBlock(block) {
@@ -204,7 +193,6 @@ export function registerOmpTpsHandlers(pi, reporterOrFactory, { requireUi = fals
   let rootSessionId;
   let rootSessionFile;
   let rootContextRef;
-  let displayRefreshTimer;
 
   // OMP can attach the TUI after its first session event. Check eligibility
   // on every event, including after activation, so child events cannot take
@@ -240,18 +228,6 @@ export function registerOmpTpsHandlers(pi, reporterOrFactory, { requireUi = fals
     }
     return !requireUi || context?.hasUI === true;
   };
-  const updateDisplayAgent = (context) => {
-    reporter.setDisplayAgent?.(ompDisplayAgent(context));
-    if (displayRefreshTimer) {
-      clearTimeout(displayRefreshTimer);
-    }
-    displayRefreshTimer = setTimeout(() => {
-      displayRefreshTimer = undefined;
-      reporter.refreshDisplayAgent?.();
-    }, 500);
-    displayRefreshTimer.unref?.();
-  };
-
   const seedFromHistory = (context) => {
     try {
       // getEntries() includes sibling branches. If the active path cannot be
@@ -285,7 +261,6 @@ export function registerOmpTpsHandlers(pi, reporterOrFactory, { requireUi = fals
   const applySessionModel = (context) => {
     reporter.configureTokenModel?.(context?.model);
     reporter.setModel(messageModel(undefined, context));
-    updateDisplayAgent(context);
     seedFromHistory(context);
   };
 
@@ -297,6 +272,7 @@ export function registerOmpTpsHandlers(pi, reporterOrFactory, { requireUi = fals
       return true;
     }
     rootSession = true;
+    if (requireUi) process.env.HERDR_TPS_OMP_TOPLEVEL = String(process.pid);
     rootSessionManager = context?.sessionManager;
     rootSessionId = sessionId(context);
     rootSessionFile = sessionFile(context);
@@ -366,10 +342,6 @@ export function registerOmpTpsHandlers(pi, reporterOrFactory, { requireUi = fals
     if (!isRootContext(context)) {
       return;
     }
-    if (displayRefreshTimer) {
-      clearTimeout(displayRefreshTimer);
-      displayRefreshTimer = undefined;
-    }
     rootSession = false;
     rootSessionManager = undefined;
     rootSessionId = undefined;
@@ -383,7 +355,6 @@ export function registerOmpTpsHandlers(pi, reporterOrFactory, { requireUi = fals
 export function createOmpMetadataPublisher(pi) {
   return new HerdrMetadataPublisher({
     agent: 'omp',
-    appliesToSource: 'herdr:omp',
     onError: (error, request) => {
       const detail = error instanceof Error ? error.message : String(error);
       const message = `[herdr-tps] metadata publish failed (${request?.params?.source}): ${detail}`;
@@ -396,19 +367,14 @@ export function createOmpMetadataPublisher(pi) {
 }
 
 export default async function herdrTpsExtension(pi) {
-  registerOmpApiKeyObserver(pi);
+  const isNested = isNestedOmpProcess();
+  if (isNested) return;
   const publisher = createOmpMetadataPublisher(pi);
-  if (!publisher.enabled) {
-    return;
+  if (!publisher.enabled) return;
+  try {
+    const { Tokenizer } = await import('@oh-my-pi/pi-agent-core');
+    registerOmpTpsHandlers(pi, () => new OmpTpsReporter({ publisher, Tokenizer }), { requireUi: true });
+  } catch (error) {
+    pi?.logger?.warn?.(`[herdr-tps] tokenizer unavailable: ${error.message}`);
   }
-
-  // OMP's extension loader resolves this to the running binary's own module,
-  // including its catalog-selected native tokenizers (DeepSeek, GLM, etc.).
-  const { Tokenizer } = await import('@oh-my-pi/pi-agent-core');
-
-  registerOmpTpsHandlers(
-    pi,
-    () => new OmpTpsReporter({ publisher, Tokenizer }),
-    { requireUi: true },
-  );
 }

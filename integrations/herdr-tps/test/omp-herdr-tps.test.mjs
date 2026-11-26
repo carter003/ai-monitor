@@ -2,23 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   createOmpMetadataPublisher,
-  ompDisplayAgent,
   registerOmpTpsHandlers,
-} from '../omp-extension.mjs';
-
-test('restores the omp2 display name from the pro2 session path', () => {
-  const context = {
-    sessionManager: {
-      getSessionFile: () => '/home/user/.omp/profiles/pro2/agent/sessions/project/session.jsonl',
-    },
-  };
-
-  assert.equal(ompDisplayAgent(context, ['omp', '--resume=session']), 'omp2');
-  assert.equal(ompDisplayAgent({}, ['omp', '--profile=pro2']), 'omp2');
-  assert.equal(ompDisplayAgent({}, ['omp']), 'omp');
-});
-
-test('publishes model and omp2 display name when a pro2 session is restored', () => {
+} from '../omp-herdr-tps.js';
+test('restores the active model from an existing session', () => {
   const handlers = new Map();
   const calls = [];
   const pi = {
@@ -26,8 +12,6 @@ test('publishes model and omp2 display name when a pro2 session is restored', ()
   };
   const reporter = {
     setModel: (model) => calls.push(['model', model]),
-    setDisplayAgent: (...args) => calls.push(['display-agent', ...args]),
-    refreshDisplayAgent: () => {},
     pause: () => {},
     close: () => {},
   };
@@ -39,14 +23,13 @@ test('publishes model and omp2 display name when a pro2 session is restored', ()
       hasUI: true,
       model: { id: 'gemini-3.7-flash' },
       sessionManager: {
-        getSessionFile: () => '/home/user/.omp/profiles/pro2/agent/sessions/project/restored.jsonl',
+        getSessionFile: () => '/home/user/.omp/agent/sessions/project/restored.jsonl',
       },
     },
   );
 
   assert.deepEqual(calls, [
     ['model', 'gemini-3.7-flash'],
-    ['display-agent', 'omp2'],
   ]);
 });
 
@@ -60,8 +43,6 @@ test('does not let a headless OMP subagent overwrite root pane metadata', () => 
     calls.push(['create-reporter']);
     return {
       setModel: (model) => calls.push(['model', model]),
-      setDisplayAgent: (...args) => calls.push(['display-agent', ...args]),
-      refreshDisplayAgent: () => {},
       start: (...args) => calls.push(['start', ...args]),
       append: (...args) => calls.push(['append', ...args]),
       pause: () => calls.push(['pause']),
@@ -102,8 +83,6 @@ test('does not let a subagent with its own UI overwrite root pane metadata', () 
     calls.push(['create-reporter']);
     return {
       setModel: (model) => calls.push(['model', model]),
-      setDisplayAgent: (...args) => calls.push(['display-agent', ...args]),
-      refreshDisplayAgent: () => {},
       start: (...args) => calls.push(['start', ...args]),
       append: (...args) => calls.push(['append', ...args]),
       pause: () => calls.push(['pause']),
@@ -138,8 +117,6 @@ test('arms the pane metadata once a UI session appears after a headless start', 
     return {
       configureTokenModel: () => {},
       setModel: (model) => calls.push(['model', model]),
-      setDisplayAgent: (...args) => calls.push(['display-agent', ...args]),
-      refreshDisplayAgent: () => {},
       start: (...args) => calls.push(['start', ...args]),
       append: () => {},
       pause: () => {},
@@ -163,7 +140,6 @@ test('arms the pane metadata once a UI session appears after a headless start', 
   assert.deepEqual(calls, [
     ['create-reporter'],
     ['model', 'gpt-5.6-luna'],
-    ['display-agent', 'omp'],
     ['start', '1500', 'gpt-5.6-luna', 1_500],
   ]);
 });
@@ -179,8 +155,6 @@ test('refreshes the model when a branch replaces the session in place', () => {
     return {
       configureTokenModel: () => {},
       setModel: (model) => calls.push(['model', model]),
-      setDisplayAgent: (...args) => calls.push(['display-agent', ...args]),
-      refreshDisplayAgent: () => {},
       start: () => {},
       append: () => {},
       pause: () => {},
@@ -200,10 +174,8 @@ test('refreshes the model when a branch replaces the session in place', () => {
   assert.deepEqual(calls, [
     ['create-reporter'],
     ['model', 'gpt-5.6-luna'],
-    ['display-agent', 'omp'],
     ['reset-session'],
     ['model', 'deepseek-v4.1-flash'],
-    ['display-agent', 'omp'],
   ]);
 });
 
@@ -217,7 +189,6 @@ for (const eventName of ['session_switch', 'session_branch', 'session_tree']) {
         resetSession: () => calls.push(['reset-session']),
         configureTokenModel: (model) => calls.push(['token-model', model.id]),
         setModel: (model) => calls.push(['model', model]),
-        setDisplayAgent: (agent) => calls.push(['display-agent', agent]),
         seed: (...args) => calls.push(['seed', ...args]),
       };
     }, { requireUi: true });
@@ -239,7 +210,6 @@ for (const eventName of ['session_switch', 'session_branch', 'session_tree']) {
       ['reset-session'],
       ['token-model', 'deepseek-v4.1-flash'],
       ['model', 'deepseek-v4.1-flash'],
-      ['display-agent', 'omp'],
       ['seed', 3_000, 10_000],
     ]);
   });
@@ -250,7 +220,6 @@ test('ignores subagent and headless events after the root UI has activated', () 
   const calls = [];
   const reporter = {
     setModel: (model) => calls.push(['model', model]),
-    setDisplayAgent: (agent) => calls.push(['display-agent', agent]),
     start: (...args) => calls.push(['start', ...args]),
     append: (...args) => calls.push(['append', ...args]),
     pause: () => calls.push(['pause']),
@@ -300,7 +269,6 @@ test('ignores child sessions and context-less session_shutdown while retaining r
   const reporter = {
     configureTokenModel() {},
     setModel: (model) => calls.push(['model', model]),
-    setDisplayAgent: (agent) => calls.push(['display-agent', agent]),
     start: (...args) => calls.push(['start', ...args]),
     append: () => {},
     pause: () => calls.push(['pause']),
@@ -323,7 +291,6 @@ test('ignores child sessions and context-less session_shutdown while retaining r
   handlers.get('session_start')({}, root);
   assert.deepEqual(calls, [
     ['model', 'root-model'],
-    ['display-agent', 'omp'],
   ]);
   calls.length = 0;
 
@@ -439,8 +406,6 @@ test('tracks only OMP thinking and normal text deltas, then drains shutdown', as
   };
   const reporter = {
     setModel: (model) => calls.push(['model', model]),
-    setDisplayAgent: (...args) => calls.push(['display-agent', ...args]),
-    refreshDisplayAgent: () => {},
     start: (...args) => calls.push(['start', ...args]),
     append: (...args) => calls.push(['append', ...args]),
     pause: () => calls.push(['pause']),
@@ -476,7 +441,6 @@ test('tracks only OMP thinking and normal text deltas, then drains shutdown', as
 
   assert.deepEqual(calls, [
     ['model', 'gpt-5.6'],
-    ['display-agent', 'omp'],
     ['start', '1000', 'gpt-5.6', 1_000],
     ['append', '1000', '1000:thinking:0', 'think', 'gpt-5.6'],
     ['append', '1000', '1000:text:1', 'answer', 'gpt-5.6'],

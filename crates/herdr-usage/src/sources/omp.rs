@@ -90,9 +90,28 @@ impl AccountCatalog {
             return catalog;
         };
         let mut by_provider = HashMap::<String, Vec<AccountIdentity>>::new();
-        let Ok(mut statement) = connection.prepare(
+        // Older OMP databases predate disabled_cause; all their stored rows are active.
+        let has_disabled_cause = connection
+            .prepare("PRAGMA table_info(auth_credentials)")
+            .ok()
+            .and_then(|mut statement| {
+                statement
+                    .query_map([], |row| row.get::<_, String>(1))
+                    .ok()
+                    .map(|rows| {
+                        rows.filter_map(Result::ok)
+                            .any(|name| name == "disabled_cause")
+                    })
+            })
+            .unwrap_or(false);
+        let query = if has_disabled_cause {
+            "SELECT id, provider, credential_type, data FROM auth_credentials WHERE provider = 'opencode-go' AND (disabled_cause IS NULL OR disabled_cause = '') ORDER BY id"
+        } else {
             "SELECT id, provider, credential_type, data FROM auth_credentials WHERE provider = 'opencode-go' ORDER BY id"
-        ) else { return catalog };
+        };
+        let Ok(mut statement) = connection.prepare(query) else {
+            return catalog;
+        };
         let Ok(rows) = statement.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
@@ -146,12 +165,10 @@ impl AccountCatalog {
             } else {
                 continue;
             };
-            if provider != "opencode-go" {
-                by_provider
-                    .entry(provider.clone())
-                    .or_default()
-                    .push(identity.clone());
-            }
+            by_provider
+                .entry(provider.clone())
+                .or_default()
+                .push(identity.clone());
             catalog.by_id.insert((provider, id.to_string()), identity);
         }
         for (provider, identities) in by_provider {
@@ -160,40 +177,6 @@ impl AccountCatalog {
                 identity.source = "single_credential";
                 catalog.single.insert(provider, identity);
             }
-        }
-        drop(statement);
-        let Ok(mut statement) = connection
-            .prepare("SELECT key, value FROM cache WHERE key LIKE 'session:sticky:opencode-go:%'")
-        else {
-            return catalog;
-        };
-        let Ok(rows) = statement.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        }) else {
-            return catalog;
-        };
-        for (key, value) in rows.filter_map(Result::ok) {
-            let mut parts = key.splitn(4, ':');
-            if parts.next() != Some("session") || parts.next() != Some("sticky") {
-                continue;
-            }
-            let (Some(provider), Some(session)) = (parts.next(), parts.next()) else {
-                continue;
-            };
-            let Some(id) = serde_json::from_str::<Value>(&value)
-                .ok()
-                .and_then(|value| value.get("credentialId").and_then(Value::as_i64))
-            else {
-                continue;
-            };
-            let Some(identity) = catalog.by_id.get(&(provider.to_owned(), id.to_string())) else {
-                continue;
-            };
-            let mut identity = identity.clone();
-            identity.source = "sticky_cache";
-            catalog
-                .sticky
-                .insert((provider.to_owned(), session.to_owned()), identity);
         }
         catalog
     }
@@ -204,9 +187,6 @@ impl AccountCatalog {
         session: Option<&str>,
         pin: Option<&str>,
     ) -> Option<AccountIdentity> {
-        if provider == "opencode-go" {
-            return None;
-        }
         if let Some(pin) = pin {
             if let Some(identity) = self.by_pin.get(&(provider.to_owned(), pin.to_owned())) {
                 return Some(identity.clone());
@@ -296,7 +276,7 @@ impl OmpState {
                 if account.is_none()
                     && !matches!(
                         source,
-                        None | Some("sticky_cache") | Some("single_credential")
+                        None | Some("sticky_cache")
                     )
                 {
                     return Ok(0);
@@ -891,6 +871,38 @@ mod tests {
     }
 
     const ASSISTANT: &str = r#"{"id":"681cad2e","parentId":null,"timestamp":"2026-09-10T16:38:17.999Z","type":"message","message":{"role":"assistant","api":"openai-completions","model":"deepseek-v4.1-flash","provider":"codebuddy","usage":{"input":211,"output":86,"cacheRead":22144,"cacheWrite":0,"totalTokens":22441,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}}}"#;
+
+    #[test]
+    fn single_active_opencode_key_resolves_without_reading_cache() {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-single-key-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("agent.db");
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE auth_credentials (id INTEGER, provider TEXT, credential_type TEXT, data TEXT, disabled_cause TEXT);
+            INSERT INTO auth_credentials VALUES (1, 'opencode-go', 'api_key', '{\"key\":\"test-active\"}', NULL);
+            INSERT INTO auth_credentials VALUES (2, 'opencode-go', 'api_key', '{\"key\":\"test-disabled\"}', 'disabled');").unwrap();
+        // There is deliberately no cache table: attribution depends only on healthy auth rows.
+        let catalog = AccountCatalog::load(&path);
+        let identity = catalog
+            .resolve("opencode-go", Some("native-session"), None)
+            .unwrap();
+        assert_eq!(identity.source, "single_credential");
+        assert!(identity.key.ends_with(&sha256("test-active")));
+        assert_eq!(catalog.by_id.len(), 1);
+        db.execute("INSERT INTO auth_credentials VALUES (3, 'opencode-go', 'api_key', '{\"key\":\"second-active\"}', '')", []).unwrap();
+        assert!(AccountCatalog::load(&path)
+            .resolve("opencode-go", None, None)
+            .is_none());
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn envelope_id_is_the_dedup_key_because_message_has_no_id() {

@@ -10,6 +10,7 @@ import { createInterface } from 'node:readline';
 
 const state = resolve(import.meta.dirname, '.state');
 await mkdir(state, { recursive: true, mode: 0o700 });
+const codexBin = process.env.CODEX_BIN || 'codex';
 const fixture = await mkdtemp(join(tmpdir(), 'codex-local-review-'));
 async function git(args) {
   const child = spawn('git', ['-C', fixture, ...args], { stdio: 'ignore', shell: false });
@@ -97,7 +98,7 @@ let stderr = '';
 const events = join(fixture, 'events.jsonl');
 await writeFile(events, '', { mode: 0o600 });
 let logWrites = Promise.resolve();
-const child = spawn(process.env.CODEX_BIN || 'codex', [
+const child = spawn(codexBin, [
   // Inherit the user's configured permissions. The fixture requests read-only
   // commands; this regression does not change global or per-process permissions.
   'exec', '--json', '-C', fixture, '-o', output, '-m', model,

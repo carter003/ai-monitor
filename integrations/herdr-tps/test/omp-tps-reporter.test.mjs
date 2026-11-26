@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { OmpTpsReporter } from '../lib/omp-tps-reporter.mjs';
-import { registerOmpTpsHandlers } from '../omp-extension.mjs';
+import { registerOmpTpsHandlers } from '../omp-herdr-tps.js';
 
 class Tokenizer {
   constructor(model) { this.model = model; }

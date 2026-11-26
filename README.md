@@ -117,7 +117,7 @@ ai-monitor/
 ### 2. 健壮日志采集机制
 - **半行保护**：文件写入截断在半行时，该残行不解析，随字节水位一并暂存至 `FileOffsets.residues`，下轮无缝拼接。
 - **OpenCode 先建后填**：行创建时 tokens 全零、数十小时后异步回填。采集器对全零行**不入库**，利用 2000 行重放窗口结合 `INSERT OR IGNORE` 自动补齐。
-- **Codex 严格去重**：只采集增量流式 `token_count`，主动忽略可能导致二次计量的 `token_usage_record`。
+- **Codex 严格去重**：优先采集 `token_usage_record`，同文件一旦出现该记录自动忽略 `token_count`；仅无 `token_usage_record` 的旧日志回退 `token_count`。
 - **价格表解耦**：采集进程不联网；通过 `import_prices` CLI 单独向 `model_price` 同步 OpenRouter 价格；未计价模型记录至 7 天滑动窗口的 `unresolved_model` 表。
 
 ---
@@ -141,7 +141,6 @@ sh install.sh
 如需 Herdr Agents 栏实时显示 Codex/OMP 模型与 TPS，再安装独立集成：
 
 ```sh
-npm ci
 npm run herdr:tps:install -- --dry-run
 npm run herdr:tps:install
 ```
@@ -193,36 +192,20 @@ import_prices
 
 工具将从 OpenRouter 获取最新官方模型计价并写入 SQLite。对人工指定的别名或备注（`remark`）会自动保留。
 
-### 5. Codex ChatGPT Web 启动器（已安装，勿重复下载）
+### 5. Codex ChatGPT Web 本地补丁维护
 
-[miuuyy/codex-chatgpt-web](https://github.com/miuuyy/codex-chatgpt-web) 的 Linux 启动器**已安装在本机**，
-升级安装脚本会重复下载 AppImage（约数百 MB），除非明确要升级，否则直接运行即可：
-
-```sh
-# 已安装版本（当前 6.1.19）
-ls ~/.local/lib/codex-web-gpt/          # 每个版本一个目录
-ls ~/.local/bin/codex-web-gpt           # 启动包装脚本
-
-# 启动（GUI 经 WSLg 显示）
-nohup ~/.local/bin/codex-web-gpt >/tmp/codex-web-gpt.log 2>&1 &
-
-# 查看是否在运行 / 停止
-pgrep -af codex-web-gpt-launcher
-pkill -f codex-web-gpt-launcher
-```
-
-运行状态描述文件：`~/.codex-chatgpt-web/runtime/launcher-browser.json`，其中 `pid` 与
-`endpoint`（本地回环地址）可用于确认进程是否存活。配置、浏览器登录态与密钥均在该目录下：
-`config.json`、`secrets/`、`tunnel/`。
-
-日志中的 `WebGL blocklisted`、`org.freedesktop.UPower ... ServiceUnknown` 是 WSLg 环境固有的
-噪音，不影响使用。
-
-仅在需要升级到新版本时才执行官方安装脚本（会校验 SHA-256 并保留用户数据）：
+当前运行 v6.2.0，保留本地 Native2 与原始 JSON 修复。所有升级通过
+[维护入口](integrations/codex-chatgpt-web-local/README.md)进行：
 
 ```sh
-curl -fsSL https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install-launcher.sh | sh
+node integrations/codex-chatgpt-web-local/upgrade.mjs status
+# 按维护入口准备、验证并打包目标版本，再预置下次启动入口
+node integrations/codex-chatgpt-web-local/upgrade.mjs stage
+# 正常退出并重开 Launcher 后确认目标 bundle，再执行
+node integrations/codex-chatgpt-web-local/upgrade.mjs finalize
 ```
+
+官方内置更新不会携带本地补丁。预置不会停止现有会话；未经明确要求不重启服务。
 
 ---
 

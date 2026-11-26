@@ -170,7 +170,7 @@ $ agy --gemini_dir=/home/carter003/.gemini2 -p "/usage" --output-format json
 
 1. **是否保留 AGY / AGY2 两张额度卡**：
    - 保留 → 走官方 CLI headless（凭据留在官方客户端内，合规）；但依赖 `agy` CLI 已安装且已登录
-   - 取消 → 只保留 Codex / OpenCode Go / GO-2 / SuperGrok / OpenRouter 五张卡
+   - 取消 → 只保留 Codex / OpenCode Go / SuperGrok / OpenRouter 四张卡
    - 若 agy CLI 自身会话也登出 → 这两张卡无法用 Gemini API key 等价替代（Antigravity 订阅池无公开 API），只能改口径
 2. **Chrome 弹窗是否需要我进一步处理**（如关闭 xdg-open 关联、或确认已无残留 OAuth 流程在等回调）
 3. **是否轮换那两把 AIza key**

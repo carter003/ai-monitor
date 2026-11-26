@@ -12,11 +12,11 @@
 
 - 维护入口：`integrations/codex-chatgpt-web-local/README.md`、`upgrade.mjs`。
 - 可迁移源码补丁：`integrations/codex-chatgpt-web-local/local-fixes.patch`。这是修复内容的持久来源，不能只在外部源码工作区保留修改。
-- 安装后的真实验收：同目录 `live-smoke.ts` 检查真实 POST 和原始 JSON，`review-smoke.mjs` 检查 Codex CLI 审查、实际工具读取和已知缺陷。两项默认使用 GPT-6 Sol Instant（`low`）；只有显式指定或用户要求时才用 GPT-6 Pro / GPT-5.6 Pro。调用方式见维护入口；两项都会真实调用模型。
+- 安装后的真实验收：同目录 `live-smoke.ts` 检查真实 POST 和原始 JSON，`review-smoke.mjs` 检查 Codex CLI 审查、实际工具读取和已知缺陷。两项默认使用 GPT-6 Sol Instant（`low`）；只有显式指定或用户要求时才用 GPT-6 Pro / GPT-5.6 Pro。调用方式见维护入口；两项都会真实调用模型。本机 `review-smoke.mjs` 默认使用标准 `codex` 原生入口，可用 `CODEX_BIN` 覆盖。
 - 本机源码工作区：`~/.local/src/codex-chatgpt-web`；升级前检查分支和工作树，不得用 `reset --hard`、强制 checkout 等方式丢弃修改。
 - 根因与脱敏实验记录：`docs/codex-native2-turn-token-root-cause.md` 的 §10–§11，以及 `docs/codex-native2-turn-token-verified-evidence.json`。§1–§9 是被更正的初版调查，不应据此重新认定“编辑器已排除”或实施模糊 token 匹配。
 - 自定义安装包、来源和校验信息以升级脚本生成的安装凭据为准。检查具体路径的方式见维护入口的 `status` 命令；不能只凭 `/healthz` 的版本号认定补丁已经运行。
-- 当前修复的继续检查点：`integrations/codex-chatgpt-web-local/verification.json`。首次包、异步 review 修复包及 Native2 参数末字符复制核对补丁（`bundleId=371e97f6…595e459c8f`，见报告 §11.1–§11.5）均已完成 `installed-and-verified`。最新版本 Activity 收尾换 key 字面包装重绑修复包（`patchSha256=d82aa743…04f3cab31`，`bundleId=4343f6d3…69122cf60`，见报告 §11.6）已完成全量验证、打包、`stage`、`finalize` 和两项实机回归，状态为 **`installed-and-verified`**。收到状态查询或继续指令时先核对实际状态，不重复构建、不丢弃现有源码。
+- 当前修复的继续检查点：`integrations/codex-chatgpt-web-local/verification.json`。首次包、异步 review 修复包及 Native2 参数末字符复制核对补丁（`bundleId=371e97f6…595e459c8f`，见报告 §11.1–§11.5）均已完成 `installed-and-verified`。Activity 收尾换 key 字面包装重绑修复包（`patchSha256=d82aa743…04f3cab31`，`bundleId=4343f6d3…69122cf60`，见报告 §11.6）也曾完成全量验证与两项实机回归。当前版本升级到上游 v6.2.0（commit `fc701f6fbcff9fb65f679445389aca0c60410271`），保留本地修复（`patchSha256=930c4806…de9dd91`，`bundleId=db3cbf7d…e89f`），已完成全量验证、打包、`stage`、在用户明确授权后 `systemctl --user restart codex-web-gpt`、`finalize` 和两项实机回归，状态为 **`installed-and-verified`**。收到状态查询或继续指令时先核对实际状态，不重复构建、不丢弃现有源码。
 
 ### 必须保留的修复行为
 

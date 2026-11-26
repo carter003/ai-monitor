@@ -1,77 +1,52 @@
-import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { access, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
-import { constants } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
-import path from 'node:path';
 import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-
-const configuredRuntime = process.env.HERDR_TPS_OMP_TEST_BIN;
-const runtime = configuredRuntime
-  ? path.resolve(configuredRuntime)
-  : fileURLToPath(new URL('../.runtime/omp', import.meta.url));
-const probe = fileURLToPath(new URL('./fixtures/omp-runtime-contract.mjs', import.meta.url));
-
-test('installed OMP preserves native auth and session contracts', { timeout: 45_000 }, async (t) => {
-  try {
-    await access(runtime, constants.X_OK);
-  } catch (error) {
-    if (configuredRuntime) throw error;
-    t.skip('No local OMP runtime; set HERDR_TPS_OMP_TEST_BIN to verify an installation');
-    return;
-  }
-
-  const root = await mkdtemp(path.join(tmpdir(), 'herdr-omp-contract-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  await mkdir(path.join(root, 'agent'));
-  const resultFile = path.join(root, 'result.json');
-  // Keep the host HOME intact; all OMP state and config paths belong to this fixture.
-  const env = {
-    PATH: process.env.PATH,
-    HOME: process.env.HOME,
-    USER: process.env.USER,
-    TMPDIR: process.env.TMPDIR,
-    LANG: process.env.LANG,
-    PI_CONFIG_DIR: path.relative(homedir(), path.join(root, 'config')),
-    PI_CODING_AGENT_DIR: path.join(root, 'agent'),
-    XDG_DATA_HOME: path.join(root, 'data'),
-    XDG_STATE_HOME: path.join(root, 'state'),
-    XDG_CACHE_HOME: path.join(root, 'cache'),
-    HERDR_TPS_OMP_CONTRACT_ROOT: root,
-    HERDR_TPS_OMP_CONTRACT_RESULT: resultFile,
-  };
-  const child = spawn(runtime, [
-    '--mode', 'rpc', '--no-session', '--no-ui', '--no-tools', '--no-skills', '--no-extensions',
-    '--model', 'opencode-go/deepseek-v4.1-flash', '--api-key', 'herdr-contract-fake-key',
-    '--extension', probe,
-  ], { cwd: root, env, stdio: ['pipe', 'ignore', 'pipe'] });
-  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
-  let stderr = '';
-  child.stderr.setEncoding('utf8');
-  child.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-8_000); });
-  const timer = setTimeout(() => child.kill('SIGKILL'), 35_000);
-  const exited = new Promise((resolve, reject) => {
-    child.once('error', reject);
-    child.once('exit', (code, signal) => resolve({ code, signal }));
-  });
-  child.stdin.end();
-  let exit;
-  try {
-    exit = await exited;
-  } finally {
-    clearTimeout(timer);
-  }
-  assert.equal(exit.code, 0, `OMP exited with ${exit.code ?? exit.signal}: ${stderr}`);
-  const result = JSON.parse(await readFile(resultFile, 'utf8'));
-  assert.equal(result.error, undefined, result.error);
-  assert.deepEqual(result.checks, [
-    'restricted stored pin delegates to native auth',
-    'branch writes its own pin and resumes without ranking',
-    'tree seeds TPS from the active branch',
-    'first UI switch retains the model and seeded TPS',
-    'reset boundary excludes earlier TPS history',
-    'native context builder excludes compacted assistant history',
-    'native overrides, login priority and external auth writes supersede cached keys',
-  ]);
+const source = fileURLToPath(new URL('..', import.meta.url));
+const runtime = process.env.HERDR_TPS_OMP_TEST_BIN || (fs.existsSync(path.join(source,'.runtime/omp')) ? path.join(source,'.runtime/omp') : path.join(os.homedir(),'.local/bin/omp'));
+test('native OMP discovers JS symlinks and safely skips extensions with no-tools', {timeout:45000}, t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(),'herdr-native-contract-'));
+  t.after(() => fs.rmSync(root,{recursive:true,force:true}));
+  const agent = path.join(root,'agent'), extensions = path.join(agent,'extensions');
+  fs.mkdirSync(extensions,{recursive:true});
+  for (const name of ['omp-subagent-model.js','omp-herdr-tps.js']) fs.symlinkSync(path.join(source,name),path.join(extensions,name));
+  const result = path.join(root,'contract.json');
+  fs.writeFileSync(path.join(extensions,'contract.js'), `
+import {Tokenizer} from '@oh-my-pi/pi-agent-core';
+import {writeFileSync} from 'node:fs';
+import tpsExtension from './omp-herdr-tps.js';
+import {discoverAgents} from '@oh-my-pi/pi-coding-agent/task/discovery';
+import {registerOmpSubagentModelPolicy} from './omp-subagent-model.js';
+export default async function(pi) {
+ const {agents} = await discoverAgents(process.cwd());
+ let handler;
+ registerOmpSubagentModelPolicy({pi:pi.pi,on:(_,h)=>{handler=h;}},{agentDefinitions:agents});
+ const inherited = handler({agent:'reviewer',modelRole:'slow',invocationKind:'task'},{models:{current:()=>({provider:'test',id:'parent'})}});
+ const explicit = handler({agent:'m1',modelRole:'slow',invocationKind:'eval'},{});
+ const context = {models:{current:()=>({provider:'test',id:'parent'})}};
+ const evalModel = handler({agent:'reviewer',modelRole:'slow',invocationKind:'eval'},context)?.model;
+ const scoutModel = handler({agent:'scout',modelRole:'smol',invocationKind:'eval'},context)?.model;
+ process.env.HERDR_ENV = '1'; process.env.HERDR_PANE_ID = 'test'; process.env.HERDR_SOCKET_PATH = '/unused';
+ process.env.HERDR_TPS_OMP_TOPLEVEL = String(process.pid);
+ let count = 0;
+ const stub = {on:()=>{count++;},logger:{warn:(m)=>{throw new Error(m);}}};
+ await tpsExtension(stub); const reload = count > 0;
+ process.env.HERDR_TPS_OMP_TOPLEVEL = String(process.pid + 1);
+ count = 0; await tpsExtension(stub); const childBlocked = count === 0;
+ writeFileSync(${JSON.stringify(result)},JSON.stringify({evalModel,scoutModel,reload,childBlocked,tokenizer:typeof Tokenizer,model:inherited?.model,explicit:explicit===undefined}));
+}`);
+  const env = {...process.env, PI_CODING_AGENT_DIR:agent, PI_CONFIG_DIR:path.relative(os.homedir(),path.join(root,'config')), XDG_DATA_HOME:path.join(root,'data'), XDG_CACHE_HOME:path.join(root,'cache'), HERDR_ENV:'0'};
+  delete env.HERDR_TPS_OMP_TOPLEVEL; delete env.OMPCODE;
+  const args = ['--mode','rpc','--no-session','--no-ui','--no-skills','--model','opencode-go/deepseek-v4.1-flash','--api-key','fixture-key'];
+  const loaded = spawnSync(runtime,args,{cwd:root,env,encoding:'utf8',input:'',timeout:20000});
+  assert.equal(loaded.status,0,loaded.stderr);
+  assert.ok(fs.existsSync(result), loaded.stderr);
+  assert.deepEqual(JSON.parse(fs.readFileSync(result)),{evalModel:'test/parent',scoutModel:'test/parent',reload:true,childBlocked:true,tokenizer:'function',model:'test/parent',explicit:true});
+  fs.unlinkSync(result);
+  const skipped = spawnSync(runtime,[...args,'--no-tools'],{cwd:root,env,encoding:'utf8',input:'',timeout:20000});
+  assert.equal(skipped.status,0,skipped.stderr);
+  assert.equal(fs.existsSync(result),false,'no-tools skips native user extensions');
 });

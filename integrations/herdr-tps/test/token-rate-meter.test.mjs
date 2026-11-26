@@ -329,3 +329,11 @@ for (const tickDuringWait of [true, false]) {
     await reporter.close();
   });
 }
+
+test('authoritative completed samples accumulate decayed history instead of replacing it', () => {
+  const meter = new TokenRateMeter({ minTokens:0, minTimeMs:0 });
+  meter.observe(100, 2000); assert.ok(Math.abs(meter.rate() - 50) < 1e-8);
+  meter.observe(200, 2000); assert.ok(meter.rate() > 75 && meter.rate() < 100);
+  meter.observe(NaN, 2000); assert.ok(Number.isFinite(meter.rate()));
+  meter.reset(); meter.observe(0,2000); assert.equal(meter.rate(),0);
+});

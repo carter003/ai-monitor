@@ -12,9 +12,8 @@ ai-monitor
 
 一页两栏，同时展示系统资源和本机 token 消耗：
 
-- **左栏**：上半是系统资源，下半是 Codex 常规 GPT、
-  OpenCode Go、OpenCode GO-2、SuperGrok 和 OpenRouter 的**云端剩余配额**。额度列表在系统数字下方独立滚动，
-  不会把系统指标顶出画面。
+- **左栏**：上半是系统资源，下半是 Codex 常规 GPT、OpenCode Go、SuperGrok 和 OpenRouter 的
+  **云端剩余配额**。额度列表在系统数字下方独立滚动，不会把系统指标顶出画面。
 - **右栏**：本机实际烧掉的 token —— 上半左侧（占宽 70%）是按模型排行的一行一模型表格
   （输入含缓存命中率／输出／思考／合计／金额），右侧（30%）是当日、本周、当月三个区间的
   token 与金额，以及用方框突出的历史总计；下半 60% 是等高的三张柱状图——「每小时」「每天」
@@ -70,6 +69,12 @@ Token 数据来自 `~/.local/share/herdr/usage.db`，由 Herdr 侧的 `herdr-usa
 
 运行只需要 Linux 及交互终端，不需要 Rust、Node、Python 或额外的 TUI 插件。建议窗格至少 32 列、24 行；更小的窗格有降级显示。
 
+## 0.7.1 更新
+
+去除已停用的 OpenCode GO-2 订阅额度：第二把 Go Key 不再读取，`go2_key_file` 配置项和
+`~/.config/ai-monitor/go2.key` 也不再使用，额度面板恢复为 Codex / OpenCode Go /
+SuperGrok / OpenRouter 四项。
+
 ## 0.7.0 更新
 
 去除已停用的 Codex 模型额度：OpenAI 停用 GPT-5.3-Codex-Spark 后，左栏不再出现 `Codex · 5.3 Spark`
@@ -90,9 +95,6 @@ Y 轴上限调整：「每小时」图 250M → 200M，「每天」图 3B → 2B
 能直接读的整数档——`200M／150M／100M／50M`、`2B／1.5B／1B／0.5B`、`$400／$300／$200／$100`——
 不再出现 `188M` 这类八等分推导出来的数。柱子按占上限的比例着色的规则不变。
 
-新增第二个 OpenCode Go 订阅来源「OpenCode GO-2」：读取 `~/.config/ai-monitor/go2.key`（或配置项
-`go2_key_file`）里的第二把订阅 Key，查询同一 `/zen/go/v1/usage` 接口，卡片显示在 OpenCode Go 下方；
-未放置 Key 文件时该卡片提示配置方法，不影响其他来源轮询。
 
 ## 0.6.2 更新
 
@@ -164,7 +166,7 @@ token 与金额在同一次 GROUP BY 里取回。
 
 `t` 改为整页切换：Token 页占满窗格，不再在顶部保留 CPU、内存、网速与磁盘区，模型表、柱状图和总计因此获得完整高度；额度页仍是系统资源加云端额度。底部的刷新、切换、退出提示与版本号位置不变。
 
-版本号以 `Cargo.toml` 的 `version` 为唯一来源（当前 `v0.7.0`）：页脚、HTTP User-Agent 和本文件的最新更新小节都由它派生，改动版本只需改 `Cargo.toml` 一处；`the_readme_changelog_matches_the_crate_version` 会在文档与它不一致时失败。
+版本号以 `Cargo.toml` 的 `version` 为唯一来源（当前 `v0.7.1`）：页脚、HTTP User-Agent 和本文件的最新更新小节都由它派生，改动版本只需改 `Cargo.toml` 一处；`the_readme_changelog_matches_the_crate_version` 会在文档与它不一致时失败。
 
 ## 0.1.8 更新
 
@@ -234,7 +236,6 @@ OpenCode Go 固定最少显示 1 位小数（`98.0%`／`99.0%`／`100.0%`，0.1.
 
 - **Codex**：读取 `~/.codex/auth.json` 中的现有 ChatGPT 登录凭据，查询账户 usage。常规额度按返回的窗口显示，账户返回的其他独立额度池一并列出；已停用的 GPT-5.3-Codex-Spark 不再统计。此接口属于 Codex 客户端内部接口，可能随服务更新而变化。不会启动 Codex 模型推理或刷新／改写其登录文件。
 - **OpenCode Go**：优先从 omp（`~/.omp/agent/agent.db` 及各 profile）读取当前生效的 Go API Key，未找到时回退至 OpenCode 已保存的凭据（`~/.local/share/opencode/auth.json`），查询 `/zen/go/v1/usage`，显示 5H／周／月剩余比例，不抓取浏览器 Cookie。
-- **OpenCode GO-2**：第二把 OpenCode Go 订阅 Key，读取 `~/.config/ai-monitor/go2.key`（文件只包含 Key，建议权限 `600`），查询同一 `/zen/go/v1/usage` 接口，卡片显示在 OpenCode Go 下方。未放置 Key 文件时该卡片提示配置方法，不影响其他来源。
 - **SuperGrok**：使用 `~/.grok/auth.json` 中的订阅登录信息，查询 Grok Build 的订阅 credits 接口，按实际返回的周期解码。登录过期时提示重新登录 Grok。账号的实时接口仍受登录状态、服务端权限及内部协议版本影响，不能保证每个账号都有可查询额度。
 - **OpenRouter**：使用具有余额查询权限的 Key 查询 `/api/v1/credits`，显示账户总 credits 减总 usage。读取顺序为下述 Key 文件、`OPENROUTER_MANAGEMENT_KEY`、`OPENROUTER_API_KEY`，最后尝试 OpenCode 保存的 OpenRouter Key。普通模型调用 Key 不保证具有余额查询权限。
 
@@ -279,7 +280,6 @@ opencode_home = "~/.local/share/opencode"
 omp_home = "~/.omp"
 grok_home = "~/.grok"
 openrouter_key_file = "~/.config/ai-monitor/openrouter.key"
-go2_key_file = "~/.config/ai-monitor/go2.key"
 ```
 
 支持标准 `XDG_CONFIG_HOME`、`XDG_DATA_HOME`、`CODEX_HOME`、`GROK_HOME` 位置。开发或隔离测试可用 `AI_MONITOR_CONFIG` 指定单独配置文件。配置中不支持任意网络服务器地址，避免登录凭据被误发。

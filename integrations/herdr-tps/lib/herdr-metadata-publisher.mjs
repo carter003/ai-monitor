@@ -13,10 +13,9 @@ function requestId(source) {
 
 export const DEFAULT_METADATA_TIMEOUT_MS = 2_000;
 const HERDR_TPS_METADATA_SOURCE = 'herdr:tps';
-const NESTED_OMP_MARKERS = ['OMPCODE', 'HERDR_TPS_OMP_NESTED'];
-
-function isNestedOmpProcess() {
-  return NESTED_OMP_MARKERS.some((name) => process.env[name] === '1');
+export function isNestedOmpProcess(agent = 'omp') {
+  const top = process.env.HERDR_TPS_OMP_TOPLEVEL;
+  return process.env.OMPCODE === '1' || Boolean(top && (agent !== 'omp' || top !== String(process.pid)));
 }
 
 // OMP renders the working-row rate with one decimal (`rate.toFixed(1)`); match
@@ -41,14 +40,14 @@ export class HerdrMetadataPublisher {
     paneId = process.env.HERDR_PANE_ID,
     socketPath = process.env.HERDR_SOCKET_PATH,
     agent,
-    appliesToSource,
     timeoutMs,
     onError,
   } = {}) {
     this.paneId = paneId;
     this.socketPath = socketPath;
     this.agent = agent;
-    this.appliesToSource = appliesToSource;
+    this.eligible = process.env.HERDR_ENV === '1' && Boolean(paneId && socketPath)
+      && !isNestedOmpProcess(agent) && !(agent === 'codex' && process.env.CODEX_THREAD_ID);
     const configuredTimeout = Number(timeoutMs ?? process.env.HERDR_TPS_TIMEOUT_MS);
     this.timeoutMs =
       Number.isFinite(configuredTimeout) && configuredTimeout > 0
@@ -63,12 +62,7 @@ export class HerdrMetadataPublisher {
   }
 
   get enabled() {
-    const nestedOmp = isNestedOmpProcess() && this.agent === 'omp';
-    return (
-      process.env.HERDR_ENV === '1' &&
-      Boolean(this.paneId && this.socketPath) &&
-      !nestedOmp
-    );
+    return this.eligible;
   }
 
   publishModel(model, ttlMs) {
@@ -86,28 +80,12 @@ export class HerdrMetadataPublisher {
     return this.#publishTokens({ tps: formatTpsRate(rate) }, ttlMs);
   }
 
-  publishDisplayAgent(displayAgent, ttlMs) {
-    if (!displayAgent) {
-      return Promise.resolve();
-    }
-    return this.#publishFields({ display_agent: String(displayAgent) }, ttlMs);
-  }
-
-  publishSnapshot({ model, rate, displayAgent }, ttlMs) {
-    const hasTokens = model !== undefined || rate !== undefined;
-    const hasDisplayAgent = Boolean(displayAgent);
-    if (!hasTokens && !hasDisplayAgent) {
-      return Promise.resolve();
-    }
-    const tokens = {
+  publishSnapshot({ model, rate }, ttlMs) {
+    if (model === undefined && rate === undefined) return Promise.resolve();
+    return this.#publishTokens({
       ...(model === undefined ? {} : { model: String(model) }),
       ...(rate === undefined ? {} : { tps: formatTpsRate(rate) }),
-    };
-    const fields = {
-      ...(hasDisplayAgent ? { display_agent: String(displayAgent) } : {}),
-      ...(hasTokens ? { tokens } : {}),
-    };
-    return this.#publishFields(fields, ttlMs, { includeGuards: hasDisplayAgent });
+    }, ttlMs);
   }
 
   #publishTokens(tokens, ttlMs) {
@@ -116,7 +94,6 @@ export class HerdrMetadataPublisher {
 
   resetForAgent(ttlMs) {
     const clearedFields = {
-      display_agent: null,
       tokens: { model: null, tps: null },
     };
     for (const source of HERDR_TPS_LEGACY_METADATA_SOURCES) {
@@ -124,8 +101,7 @@ export class HerdrMetadataPublisher {
     }
     return this.#publishFields(
       {
-        display_agent: null,
-        tokens: { model: null, tps: '0' },
+          tokens: { model: null, tps: '0' },
       },
       ttlMs,
       { includeGuards: false },
@@ -141,8 +117,7 @@ export class HerdrMetadataPublisher {
     }
     return this.#publishFields(
       {
-        display_agent: null,
-        tokens: { model: null, tps: null },
+          tokens: { model: null, tps: null },
       },
       undefined,
       { includeGuards: false },
@@ -165,9 +140,6 @@ export class HerdrMetadataPublisher {
         pane_id: this.paneId,
         source,
         ...(includeGuards && this.agent ? { agent: this.agent } : {}),
-        ...(includeGuards && this.appliesToSource
-          ? { applies_to_source: this.appliesToSource }
-          : {}),
         ...fields,
         seq: sequence,
         ...(ttlMs === undefined ? {} : { ttl_ms: ttlMs }),
@@ -178,7 +150,6 @@ export class HerdrMetadataPublisher {
     const key = JSON.stringify([
       source,
       request.params.agent,
-      request.params.applies_to_source,
       ttlMs,
       Object.keys(fields).sort(),
       Object.keys(fields.tokens ?? {}).sort(),

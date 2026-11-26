@@ -170,7 +170,7 @@ fn a_late_sibling_pin_repairs_an_already_collected_request() {
 }
 
 #[test]
-fn current_sticky_and_single_credential_cannot_prove_a_request_account() {
+fn single_credential_survives_reconcile_but_sticky_cache_is_not_evidence() {
     let mut f = Fixture::new();
     f.auth
         .execute("DELETE FROM auth_credentials WHERE id=8", [])
@@ -186,7 +186,13 @@ fn current_sticky_and_single_credential_cannot_prove_a_request_account() {
     collector.run_round(&mut f.usage, 0).unwrap();
     append(&file, &[header("unknown"), request("request", 200)]);
     collector.run_round(&mut f.usage, 300).unwrap();
-    assert_eq!(accounts(&f.usage), vec![("request".to_owned(), None, None)]);
+    let single = accounts(&f.usage);
+    assert_eq!(single[0].0, "request");
+    assert!(single[0].1.as_deref().unwrap().starts_with("api_key:"));
+    assert_eq!(single[0].2.as_deref(), Some("single_credential"));
+    sources::backfill_omp_api_key_timeline(&mut f.usage, std::slice::from_ref(&f.paths.omp)).unwrap();
+    assert_eq!(accounts(&f.usage), single);
+
     f.usage.execute("UPDATE usage_event SET account_key='guessed',account_label='guessed',account_source='sticky_cache'",[]).unwrap();
     assert_eq!(
         sources::backfill_omp_api_key_timeline(&mut f.usage, std::slice::from_ref(&f.paths.omp))

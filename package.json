@@ -3,14 +3,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "herdr:codex": "node integrations/herdr-tps/codex-with-tps.mjs",
-    "herdr:omp": "node integrations/herdr-tps/omp-with-tps.mjs",
     "herdr:tps:install": "node integrations/herdr-tps/install.mjs",
+    "herdr:tps:uninstall": "node integrations/herdr-tps/install.mjs --uninstall",
     "herdr:tps:test": "node --test integrations/herdr-tps/test/*.test.mjs"
-  },
-  "dependencies": {
-    "gpt-tokenizer": "4.0.0",
-    "ws": "8.21.3"
   },
   "engines": {
     "node": ">=22"

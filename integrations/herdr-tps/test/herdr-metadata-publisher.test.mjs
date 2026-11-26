@@ -1,3 +1,5 @@
+delete process.env.CODEX_THREAD_ID;
+delete process.env.HERDR_TPS_OMP_TOPLEVEL;
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import net from 'node:net';
@@ -55,19 +57,19 @@ test('sends a pane.report_metadata request with a compact numeric speed', async 
   }
 });
 
-// OMPCODE marks a shell OMP spawned; HERDR_TPS_OMP_NESTED marks a wrapper that
+// OMPCODE marks a shell OMP spawned; HERDR_TPS_OMP_TOPLEVEL marks a wrapper that
 // already detected nesting. Both are set by different paths, so each must
 // suppress publishing on its own.
-for (const marker of ['OMPCODE', 'HERDR_TPS_OMP_NESTED']) {
+for (const marker of ['OMPCODE', 'HERDR_TPS_OMP_TOPLEVEL']) {
   test(`does not publish metadata from an OMP process nested via ${marker}`, async () => {
     const previous = {
       HERDR_ENV: process.env.HERDR_ENV,
       OMPCODE: process.env.OMPCODE,
-      HERDR_TPS_OMP_NESTED: process.env.HERDR_TPS_OMP_NESTED,
+      HERDR_TPS_OMP_TOPLEVEL: process.env.HERDR_TPS_OMP_TOPLEVEL,
     };
     process.env.HERDR_ENV = '1';
     delete process.env.OMPCODE;
-    delete process.env.HERDR_TPS_OMP_NESTED;
+    delete process.env.HERDR_TPS_OMP_TOPLEVEL;
     process.env[marker] = '1';
     try {
       const requests = [];
@@ -90,15 +92,15 @@ for (const marker of ['OMPCODE', 'HERDR_TPS_OMP_NESTED']) {
   });
 }
 
-test('nesting markers do not suppress a non-OMP agent', async () => {
+test('nesting markers suppress Codex called from OMP', async () => {
   const previous = {
     HERDR_ENV: process.env.HERDR_ENV,
     OMPCODE: process.env.OMPCODE,
-    HERDR_TPS_OMP_NESTED: process.env.HERDR_TPS_OMP_NESTED,
+    HERDR_TPS_OMP_TOPLEVEL: process.env.HERDR_TPS_OMP_TOPLEVEL,
   };
   process.env.HERDR_ENV = '1';
   process.env.OMPCODE = '1';
-  delete process.env.HERDR_TPS_OMP_NESTED;
+  delete process.env.HERDR_TPS_OMP_TOPLEVEL;
   try {
     const requests = [];
     const publisher = new HerdrMetadataPublisher({
@@ -111,9 +113,9 @@ test('nesting markers do not suppress a non-OMP agent', async () => {
       return true;
     };
 
-    assert.equal(publisher.enabled, true);
+    assert.equal(publisher.enabled, false);
     await publisher.publishRate(12, 2_000);
-    assert.equal(requests.length, 1);
+    assert.equal(requests.length, 0);
   } finally {
     for (const [name, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[name];
@@ -146,9 +148,9 @@ test('clears legacy sources before claiming canonical model and rate tokens', as
         request.params.tokens,
       ]),
       [
-        ['herdr:tps:codex', undefined, undefined, null, { model: null, tps: null }],
-        ['herdr:tps:omp', undefined, undefined, null, { model: null, tps: null }],
-        ['herdr:tps', undefined, undefined, null, { model: null, tps: '0' }],
+        ['herdr:tps:codex', undefined, undefined, undefined, { model: null, tps: null }],
+        ['herdr:tps:omp', undefined, undefined, undefined, { model: null, tps: null }],
+        ['herdr:tps', undefined, undefined, undefined, { model: null, tps: '0' }],
       ],
     );
 
@@ -209,42 +211,6 @@ test('surfaces Herdr API errors without breaking the publisher queue', async () 
   }
 });
 
-test('keeps the canonical source when publishing a guarded OMP display name', async () => {
-  const previousHerdrEnv = process.env.HERDR_ENV;
-  const previousOmpCode = process.env.OMPCODE;
-  delete process.env.OMPCODE;
-  process.env.HERDR_ENV = '1';
-  try {
-    const requests = [];
-    const publisher = new HerdrMetadataPublisher({
-      paneId: 'pane-1',
-      socketPath: '/unused/test.sock',
-      // Deliberately ignored: callers cannot split the canonical metadata owner again.
-      source: 'herdr:tps:omp',
-      agent: 'omp',
-      appliesToSource: 'herdr:omp',
-    });
-    publisher.send = async (request) => requests.push(request);
-
-    await publisher.publishDisplayAgent('omp2', 5_000);
-    assert.equal(requests[0].method, 'pane.report_metadata');
-    assert.equal(requests[0].params.source, 'herdr:tps');
-    assert.equal(requests[0].params.agent, 'omp');
-    assert.equal(requests[0].params.applies_to_source, 'herdr:omp');
-    assert.equal(requests[0].params.display_agent, 'omp2');
-    assert.equal(requests[0].params.tokens, undefined);
-    assert.ok(requests[0].params.ttl_ms > 0 && requests[0].params.ttl_ms <= 5_000);
-  } finally {
-    if (previousHerdrEnv === undefined) {
-      delete process.env.HERDR_ENV;
-    } else {
-      process.env.HERDR_ENV = previousHerdrEnv;
-    }
-    if (previousOmpCode === undefined) delete process.env.OMPCODE;
-    else process.env.OMPCODE = previousOmpCode;
-  }
-});
-
 test('publishes one guarded heartbeat snapshot for idle OMP metadata', async () => {
   const previousHerdrEnv = process.env.HERDR_ENV;
   const previousOmpCode = process.env.OMPCODE;
@@ -267,8 +233,8 @@ test('publishes one guarded heartbeat snapshot for idle OMP metadata', async () 
 
     assert.equal(requests.length, 1);
     assert.deepEqual(requests[0].params.tokens, { model: 'gemini-3.7-flash', tps: '0.0' });
-    assert.equal(requests[0].params.display_agent, 'omp2');
-    assert.equal(requests[0].params.agent, 'omp');
+    assert.equal(requests[0].params.display_agent, undefined);
+    assert.equal(requests[0].params.agent, undefined);
     assert.ok(requests[0].params.ttl_ms > 0 && requests[0].params.ttl_ms <= 5_000);
   } finally {
     if (previousHerdrEnv === undefined) {
@@ -496,5 +462,22 @@ test('advances sequence with wall-clock time over long intervals while remaining
   } finally {
     if (previous === undefined) delete process.env.HERDR_ENV;
     else process.env.HERDR_ENV = previous;
+  }
+});
+
+test('PID root marker permits same-process OMP reload and blocks children and Codex', () => {
+  const saved = { ...process.env };
+  try {
+    process.env.HERDR_ENV = '1'; delete process.env.OMPCODE; delete process.env.CODEX_THREAD_ID;
+    process.env.HERDR_TPS_OMP_TOPLEVEL = String(process.pid);
+    const options = { paneId:'pane', socketPath:'/unused' };
+    assert.equal(new HerdrMetadataPublisher({ ...options, agent:'omp' }).enabled, true);
+    assert.equal(new HerdrMetadataPublisher({ ...options, agent:'codex' }).enabled, false);
+    process.env.HERDR_TPS_OMP_TOPLEVEL = String(process.pid + 1);
+    assert.equal(new HerdrMetadataPublisher({ ...options, agent:'omp' }).enabled, false);
+  } finally {
+    for (const key of ['HERDR_ENV','OMPCODE','CODEX_THREAD_ID','HERDR_TPS_OMP_TOPLEVEL']) {
+      if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key];
+    }
   }
 });

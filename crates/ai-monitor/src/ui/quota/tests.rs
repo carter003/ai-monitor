@@ -50,17 +50,6 @@ fn fixtures() -> Vec<SourceState> {
             )],
         ),
         state(
-            Source::Go2,
-            vec![card(
-                "OpenCode GO-2",
-                vec![
-                    meter("5H", 100., 4 * 3600 + 59 * 60, 0),
-                    meter("周", 77., 86400 + 17 * 3600, 0),
-                    meter("月", 89., 29 * 86400 + 5 * 3600, 0),
-                ],
-            )],
-        ),
-        state(
             Source::Grok,
             vec![card(
                 "SuperGrok",
@@ -116,12 +105,12 @@ fn buffer_text(buffer: &Buffer) -> String {
 #[test]
 fn every_line_is_bounded_including_unicode_errors_and_notes() {
     let mut states = fixtures();
-    states[2].cards[0].title = "OpenCode GO-2 (很长的账号名称\n不能覆盖下一行)".into();
-    states[2].cards[0].note =
+    states[1].cards[0].title = "OpenCode Go (很长的账号名称\n不能覆盖下一行)".into();
+    states[1].cards[0].note =
         Some("很长的说明\twith a newline\nthat must not break the grid".into());
-    states[3].error =
+    states[2].error =
         Some("网络错误：upstream timeout with an unusually long error message".into());
-    states[4].cards[0].balance = Some(f64::MAX);
+    states[3].cards[0].balance = Some(f64::MAX);
     for width in 0..=96 {
         for row in lines(&states, width, NOW) {
             assert!(row.width() <= width as usize, "width {width}: {row:?}");
@@ -133,15 +122,15 @@ fn every_line_is_bounded_including_unicode_errors_and_notes() {
 #[test]
 fn all_meters_share_percentage_bar_and_reset_columns() {
     let mut states = fixtures();
-    states[2].cards[0].meters[0].decimals = 2;
-    states[2].cards[0].meters[0].resets_at = Some(NOW + 123 * 86400);
+    states[1].cards[0].meters[0].decimals = 2;
+    states[1].cards[0].meters[0].resets_at = Some(NOW + 123 * 86400);
     let cols = Columns::new(46, &states, NOW);
     let rows = lines(&states, 46, NOW);
     let meters: Vec<_> = rows
         .iter()
         .filter(|r| r.to_string().contains('%'))
         .collect();
-    assert_eq!(meters.len(), 8);
+    assert_eq!(meters.len(), 5);
     for row in meters {
         let value = row.to_string();
         let percent_at = value.find('%').unwrap();
@@ -157,7 +146,7 @@ fn all_meters_share_percentage_bar_and_reset_columns() {
         assert_eq!(value.matches('━').count(), cols.bar);
         assert_eq!(row.width(), 46);
     }
-    assert!(text(&rows).contains("100.00%"));
+    assert!(text(&rows).contains("97.00%"));
     assert!(text(&rows).contains("123d 00h"));
 }
 
@@ -213,13 +202,13 @@ fn tiny_panes_stack_complete_values_and_reset_times() {
 #[test]
 fn account_names_are_muted_and_truncated_before_status() {
     let mut state = state(
-        Source::Go2,
-        vec![card("OpenCode GO-2 (很长的名字 e\u{301})", vec![])],
+        Source::Go,
+        vec![card("OpenCode Go (很长的名字 e\u{301})", vec![])],
     );
     state.refreshing = true;
     let rows = lines(&[state], 30, NOW);
     let row = &rows[0];
-    assert!(row.to_string().contains("OpenCode GO-2 · "));
+    assert!(row.to_string().contains("OpenCode Go · "));
     assert!(row.to_string().contains('…'));
     assert!(row.to_string().trim_end().ends_with("刷新中"));
     let name = row
@@ -369,7 +358,7 @@ fn group_backgrounds_replace_empty_separator_rows_at_any_height() {
     let short = quota_panel_lines(&states, Rect::new(0, 0, 46, 8), NOW);
     let tall = quota_panel_lines(&states, Rect::new(0, 0, 46, 80), NOW);
     assert_eq!(short, tall);
-    assert_eq!(short.len(), 14); // Five headings, eight meters, one balance.
+    assert_eq!(short.len(), 10); // Four headings, five meters, one balance.
     assert!(short.iter().all(|row| !row.to_string().trim().is_empty()));
 }
 
@@ -396,7 +385,7 @@ fn real_buffer_has_the_approved_group_background_and_card_count() {
             .lines()
             .next()
             .unwrap()
-            .contains("5 项")
+            .contains("4 项")
     );
     assert_eq!(buffer[(2, 2)].bg, GROUP_BG);
     assert_eq!(buffer[(2, 2)].fg, INK);

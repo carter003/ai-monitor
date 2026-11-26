@@ -1,4 +1,3 @@
-import { estimateFallbackTokens } from './model-token-counter.mjs';
 
 export const DEFAULT_HALF_LIVES = [5000, 20000, 80000];
 export const DEFAULT_CHUNK_INTERVAL_MS = 250;
@@ -65,7 +64,7 @@ export class TokenRateMeter {
   #pendingTokenCount = undefined;
 
   constructor({
-    countTokens = estimateFallbackTokens,
+    countTokens = () => 0,
     halfLives = DEFAULT_HALF_LIVES,
     minTokens = DEFAULT_MIN_TOKENS,
     minTimeMs = DEFAULT_MIN_TIME_MS,
@@ -246,6 +245,16 @@ export class TokenRateMeter {
     for (const bucket of this.#historyBuckets) {
       bucket.tokens = tokens * scale;
       bucket.time = durationMs * scale;
+    }
+  }
+
+  // Completed authoritative samples retain history across requests. Time is in ms.
+  // No text estimates and no synthetic short-response scaling enter these buckets.
+  observe(tokens, durationMs) {
+    if (!Number.isFinite(tokens) || tokens < 0 || !Number.isFinite(durationMs) || durationMs <= 0) return;
+    this.#resetStream();
+    for (const bucket of this.#historyBuckets) {
+      bucket.advance(durationMs, true, tokens / durationMs);
     }
   }
 

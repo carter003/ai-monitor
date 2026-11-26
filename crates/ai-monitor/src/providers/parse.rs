@@ -181,17 +181,16 @@ mod tests {
         assert_eq!(cards[0].meters[2].decimals, 0);
     }
     #[test]
-    fn go_renders_either_card_title() {
+    fn go_uses_the_provided_card_title() {
         let w = |p| json!({"percent":p,"resetsAt":"2026-09-08T05:42:58Z"});
-        for title in ["OpenCode Go", "OpenCode GO-2"] {
-            let cards = go(
-                &json!({"usage":{"rolling":w(0),"weekly":w(0),"monthly":w(0)}}),
-                title,
-            )
-            .unwrap();
-            assert_eq!(cards[0].title, title);
-        }
+        let cards = go(
+            &json!({"usage":{"rolling":w(0),"weekly":w(0),"monthly":w(0)}}),
+            "OpenCode Go",
+        )
+        .unwrap();
+        assert_eq!(cards[0].title, "OpenCode Go");
     }
+    #[test]
     fn openrouter_is_account_credit_less_account_usage() {
         let card =
             openrouter(&json!({"data":{"total_credits":100.5,"total_usage":25.75}})).unwrap();

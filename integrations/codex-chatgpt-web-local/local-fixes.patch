@@ -19,7 +19,7 @@ index 3c582a5..aef4f52 100644
      server.close();
      server.closeAllConnections();
 diff --git a/src/adapters/chatgpt-web/browser-helper-main.ts b/src/adapters/chatgpt-web/browser-helper-main.ts
-index b4296e7..47ca536 100644
+index bf894c4..005ab75 100644
 --- a/src/adapters/chatgpt-web/browser-helper-main.ts
 +++ b/src/adapters/chatgpt-web/browser-helper-main.ts
 @@ -26,6 +26,7 @@ interface RunMessage {
@@ -27,7 +27,7 @@ index b4296e7..47ca536 100644
      modelId: string;
      reasoning?: string;
 +    outputFormat?: BrowserTurn["outputFormat"];
-     modelFamily?: "5.6" | "6";
+     modelFamily?: "5.6" | "6" | "6.2";
      capabilities: ChatGptWebCapabilities;
      nativeConnector?: boolean;
 @@ -221,6 +222,7 @@ async function run(message: RunMessage): Promise<void> {
@@ -150,13 +150,13 @@ index 1a0cfab..a0adedf 100644
      // These are text wrappers in the captured plain and rich-text user renderers.
      // Other markup must not be silently flattened into a matching prompt.
 diff --git a/src/adapters/chatgpt-web/browser-worker.ts b/src/adapters/chatgpt-web/browser-worker.ts
-index 1f1fc71..0a9539f 100644
+index ccae411..6343eda 100644
 --- a/src/adapters/chatgpt-web/browser-worker.ts
 +++ b/src/adapters/chatgpt-web/browser-worker.ts
-@@ -838,8 +838,197 @@ function withBrowserTurnAbort<T>(promise: Promise<T>, signal?: AbortSignal): Pro
+@@ -838,9 +838,197 @@ function withBrowserTurnAbort<T>(promise: Promise<T>, signal?: AbortSignal): Pro
+     });
    });
  }
- 
 +/** Validate a page-authenticated readback against the exact final message and submitted user. */
 +export function chatGptConversationFinalSource(
 +  value: unknown,
@@ -343,15 +343,15 @@ index 1f1fc71..0a9539f 100644
 +    this.begin();
 +  }
 +}
-+
+ 
  export interface BrowserTurn {
    traceId: string;
 +  /** Explicit structured-output contract supplied by the request parser. */
 +  outputFormat?: import("../../types").CodexJsonSchemaOutputFormat;
    modelId: string;
    reasoning?: string;
-   modelFamily?: "5.6" | "6";
-@@ -882,6 +1071,34 @@ export interface BrowserTurn {
+   modelFamily?: "5.6" | "6" | "6.2";
+@@ -883,6 +1071,34 @@ export interface BrowserTurn {
    onLunaCheckpoint?: (captured: CapturedChatGptLunaCheckpoint) => void;
  }
  
@@ -386,7 +386,7 @@ index 1f1fc71..0a9539f 100644
  interface ChatGptAcknowledgedMultipartStage {
    text: string;
    acknowledgement: string;
-@@ -895,6 +1112,7 @@ interface ChatGptSubmissionBaseline {
+@@ -896,6 +1112,7 @@ interface ChatGptSubmissionBaseline {
    domCache: ChatGptSubmissionDomCache;
    submittedText?: string;
    turnToken?: string;
@@ -394,7 +394,7 @@ index 1f1fc71..0a9539f 100644
    acceptedUserIdentity?: string;
    acknowledgedStages?: readonly ChatGptAcknowledgedMultipartStage[];
  }
-@@ -1845,6 +2063,37 @@ export function replacePlainTextInComposer(element: HTMLElement, value: string):
+@@ -1846,6 +2063,37 @@ export function replacePlainTextInComposer(element: HTMLElement, value: string):
    return document.execCommand("insertText", false, value);
  }
  
@@ -432,7 +432,7 @@ index 1f1fc71..0a9539f 100644
  export class ChatGptBrowserWorker {
    static forProvider(provider: CodexProviderConfig): ChatGptBrowserWorker {
      const config = resolveBrowserConfig(provider);
-@@ -2919,7 +3168,7 @@ export class ChatGptBrowserWorker {
+@@ -2922,7 +3170,7 @@ export class ChatGptBrowserWorker {
          const locator = page.locator(chatGptAssistantTurnSelector(identity!));
          matches = baseline.acceptedUserIdentity
            ? user === baseline.acceptedUserIdentity
@@ -441,7 +441,7 @@ index 1f1fc71..0a9539f 100644
          // The accepted user identity, broker token or exact text establishes ownership.
          // Activity can replace its temporary group while still generating; requiring
          // a completed answer here mistakes that same unfinished turn for a foreign one.
-@@ -3003,8 +3252,14 @@ export class ChatGptBrowserWorker {
+@@ -3006,8 +3254,14 @@ export class ChatGptBrowserWorker {
      }
    }
  
@@ -457,7 +457,7 @@ index 1f1fc71..0a9539f 100644
        if (turnToken !== undefined) {
          // The composer was already checked byte-for-byte before Send. ChatGPT's
          // rich-text renderer can rewrite JSON/link labels afterwards, so use the
-@@ -3041,7 +3296,7 @@ export class ChatGptBrowserWorker {
+@@ -3044,7 +3298,7 @@ export class ChatGptBrowserWorker {
          }, turnToken), signal));
        }
        const observed = await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(
@@ -466,7 +466,7 @@ index 1f1fc71..0a9539f 100644
        ));
        return observed !== undefined && this.promptTextEquivalent(
          submitted.replace(/\r\n?/g, "\n"), observed.text.replace(/\r\n?/g, "\n"),
-@@ -3070,6 +3325,7 @@ export class ChatGptBrowserWorker {
+@@ -3073,6 +3327,7 @@ export class ChatGptBrowserWorker {
      page: Page,
      prompt: string,
      abortSignal?: AbortSignal,
@@ -474,7 +474,7 @@ index 1f1fc71..0a9539f 100644
    ): Promise<void> {
      const deadline = Date.now() + 10_000;
      let observed = "";
-@@ -3077,7 +3333,16 @@ export class ChatGptBrowserWorker {
+@@ -3080,7 +3335,16 @@ export class ChatGptBrowserWorker {
        throwIfPromptAttachmentAborted(abortSignal);
        observed = await this.attachedPromptText(page, abortSignal);
        throwIfPromptAttachmentAborted(abortSignal);
@@ -492,7 +492,7 @@ index 1f1fc71..0a9539f 100644
        await withBrowserTurnAbort(
          new Promise(resolveSleep => setTimeout(resolveSleep, 50)),
          abortSignal,
-@@ -3404,8 +3669,8 @@ export class ChatGptBrowserWorker {
+@@ -3407,8 +3671,8 @@ export class ChatGptBrowserWorker {
          signal: abortSignal,
          timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
        });
@@ -503,7 +503,7 @@ index 1f1fc71..0a9539f 100644
      } catch (error) {
        if (!composerMutationStarted || error instanceof ChatGptPersistentBrowserStateError) throw error;
        try {
-@@ -3736,6 +4001,7 @@ export class ChatGptBrowserWorker {
+@@ -3739,6 +4003,7 @@ export class ChatGptBrowserWorker {
      text: string,
      abortSignal?: AbortSignal,
      replace = false,
@@ -511,7 +511,7 @@ index 1f1fc71..0a9539f 100644
    ): Promise<void> {
      throwIfPromptAttachmentAborted(abortSignal);
      const composer = await this.activeComposer(page, 30_000, abortSignal);
-@@ -3745,7 +4011,9 @@ export class ChatGptBrowserWorker {
+@@ -3748,7 +4013,9 @@ export class ChatGptBrowserWorker {
      // delimiters from textContent, and leave the next insertion outside the intended block. The
      // browser's plain-text editing command updates the same focused contenteditable atomically
      // without running those Markdown shortcuts. Exact readback below remains the authority.
@@ -522,7 +522,7 @@ index 1f1fc71..0a9539f 100644
        timeout: 20_000,
        signal: abortSignal,
      });
-@@ -4787,6 +5055,8 @@ export class ChatGptBrowserWorker {
+@@ -4790,6 +5057,8 @@ export class ChatGptBrowserWorker {
      const prepare = reuseConversation ? turn.prepareResume : turn.prepare;
      if (!prepare) throw new Error("The retained ChatGPT conversation has no continuation prompt");
      const prepared = await prepare(transactionId);
@@ -531,7 +531,7 @@ index 1f1fc71..0a9539f 100644
      const diagnostics = new ChatGptBrowserDiagnostics(
        turn.traceId,
        this.config.browserDiagnosticsPath ?? join(getConfigDir(), "diagnostics", "browser-turns"),
-@@ -4802,7 +5072,7 @@ export class ChatGptBrowserWorker {
+@@ -4805,7 +5074,7 @@ export class ChatGptBrowserWorker {
      const submissionRejection = new ChatGptSubmissionRejectionObserver(error => rejectionAbort.abort(error));
      const streamDiagnostics = new ChatGptStreamDiagnostics(state => {
        console.info(`[chatgpt-web] stream_lifecycle ${JSON.stringify({ traceId: turn.traceId, ...state })}`);
@@ -540,7 +540,7 @@ index 1f1fc71..0a9539f 100644
      let lastGenerationProgress = 0;
      const generation = {
        active: () => submissionRejection.hasActiveResponse(),
-@@ -4864,6 +5134,7 @@ export class ChatGptBrowserWorker {
+@@ -4867,6 +5136,7 @@ export class ChatGptBrowserWorker {
        if (!maintenancePage && !launcherSurfaceId) managedPage = page;
        diagnosticPage = page;
        await streamDiagnostics.attach(page);
@@ -548,7 +548,7 @@ index 1f1fc71..0a9539f 100644
        const rebindLauncherPage = async (
          attempt: number,
          cause: Error,
-@@ -4919,6 +5190,7 @@ export class ChatGptBrowserWorker {
+@@ -4922,6 +5192,7 @@ export class ChatGptBrowserWorker {
          page = connection.page;
          diagnosticPage = page;
          await streamDiagnostics.attach(page);
@@ -556,7 +556,7 @@ index 1f1fc71..0a9539f 100644
          console.warn(
            `[chatgpt-web] browser turn ${turn.traceId} rebound its existing launcher page after a stalled DOM probe`,
          );
-@@ -5091,6 +5363,7 @@ export class ChatGptBrowserWorker {
+@@ -5094,6 +5365,7 @@ export class ChatGptBrowserWorker {
                  await this.assertSelectedEffort(page, mode);
                  submissionRejection.begin(page);
                  streamDiagnostics.begin();
@@ -564,7 +564,7 @@ index 1f1fc71..0a9539f 100644
                  await submissionRejection.captureAlertBaseline();
                } },
                undefined,
-@@ -5238,6 +5511,10 @@ export class ChatGptBrowserWorker {
+@@ -5241,6 +5513,10 @@ export class ChatGptBrowserWorker {
            await diagnostics.capture(page, "connector-catalog-refreshed");
          }
        }
@@ -575,7 +575,7 @@ index 1f1fc71..0a9539f 100644
        await diagnostics.capture(page, "prompt-attachment-complete");
        await this.runStage(turn.traceId, "file_attachment", browserStageTimeouts.fileAttachment, (stageSignal) => (
          this.attachFiles(page, prepared, turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal)
-@@ -5271,6 +5548,7 @@ export class ChatGptBrowserWorker {
+@@ -5274,6 +5550,7 @@ export class ChatGptBrowserWorker {
              })}`);
              submissionRejection.begin(page);
              streamDiagnostics.begin();
@@ -583,7 +583,7 @@ index 1f1fc71..0a9539f 100644
              await submissionRejection.captureAlertBaseline();
              await turn.onSendActivated?.();
            } },
-@@ -5315,9 +5593,14 @@ export class ChatGptBrowserWorker {
+@@ -5318,9 +5595,14 @@ export class ChatGptBrowserWorker {
        const checkpointStream = turn.captureLunaCheckpoint
          ? new ChatGptLunaCheckpointStream()
          : undefined;
@@ -599,7 +599,7 @@ index 1f1fc71..0a9539f 100644
        };
        const throwMarkdownConsistencyError = (error: unknown): never => {
          if (!(error instanceof ChatGptMarkdownConsistencyError)) throw error;
-@@ -5472,7 +5755,12 @@ export class ChatGptBrowserWorker {
+@@ -5475,7 +5757,12 @@ export class ChatGptBrowserWorker {
              capturedResponse = true;
              await diagnostics.capture(page, "response-visible");
            }
@@ -613,7 +613,7 @@ index 1f1fc71..0a9539f 100644
              try {
                return markdownBuffer.observe(snapshot.markdownSegments);
              } catch (error) {
-@@ -5531,6 +5819,25 @@ export class ChatGptBrowserWorker {
+@@ -5534,6 +5821,25 @@ export class ChatGptBrowserWorker {
              if (snapshot.visibleText === "api_tool unavailable") {
                throw new Error("ChatGPT selected mode rejected the Codex Native MCP tool (api_tool unavailable)");
              }
@@ -639,7 +639,7 @@ index 1f1fc71..0a9539f 100644
              const final = (() => {
                try {
                  return markdownBuffer.finish();
-@@ -5642,6 +5949,7 @@ export class ChatGptBrowserWorker {
+@@ -5645,6 +5951,7 @@ export class ChatGptBrowserWorker {
        diagnostics.finish(diagnosticCompleted ? "completed" : "failed");
        submissionRejection.dispose();
        await streamDiagnostics.dispose();
@@ -680,7 +680,7 @@ index f09f536..321a98a 100644
              capabilities: turn.capabilities,
              ...(turn.nativeConnector ? { nativeConnector: true } : {}),
 diff --git a/src/adapters/chatgpt-web/prompt.ts b/src/adapters/chatgpt-web/prompt.ts
-index 3f12499..204e018 100644
+index 3ed1e4c..f17f349 100644
 --- a/src/adapters/chatgpt-web/prompt.ts
 +++ b/src/adapters/chatgpt-web/prompt.ts
 @@ -658,6 +658,7 @@ export function compileChatGptWebPrompt(

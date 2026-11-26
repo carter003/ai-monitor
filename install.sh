@@ -23,7 +23,10 @@ fi
 # 安装 herdr-usage 与 import_prices 到 ~/.local/bin (可选便利)
 herdr_usage_bin="$workspace_dir/target/release/herdr-usage"
 if [ -x "$herdr_usage_bin" ]; then
-    install -m 755 -- "$herdr_usage_bin" "$install_bin_dir/herdr-usage"
+    temp_bin=$(mktemp "$install_bin_dir/.herdr-usage.XXXXXX")
+    trap 'rm -f -- "$temp_bin"' EXIT HUP INT TERM
+    install -m 755 -- "$herdr_usage_bin" "$temp_bin"
+    mv -f -- "$temp_bin" "$install_bin_dir/herdr-usage"
     printf '已安装采集器:   %s/herdr-usage\n' "$install_bin_dir"
 fi
 
