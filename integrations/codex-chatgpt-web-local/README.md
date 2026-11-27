@@ -2,7 +2,9 @@
 
 入口为 `upgrade.mjs`，补丁为本目录的 `local-fixes.patch`。适用于本机 Linux AppImage、Node.js 22+、用户级 `codex-web-gpt.service`。脚本不选择 latest，不 reset、stash 或覆盖已有 dirty source；所有子进程使用 `spawn(executable, argv)`，不拼接 shell 命令。
 
-**当前 Agent 的通信依赖这个服务，升级默认使用 `stage`，由用户正常退出并重开 Launcher 后再 `finalize`。不要从当前对话执行停服务或重启。** 当前运行信息和是否等待重启，以 `status` 为准；验证快照见 [verification.json](./verification.json)。
+**当前状态（2026-11-27）：按用户要求已停用。** Codex 已通过 `route disconnect` 解除本地 bridge 路由，`codex-web-gpt.service` 已停止并禁用，GNOME autostart 项 `~/.config/autostart/dev.codexwebgpt.launcher.desktop` 已改名为 `.disabled`。Codex 直连官方 API，`codex login status` 为 `Logged in using ChatGPT`，实机 `codex exec` 返回 `provider: openai` 并正常完成。安装包、receipt、Runtime、源码和补丁均保留；此时 `status` 因 `/healthz` 不可达返回非零并显示 `drift: "fetch failed"`，这是服务未运行的预期结果，不是安装损坏。
+
+重新启用：把 `.disabled` 改回原名，执行 `systemctl --user enable --now codex-web-gpt`， Launcher 完成登录后执行 `~/.local/bin/codex-chatgpt-web route connect`，再完全重启 Codex。重新启用前当前 Agent 的通信不依赖该服务；停服务约束针对的是通信依赖它的会话。
 
 ## 修复内容与源码基线
 
