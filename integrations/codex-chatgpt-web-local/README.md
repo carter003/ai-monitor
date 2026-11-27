@@ -2,13 +2,25 @@
 
 入口为 `upgrade.mjs`，补丁为本目录的 `local-fixes.patch`。适用于本机 Linux AppImage、Node.js 22+、用户级 `codex-web-gpt.service`。脚本不选择 latest，不 reset、stash 或覆盖已有 dirty source；所有子进程使用 `spawn(executable, argv)`，不拼接 shell 命令。
 
-**当前状态（2026-11-27）：按用户要求已停用。** Codex 已通过 `route disconnect` 解除本地 bridge 路由，`codex-web-gpt.service` 已停止并禁用，GNOME autostart 项 `~/.config/autostart/dev.codexwebgpt.launcher.desktop` 已改名为 `.disabled`。安装包、receipt、Runtime、源码和补丁均保留；此时 `status` 因 `/healthz` 不可达返回非零并显示 `drift: "fetch failed"`，这是服务未运行的预期结果，不是安装损坏。
+**当前状态（2026-11-27）：按用户要求已停用。** Codex 已通过 `route disconnect` 解除本地 bridge 路由，`codex-web-gpt.service` 已停止并禁用，GNOME autostart 项 `~/.config/autostart/dev.codexwebgpt.launcher.desktop` 已改名为 `.disabled`。6.2.0 的安装包、活动 receipt、Runtime、源码和补丁均保留；历史版本的安装物已清理，范围见下文“停用后的清理”。此时 `status` 因 `/healthz` 不可达返回非零并显示 `drift: "fetch failed"`，这是服务未运行的预期结果，不是安装损坏。
 
-**`route disconnect` 只改 `config.toml`，不清模型缓存。** bridge 的模型列表写在 `~/.codex/models_cache.json`，停服务后必须备份并删除该文件，否则 `/model` 继续显示缓存内容。已删除，备份为 `~/.codex/models_cache.json.bak-before-codex-web-gpt-off`。同目录的 `models_cache wm.json` 是 2026-08 的旧文件，与 bridge 无关，未改动。
+**`route disconnect` 只改 `config.toml`，不清模型缓存。** bridge 的模型列表写在 `~/.codex/models_cache.json`，停服务后必须删除该文件，否则 `/model` 继续显示缓存内容；新守护进程启动后会从官方端点重新拉取。已删除。同目录的 `models_cache wm.json` 是 2026-08 的旧文件，与 bridge 无关，未改动。
 
 **停服务后还必须重启 Codex 常驻进程。** `~/.codex/app-server-daemon` 的 `app-server --managed-daemon` 和所有已打开的 TUI 都在内存里持有旧的 `openai_base_url`，会持续重试 `http://127.0.0.1:17841/v1/models`，表现为进入 Codex 卡顿。处理方式：结束全部旧 TUI，`SIGTERM` 守护进程本体；保留 `app-server daemon pid-update-loop`，它负责在下次启动 Codex 时按新配置重新拉起守护进程。
 
 直连验证（守护进程重启后）：`codex login status` 为 `Logged in using ChatGPT`，实机 `codex exec` 7.7 秒返回 `provider: openai` 和 `OK`；重启后日志中 `17841` 引用 0 次、模型刷新失败 0 次（重启前最后两分钟 73 次）。`service_tier = "fast"` 直连可用，未改动。新拉取的 `models_cache.json` 为 12 条、11 个可见，`etag` 与 bridge 写入的那份相同，说明这是账号本身的官方目录，不是 web 专属模型。
+
+**停用后的清理（2026-11-27，用户确认范围）。** 共释放约 2.8 GB。已删除：
+
+- 本次停用产生的临时备份：`~/.codex/config.toml.bak.before-codex-web-gpt-off-*`、`~/.codex/models_cache.json.bak-before-codex-web-gpt-off`。
+- `~/.local/lib/codex-web-gpt/local/6.1.19-*` 共 5 个历史安装目录，含 7 份 receipt 及其中的 Runtime 备份。
+- 仓库 `.state/sources/6.2.0-d82aa743ea9d-ssNzrU`，上一轮构建的源码副本。
+- `~/.codex-chatgpt-web/versions/` 下的 `6.1.3`、`6.1.4`、`6.1.17`、`6.1.18` Runtime，均无任何凭据引用。
+- `/tmp` 下的直连验证临时目录和 `/run/user/1000/codex-web-gpt-appimage-1000`。
+
+保留：`~/.local/lib/codex-web-gpt/local/6.2.0-930c4806…de9dd91`（活动 receipt 及其 `runtimeBackup`）、`~/.local/lib/codex-web-gpt/run-appimage`、`~/.codex-chatgpt-web/versions/6.1.19-linux-x64`（6.2.0 receipt 的 `before.runtimeRoot`）、官方 AppImage 6.1.2–6.1.19、`~/.config/Codex Web GPT` 和 `diagnostics`（含网页登录态）、`~/.local/bin` 下的 `codex-web-gpt`、`codex-chatgpt-web`、`codex-web-start`、`codex-web-stop`。
+
+清理的影响：`verification.json` 的 `history` 中两条 6.1.19 记录（`03c085f9…`、`35edadc7…`）对应的本地安装凭据已不存在，仅作文字记录。6.1.19 的各自定义 receipt 已删，不能再 `rollback --receipt` 到它们；回滚到 6.1.19 Runtime 和官方 AppImage 的路径不受影响。
 
 重新启用：把 `.disabled` 改回原名，执行 `systemctl --user enable --now codex-web-gpt`， Launcher 完成登录后执行 `~/.local/bin/codex-chatgpt-web route connect`，再完全重启 Codex。重新启用前当前 Agent 的通信不依赖该服务；停服务约束针对的是通信依赖它的会话。
 
