@@ -18,7 +18,7 @@
 - `~/.codex-chatgpt-web/versions/` 下的 `6.1.3`、`6.1.4`、`6.1.17`、`6.1.18` Runtime，均无任何凭据引用。
 - `/tmp` 下的直连验证临时目录和 `/run/user/1000/codex-web-gpt-appimage-1000`。
 
-保留：`~/.local/lib/codex-web-gpt/local/6.2.0-930c4806…de9dd91`（活动 receipt 及其 `runtimeBackup`）、`~/.local/lib/codex-web-gpt/run-appimage`、`~/.codex-chatgpt-web/versions/6.1.19-linux-x64`（6.2.0 receipt 的 `before.runtimeRoot`）、官方 AppImage 6.1.2–6.1.19、`~/.config/Codex Web GPT` 和 `diagnostics`（含网页登录态）、`~/.local/bin` 下的 `codex-web-gpt`、`codex-chatgpt-web`、`codex-web-start`、`codex-web-stop`。
+保留：`~/.local/lib/codex-web-gpt/local/6.2.0-930c48063ff56e4ef9c95a8336a68a8231df0532e0da7e35ea5ea8cb5de9dd91`（活动 receipt 及其 `runtimeBackup`）、`~/.local/lib/codex-web-gpt/run-appimage`、`~/.codex-chatgpt-web/versions/6.1.19-linux-x64`（6.2.0 receipt 的 `before.runtimeRoot`）、官方 AppImage 6.1.2–6.1.19、`~/.config/Codex Web GPT` 和 `diagnostics`（含网页登录态）、`~/.local/bin` 下的 `codex-web-gpt`、`codex-chatgpt-web`、`codex-web-start`、`codex-web-stop`。
 
 清理的影响：`verification.json` 的 `history` 中两条 6.1.19 记录（`03c085f9…`、`35edadc7…`）对应的本地安装凭据已不存在，仅作文字记录。6.1.19 的各自定义 receipt 已删，不能再 `rollback --receipt` 到它们；回滚到 6.1.19 Runtime 和官方 AppImage 的路径不受影响。
 
