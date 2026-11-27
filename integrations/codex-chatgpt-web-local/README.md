@@ -20,7 +20,7 @@
 
 保留：`~/.local/lib/codex-web-gpt/local/6.2.0-930c48063ff56e4ef9c95a8336a68a8231df0532e0da7e35ea5ea8cb5de9dd91`（活动 receipt 及其 `runtimeBackup`）、`~/.local/lib/codex-web-gpt/run-appimage`、`~/.codex-chatgpt-web/versions/6.1.19-linux-x64`（6.2.0 receipt 的 `before.runtimeRoot`）、官方 AppImage 6.1.2–6.1.19、`~/.config/Codex Web GPT` 和 `diagnostics`（含网页登录态）、`~/.local/bin` 下的 `codex-web-gpt`、`codex-chatgpt-web`、`codex-web-start`、`codex-web-stop`。
 
-清理的影响：`verification.json` 的 `history` 中两条 6.1.19 记录（`03c085f9…`、`35edadc7…`）对应的本地安装凭据已不存在，仅作文字记录。6.1.19 的各自定义 receipt 已删，不能再 `rollback --receipt` 到它们；回滚到 6.1.19 Runtime 和官方 AppImage 的路径不受影响。
+清理的影响：`verification.json` 的 `history` 中两条 6.1.19 记录（`03c085f961d881276281bc7d5c4c76e06a3229d3a7a9f2d69b433dfbbf4343c1`、`35edadc7761877137c886de702323e437dede9776543f789d0a9c255d7c6aa81`）对应的本地安装凭据已不存在，仅作文字记录。6.1.19 的各自定义 receipt 已删，不能再 `rollback --receipt` 到它们；回滚到 6.1.19 Runtime 和官方 AppImage 的路径不受影响。
 
 重新启用：把 `.disabled` 改回原名，执行 `systemctl --user enable --now codex-web-gpt`， Launcher 完成登录后执行 `~/.local/bin/codex-chatgpt-web route connect`，再完全重启 Codex。重新启用前当前 Agent 的通信不依赖该服务；停服务约束针对的是通信依赖它的会话。
 
