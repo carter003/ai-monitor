@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+package=$(dirname "$(readlink -f "$0")")
+if [ "$package/official-current" -ef "$package/upstream" ] && [ "${1:-}" != update ]; then
+    exec "$package/bin/codex" "$@"
+fi
+exec "$package/official-current" "$@"

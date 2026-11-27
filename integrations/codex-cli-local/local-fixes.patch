@@ -1,0 +1,161 @@
+diff --git a/codex-rs/tui/src/app/session_lifecycle.rs b/codex-rs/tui/src/app/session_lifecycle.rs
+--- a/codex-rs/tui/src/app/session_lifecycle.rs
++++ b/codex-rs/tui/src/app/session_lifecycle.rs
+@@ -1372,6 +1372,11 @@
+         // Start a fresh in-memory session while preserving resumability via persisted rollout
+         // history. If an initial message is provided, `enqueue_primary_thread_session` suppresses it
+         // until the new session is configured and any replayed turns have been rendered.
++        // The approved-plan handoff also reports Clear, but starts with fresh defaults.
++        let keep_model = matches!(
++            start,
++            FreshSessionStart::PreserveCurrentView(Some(ThreadStartSource::Clear))
++        );
+         let (session_start_source, mut draft) = match start {
+             FreshSessionStart::NewConversation => (
+                 None,
+@@ -1387,7 +1392,7 @@
+         let prepared = StartupDraftPump::run_during_navigation(
+             draft.as_mut(),
+             tui,
+-            Box::pin(self.prepare_fresh_session(app_server, session_start_source)),
++            Box::pin(self.prepare_fresh_session(app_server, session_start_source, keep_model)),
+         )
+         .await;
+         match prepared {
+@@ -1487,13 +1492,22 @@
+         &mut self,
+         app_server: &mut AppServerSession,
+         session_start_source: Option<ThreadStartSource>,
++        keep_model: bool,
+     ) -> Result<PreparedFreshSession> {
+-        let (config, local_settings) =
++        let (mut config, local_settings) =
+             crate::boxed_future!(self.load_new_session_config(app_server))
+                 .await
+                 .map_err(|err| {
+                     color_eyre::eyre::eyre!("Failed to read new session defaults: {err}")
+                 })?;
++        if keep_model
++            && self.chat_widget.thread_id().is_some()
++            && app_server.thread_params_mode().settings_owner()
++                == crate::app_server_session::ThreadSettingsOwner::Client
++        {
++            config.model = Some(self.chat_widget.current_model().to_owned());
++            config.model_reasoning_effort = self.chat_widget.current_reasoning_effort();
++        }
+         let started = crate::boxed_future!(app_server.start_thread_with_session_start_source(
+             &self.local_settings,
+             &config,
+@@ -1524,7 +1538,11 @@
+         }
+         self.cancel_cloud_inventory_refresh(app_server).await;
+         let prepared = match self
+-            .prepare_fresh_session(app_server, Some(ThreadStartSource::Clear))
++            .prepare_fresh_session(
++                app_server,
++                Some(ThreadStartSource::Clear),
++                /*keep_model*/ false,
++            )
+             .await
+         {
+             Ok(prepared) => prepared,
+diff --git a/codex-rs/tui/src/app/tests/new_session_tests.rs b/codex-rs/tui/src/app/tests/new_session_tests.rs
+--- a/codex-rs/tui/src/app/tests/new_session_tests.rs
++++ b/codex-rs/tui/src/app/tests/new_session_tests.rs
+@@ -588,6 +588,7 @@
+ async fn replacement_uses_server_defaults_and_preserves_explicit_launch_settings() -> Result<()> {
+     for (managed_effort, explicit, expected_model, expected_effort) in [
+         (None, "saved", "server-model", "high"),
++        (None, "clear", "current-thread-model", "medium"),
+         (Some("medium"), "model", "cli-model", "high"),
+         (Some("medium"), "effort", "server-model", "low"),
+         (None, "profile_model", "profile-model", "high"),
+@@ -659,6 +660,11 @@
+                 ..test_thread_session(ThreadId::new(), client_home.path().to_path_buf())
+             });
+         match explicit {
++            "clear" => {
++                app.chat_widget.set_model("current-thread-model");
++                app.chat_widget
++                    .set_reasoning_effort(Some(ReasoningEffortConfig::Medium));
++            }
+             "model" => app.harness_overrides.model = Some("cli-model".to_string()),
+             "effort" => app.cli_kv_overrides.push((
+                 "model_reasoning_effort".to_string(),
+@@ -709,14 +715,19 @@
+             app.open_agents_overview(&server);
+         }
+         let mut tui = crate::tui::test_support::make_test_tui()?;
+-        app.start_fresh_session(
+-            &mut tui,
+-            &mut server,
+-            FreshSessionStart::PreserveCurrentView(None),
+-            /*initial_user_message*/ None,
+-            /*new_thread_name*/ None,
+-        )
+-        .await;
++        if explicit == "clear" {
++            app.handle_event(&mut tui, &mut server, AppEvent::ClearUi { name: None })
++                .await?;
++        } else {
++            app.start_fresh_session(
++                &mut tui,
++                &mut server,
++                FreshSessionStart::PreserveCurrentView(None),
++                /*initial_user_message*/ None,
++                /*new_thread_name*/ None,
++            )
++            .await;
++        }
+         let starts = recorded_params(&requests, "thread/start");
+         assert_eq!(starts.len(), 1);
+         assert_eq!(
+diff --git a/codex-rs/tui/src/chatwidget/settings.rs b/codex-rs/tui/src/chatwidget/settings.rs
+--- a/codex-rs/tui/src/chatwidget/settings.rs
++++ b/codex-rs/tui/src/chatwidget/settings.rs
+@@ -755,7 +755,14 @@
+         }
+     }
+ 
+-    pub(crate) fn set_collaboration_mask_from_user_action(&mut self, mask: CollaborationModeMask) {
++    pub(crate) fn set_collaboration_mask_from_user_action(
++        &mut self,
++        mut mask: CollaborationModeMask,
++    ) {
++        if mask.mode == Some(ModeKind::Plan) {
++            // Keep the selected model while letting Plan choose its reasoning effort.
++            mask.model = Some(self.current_model().to_owned());
++        }
+         self.set_collaboration_mask(mask);
+         self.submit_collaboration_mode_settings_update();
+     }
+diff --git a/codex-rs/tui/src/chatwidget/tests/plan_mode.rs b/codex-rs/tui/src/chatwidget/tests/plan_mode.rs
+--- a/codex-rs/tui/src/chatwidget/tests/plan_mode.rs
++++ b/codex-rs/tui/src/chatwidget/tests/plan_mode.rs
+@@ -1401,6 +1401,26 @@
+ }
+ 
+ #[tokio::test]
++async fn entering_plan_keeps_selected_model_over_catalog_preset() {
++    let (mut chat, _rx, _ops) = make_chatwidget_manual(Some("selected")).await;
++    chat.set_feature_enabled(Feature::CollaborationModes, true);
++    let plan = Arc::make_mut(&mut chat.model_catalog)
++        .collaboration_modes
++        .iter_mut()
++        .find(|mask| mask.mode == Some(ModeKind::Plan))
++        .expect("Plan preset");
++    plan.model = Some("other-model".into());
++    chat.set_plan_mode_reasoning_effort(Some(ReasoningEffortConfig::High));
++    chat.dispatch_command(SlashCommand::Plan);
++    assert_eq!(chat.active_collaboration_mode_kind(), ModeKind::Plan);
++    assert_eq!(chat.current_model(), "selected");
++    assert_eq!(
++        chat.current_reasoning_effort(),
++        Some(ReasoningEffortConfig::High)
++    );
++}
++
++#[tokio::test]
+ async fn plan_slash_command_switches_to_plan_mode() {
+     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+     chat.set_feature_enabled(Feature::CollaborationModes, /*enabled*/ true);

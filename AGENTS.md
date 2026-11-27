@@ -2,6 +2,10 @@
 
 保留用户已有的未提交修改。Rust 看板、用量采集器及各本地集成按各自目录维护；不要为了一个集成的变更重写其他模块。
 
+## 全局 Codex CLI 升级
+
+收到“升级 Codex CLI”或“迁移 `/clear`、Plan 模型保留补丁”的请求时，按[全局 Codex CLI 升级报告](integrations/codex-cli-local/README.md)操作。`codex update` 更新官方基线；若用户已经执行过，从核对已安装版本开始，随后迁移补丁、构建、验证并安装到当前用户的全局入口。
+
 ## Codex Web GPT 本地修复与升级
 
 用户指定本仓库作为 Codex Web GPT 本地补丁和后续升级的维护入口。收到“升级 Codex Web GPT”“更新本地 Native2 修复”等请求时，按本节执行完整的准备、验证、打包、安装和健康检查；不要直接换成未携带补丁的官方包。
